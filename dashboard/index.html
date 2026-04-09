@@ -15,18 +15,43 @@
     h2 { font-size: 1.15em; color: #f0f6fc; margin-top: 32px; margin-bottom: 8px; }
     .chart-wrap { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 20px; overflow-x: auto; margin-bottom: 16px; }
     .chart-inner { min-width: 800px; height: 500px; }
-    .stats { display: flex; gap: 24px; margin-top: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+    .stats { display: flex; gap: 16px; margin-top: 8px; margin-bottom: 12px; flex-wrap: wrap; }
     .stat { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 12px 20px; }
-    .stat-value { font-size: 1.6em; font-weight: 700; color: #58a6ff; }
+    .stat-value { font-size: 1.6em; font-weight: 700; }
     .stat-label { font-size: 0.8em; color: #8b949e; }
-    .char-section { margin-bottom: 24px; }
+    .char-section { margin-bottom: 32px; }
     .empty-msg { color: #8b949e; font-style: italic; padding: 24px; text-align: center; }
+
+    /* View toggle */
+    .view-toggle { display: inline-flex; gap: 0; margin-bottom: 16px; border-radius: 6px; overflow: hidden; border: 1px solid #30363d; }
+    .view-btn { background: #161b22; color: #8b949e; border: none; padding: 6px 16px; font-size: 0.82em; cursor: pointer; transition: all 0.2s; font-family: inherit; }
+    .view-btn:hover { background: #21262d; color: #c9d1d9; }
+    .view-btn.active { background: #58a6ff20; color: #58a6ff; font-weight: 600; }
+
+    /* A/B comparison stats */
+    .ab-stats { display: flex; gap: 12px; margin: 12px 0; flex-wrap: wrap; }
+    .ab-stat-box { flex: 1; min-width: 180px; background: #161b22; border-radius: 8px; padding: 14px 16px; }
+    .ab-stat-box.profile-a { border: 1px solid rgba(34,197,94,0.25); }
+    .ab-stat-box.profile-b { border: 1px solid rgba(139,92,246,0.25); }
+    .ab-stat-box.profile-unknown { border: 1px solid #30363d; }
+    .ab-stat-box .profile-tag { font-size: 0.7em; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
+    .ab-stat-box.profile-a .profile-tag { color: #3fb950; }
+    .ab-stat-box.profile-b .profile-tag { color: #d2a8ff; }
+    .ab-stat-box.profile-unknown .profile-tag { color: #8b949e; }
+    .ab-stat-box .ab-value { font-size: 1.4em; font-weight: 700; color: #f0f6fc; }
+    .ab-stat-box .ab-detail { font-size: 0.75em; color: #8b949e; margin-top: 2px; }
   </style>
 </head>
 <body>
   <div class="container">
     <h1>STS2 Bot Progress</h1>
-    <p class="subtitle">Run results across generations of improvements</p>
+    <p class="subtitle">Run results across generations — grouped by character, split by A/B config profile</p>
+
+    <div class="view-toggle">
+      <button class="view-btn active" onclick="setView('all')">All Runs</button>
+      <button class="view-btn" onclick="setView('ab')">A/B Comparison</button>
+    </div>
+
     <div id="sections"></div>
   </div>
 
@@ -37,16 +62,10 @@
       { floor: 52, label: 'Act 3 Boss', color: '#da3633' },
     ];
 
-    const GEN_COLORS = {
-      gen1: '#8b949e',
-      gen2: '#58a6ff',
-      gen3: '#3fb950',
-      gen4: '#d2a8ff',
-      gen5: '#f0883e',
-      gen6: '#f47067',
-      gen7: '#ff7b72',
-      gen8: '#ffa657',
-      current: '#79c0ff',
+    const PROFILE_COLORS = {
+      'a': { bar: '#3fb95090', border: '#3fb950', label: 'A (Champion)', line: '#3fb950' },
+      'b': { bar: '#d2a8ff70', border: '#d2a8ff', label: 'B (Challenger)', line: '#d2a8ff' },
+      '?': { bar: '#8b949e50', border: '#8b949e', label: 'Pre-A/B', line: '#8b949e' },
     };
 
     const CHAR_META = {
@@ -54,17 +73,35 @@
       'The Silent':   { key: 'silent',   label: 'Silent',   accent: '#3fb950' },
     };
 
+    let currentView = 'all';
+    let globalData = null;
+
     fetch('data.json')
       .then(r => r.json())
-      .then(data => render(data));
+      .then(data => { globalData = data; render(); });
+
+    function setView(view) {
+      currentView = view;
+      document.querySelectorAll('.view-btn').forEach(b => b.classList.remove('active'));
+      event.target.classList.add('active');
+      render();
+    }
 
     function normalizeChar(c) {
       if (!c || c === '?') return 'The Ironclad';
       return c;
     }
 
-    function render({ runs, gen_boundaries }) {
-      // Group runs by character
+    function avg(arr) {
+      if (!arr.length) return 0;
+      return arr.reduce((a, b) => a + b, 0) / arr.length;
+    }
+
+    function render() {
+      if (!globalData) return;
+      const { runs } = globalData;
+
+      // Group by character
       const byChar = {};
       runs.forEach(r => {
         const ch = normalizeChar(r.character);
@@ -72,7 +109,7 @@
         byChar[ch].push(r);
       });
 
-      // Render Ironclad first, then others alphabetically
+      // Render characters in consistent order
       const charOrder = Object.keys(byChar).sort((a, b) => {
         if (a === 'The Ironclad') return -1;
         if (b === 'The Ironclad') return 1;
@@ -82,11 +119,11 @@
       const container = document.getElementById('sections');
       container.innerHTML = '';
 
-      charOrder.forEach((charName, ci) => {
+      charOrder.forEach(charName => {
         const charRuns = byChar[charName];
         const meta = CHAR_META[charName] || { key: 'unknown', label: charName, accent: '#58a6ff' };
 
-        // Re-number runs within this character (1-indexed)
+        // Re-index
         charRuns.forEach((r, i) => r._idx = i);
 
         const section = document.createElement('div');
@@ -98,156 +135,269 @@
         h2.style.color = meta.accent;
         section.appendChild(h2);
 
-        // Stats
-        const statsDiv = document.createElement('div');
-        statsDiv.className = 'stats';
-        const floors = charRuns.map(r => r.floor);
-        const best = Math.max(...floors);
-        const avg = (floors.reduce((a, b) => a + b, 0) / floors.length).toFixed(1);
-        const recent10 = floors.slice(-10);
-        const recentAvg = (recent10.reduce((a, b) => a + b, 0) / recent10.length).toFixed(1);
-        statsDiv.innerHTML = `
-          <div class="stat"><div class="stat-value">${charRuns.length}</div><div class="stat-label">Total Runs</div></div>
-          <div class="stat"><div class="stat-value">${best}</div><div class="stat-label">Best Floor</div></div>
-          <div class="stat"><div class="stat-value">${avg}</div><div class="stat-label">Avg Floor</div></div>
-          <div class="stat"><div class="stat-value">${recentAvg}</div><div class="stat-label">Last 10 Avg</div></div>
-        `;
-        section.appendChild(statsDiv);
+        if (currentView === 'ab') {
+          renderABSection(section, charRuns, meta);
+        } else {
+          renderAllSection(section, charRuns, meta);
+        }
 
-        // Chart
-        const wrap = document.createElement('div');
-        wrap.className = 'chart-wrap';
-        const inner = document.createElement('div');
-        inner.className = 'chart-inner';
-        inner.style.minWidth = Math.max(800, charRuns.length * 20) + 'px';
-        const canvas = document.createElement('canvas');
-        inner.appendChild(canvas);
-        wrap.appendChild(inner);
-        section.appendChild(wrap);
         container.appendChild(section);
-
-        renderChart(canvas, charRuns, meta);
       });
     }
 
-    function renderChart(canvas, runs, meta) {
-      // Annotations: act lines + gen boundaries
-      const annotations = {};
+    function renderAllSection(section, runs, meta) {
+      // Overall stats
+      const floors = runs.map(r => r.floor);
+      const best = Math.max(...floors);
+      const avgFloor = avg(floors).toFixed(1);
+      const recent10 = floors.slice(-10);
+      const recentAvg = avg(recent10).toFixed(1);
 
+      const statsDiv = document.createElement('div');
+      statsDiv.className = 'stats';
+      statsDiv.innerHTML = `
+        <div class="stat"><div class="stat-value" style="color:${meta.accent}">${runs.length}</div><div class="stat-label">Total Runs</div></div>
+        <div class="stat"><div class="stat-value" style="color:${meta.accent}">${best}</div><div class="stat-label">Best Floor</div></div>
+        <div class="stat"><div class="stat-value" style="color:${meta.accent}">${avgFloor}</div><div class="stat-label">Avg Floor</div></div>
+        <div class="stat"><div class="stat-value" style="color:${meta.accent}">${recentAvg}</div><div class="stat-label">Last 10 Avg</div></div>
+      `;
+      section.appendChild(statsDiv);
+
+      // Chart: bars colored by profile
+      const wrap = document.createElement('div');
+      wrap.className = 'chart-wrap';
+      const inner = document.createElement('div');
+      inner.className = 'chart-inner';
+      inner.style.minWidth = Math.max(800, runs.length * 20) + 'px';
+      const canvas = document.createElement('canvas');
+      inner.appendChild(canvas);
+      wrap.appendChild(inner);
+      section.appendChild(wrap);
+
+      renderAllChart(canvas, runs, meta);
+    }
+
+    function renderAllChart(canvas, runs, meta) {
+      const annotations = {};
       const floors = runs.map(r => r.floor);
       const best = Math.max(...floors);
 
       ACT_FLOORS.forEach((act, i) => {
         annotations[`act${i}`] = {
-          type: 'line',
-          yMin: act.floor, yMax: act.floor,
-          borderColor: act.color + '60',
-          borderWidth: 1.5,
-          borderDash: [8, 4],
-          label: {
-            display: true,
-            content: act.label,
-            position: 'start',
-            color: act.color,
-            font: { size: 11, weight: 'bold' },
-            backgroundColor: '#161b22e0',
-            padding: 4,
-          },
-        };
-      });
-
-      // Gen boundaries
-      const genFirstIdx = {};
-      runs.forEach((r, idx) => {
-        if (!(r.gen in genFirstIdx)) genFirstIdx[r.gen] = idx;
-      });
-      const genNames = Object.keys(genFirstIdx).sort();
-      genNames.forEach((gen, i) => {
-        if (i === 0) return;
-        const idx = genFirstIdx[gen];
-        const genColor = GEN_COLORS[gen] || '#8b949e';
-        annotations[`gen${i}`] = {
-          type: 'line',
-          xMin: idx - 0.5, xMax: idx - 0.5,
-          borderColor: genColor + '80',
-          borderWidth: 1,
-          borderDash: [4, 4],
-          label: {
-            display: true,
-            content: gen,
-            position: 'center',
-            color: genColor,
-            font: { size: 10 },
-            backgroundColor: '#0d1117e0',
-            padding: 3,
-          },
+          type: 'line', yMin: act.floor, yMax: act.floor,
+          borderColor: act.color + '60', borderWidth: 1.5, borderDash: [8, 4],
+          label: { display: true, content: act.label, position: 'start', color: act.color, font: { size: 11, weight: 'bold' }, backgroundColor: '#161b22e0', padding: 4 },
         };
       });
 
       // 5-run moving average
       const movingAvg = runs.map((r, i) => {
         const window = runs.slice(Math.max(0, i - 4), i + 1);
-        return window.reduce((a, b) => a + b.floor, 0) / window.length;
+        return avg(window.map(w => w.floor));
       });
 
       new Chart(canvas, {
         type: 'bar',
         data: {
-          labels: runs.map(r => r.run_number),
+          labels: runs.map((r, i) => i + 1),
           datasets: [
             {
               label: 'Floor Reached',
-              data: runs.map(r => r.floor),
-              backgroundColor: runs.map(r => (GEN_COLORS[r.gen] || '#58a6ff') + '90'),
-              borderColor: runs.map(r => GEN_COLORS[r.gen] || '#58a6ff'),
-              borderWidth: 1,
-              borderRadius: 2,
-              order: 2,
+              data: floors,
+              backgroundColor: runs.map(r => {
+                const p = PROFILE_COLORS[r.config_profile] || PROFILE_COLORS['?'];
+                return p.bar;
+              }),
+              borderColor: runs.map(r => {
+                const p = PROFILE_COLORS[r.config_profile] || PROFILE_COLORS['?'];
+                return p.border;
+              }),
+              borderWidth: 1, borderRadius: 2, order: 2,
             },
             {
               label: '5-Run Avg',
               data: movingAvg,
-              type: 'line',
-              borderColor: meta.accent,
-              borderWidth: 2,
-              pointRadius: 0,
-              tension: 0.3,
-              order: 1,
+              type: 'line', borderColor: meta.accent, borderWidth: 2, pointRadius: 0, tension: 0.3, order: 1,
             },
           ],
         },
         options: {
-          responsive: true,
-          maintainAspectRatio: false,
+          responsive: true, maintainAspectRatio: false,
           interaction: { mode: 'index', intersect: false },
           plugins: {
             annotation: { annotations },
-            legend: {
-              labels: { color: '#8b949e', font: { size: 11 } },
-            },
+            legend: { labels: { color: '#8b949e', font: { size: 11 } } },
             tooltip: {
               callbacks: {
                 afterLabel: (ctx) => {
                   if (ctx.datasetIndex !== 0) return '';
                   const r = runs[ctx.dataIndex];
-                  return `Gen: ${r.gen}\nCheckpoint: ${r.checkpoint || 'none'}`;
+                  const p = r.config_profile === 'a' ? 'A (Champion)' : r.config_profile === 'b' ? 'B (Challenger)' : 'Pre-A/B';
+                  return `Profile: ${p}\nCheckpoint: ${r.checkpoint || 'none'}\nGen: ${r.gen}`;
                 },
               },
             },
           },
           scales: {
-            x: {
-              title: { display: true, text: 'Run #', color: '#8b949e' },
-              ticks: { color: '#8b949e', maxTicksLimit: 30 },
-              grid: { color: '#21262d' },
+            x: { title: { display: true, text: 'Run #', color: '#8b949e' }, ticks: { color: '#8b949e', maxTicksLimit: 30 }, grid: { color: '#21262d' } },
+            y: { title: { display: true, text: 'Floor Reached', color: '#8b949e' }, ticks: { color: '#8b949e' }, grid: { color: '#21262d' }, min: 0, max: Math.max(best + 5, 55) },
+          },
+        },
+      });
+    }
+
+    function renderABSection(section, runs, meta) {
+      // Split by profile
+      const profileA = runs.filter(r => r.config_profile === 'a');
+      const profileB = runs.filter(r => r.config_profile === 'b');
+      const profileUnknown = runs.filter(r => r.config_profile !== 'a' && r.config_profile !== 'b');
+
+      // A/B stat boxes
+      const abStats = document.createElement('div');
+      abStats.className = 'ab-stats';
+
+      function makeStatBox(label, profileClass, profileRuns) {
+        const floors = profileRuns.map(r => r.floor);
+        const box = document.createElement('div');
+        box.className = `ab-stat-box ${profileClass}`;
+        if (floors.length === 0) {
+          box.innerHTML = `<div class="profile-tag">${label}</div><div class="ab-value" style="color:#8b949e">No data</div>`;
+        } else {
+          const a = avg(floors).toFixed(1);
+          const best = Math.max(...floors);
+          box.innerHTML = `
+            <div class="profile-tag">${label}</div>
+            <div class="ab-value">${a} avg</div>
+            <div class="ab-detail">${floors.length} runs &middot; best: ${best} &middot; range: ${Math.min(...floors)}-${best}</div>
+          `;
+        }
+        return box;
+      }
+
+      abStats.appendChild(makeStatBox('A Champion', 'profile-a', profileA));
+      abStats.appendChild(makeStatBox('B Challenger', 'profile-b', profileB));
+      if (profileUnknown.length > 0) {
+        abStats.appendChild(makeStatBox('Pre-A/B', 'profile-unknown', profileUnknown));
+      }
+
+      // Delta badge
+      if (profileA.length > 0 && profileB.length > 0) {
+        const aAvg = avg(profileA.map(r => r.floor));
+        const bAvg = avg(profileB.map(r => r.floor));
+        const delta = bAvg - aAvg;
+        const sign = delta >= 0 ? '+' : '';
+        const cls = delta > 0.5 ? 'color:#3fb950' : delta < -0.5 ? 'color:#f47067' : 'color:#e3b341';
+        const deltaDiv = document.createElement('div');
+        deltaDiv.style.cssText = 'text-align:center; margin:8px 0; font-size:0.9em; font-weight:600;';
+        deltaDiv.innerHTML = `<span style="${cls}">B vs A: ${sign}${delta.toFixed(1)} floors</span>`;
+        abStats.appendChild(deltaDiv);
+      }
+
+      section.appendChild(abStats);
+
+      // Chart: side-by-side A vs B
+      const wrap = document.createElement('div');
+      wrap.className = 'chart-wrap';
+      const inner = document.createElement('div');
+      inner.className = 'chart-inner';
+      const maxRuns = Math.max(profileA.length, profileB.length, profileUnknown.length);
+      inner.style.minWidth = Math.max(800, maxRuns * 40) + 'px';
+      const canvas = document.createElement('canvas');
+      inner.appendChild(canvas);
+      wrap.appendChild(inner);
+      section.appendChild(wrap);
+
+      renderABChart(canvas, profileA, profileB, profileUnknown, meta);
+    }
+
+    function renderABChart(canvas, profileA, profileB, profileUnknown, meta) {
+      const annotations = {};
+      const allFloors = [...profileA, ...profileB, ...profileUnknown].map(r => r.floor);
+      const best = allFloors.length ? Math.max(...allFloors) : 20;
+
+      ACT_FLOORS.forEach((act, i) => {
+        annotations[`act${i}`] = {
+          type: 'line', yMin: act.floor, yMax: act.floor,
+          borderColor: act.color + '60', borderWidth: 1.5, borderDash: [8, 4],
+          label: { display: true, content: act.label, position: 'start', color: act.color, font: { size: 11, weight: 'bold' }, backgroundColor: '#161b22e0', padding: 4 },
+        };
+      });
+
+      // Use max runs as x-axis length
+      const maxLen = Math.max(profileA.length, profileB.length, profileUnknown.length);
+      const labels = Array.from({ length: maxLen }, (_, i) => i + 1);
+
+      const datasets = [];
+
+      if (profileA.length > 0) {
+        datasets.push({
+          label: 'A (Champion)',
+          data: profileA.map(r => r.floor),
+          backgroundColor: '#3fb95070', borderColor: '#3fb950', borderWidth: 1, borderRadius: 2,
+        });
+        // A moving average
+        const aAvgs = profileA.map((r, i) => {
+          const win = profileA.slice(Math.max(0, i - 2), i + 1);
+          return avg(win.map(w => w.floor));
+        });
+        datasets.push({
+          label: 'A 3-Run Avg', data: aAvgs, type: 'line',
+          borderColor: '#3fb950', borderWidth: 2, borderDash: [4, 4], pointRadius: 0, tension: 0.3,
+        });
+      }
+
+      if (profileB.length > 0) {
+        datasets.push({
+          label: 'B (Challenger)',
+          data: profileB.map(r => r.floor),
+          backgroundColor: '#d2a8ff60', borderColor: '#d2a8ff', borderWidth: 1, borderRadius: 2,
+        });
+        const bAvgs = profileB.map((r, i) => {
+          const win = profileB.slice(Math.max(0, i - 2), i + 1);
+          return avg(win.map(w => w.floor));
+        });
+        datasets.push({
+          label: 'B 3-Run Avg', data: bAvgs, type: 'line',
+          borderColor: '#d2a8ff', borderWidth: 2, borderDash: [4, 4], pointRadius: 0, tension: 0.3,
+        });
+      }
+
+      if (profileUnknown.length > 0) {
+        datasets.push({
+          label: 'Pre-A/B',
+          data: profileUnknown.map(r => r.floor),
+          backgroundColor: '#8b949e40', borderColor: '#8b949e', borderWidth: 1, borderRadius: 2,
+        });
+      }
+
+      new Chart(canvas, {
+        type: 'bar',
+        data: { labels, datasets },
+        options: {
+          responsive: true, maintainAspectRatio: false,
+          interaction: { mode: 'index', intersect: false },
+          plugins: {
+            annotation: { annotations },
+            legend: { labels: { color: '#8b949e', font: { size: 11 } } },
+            tooltip: {
+              callbacks: {
+                afterLabel: (ctx) => {
+                  const ds = ctx.dataset;
+                  if (ds.type === 'line') return '';
+                  let source;
+                  if (ds.label.startsWith('A')) source = profileA;
+                  else if (ds.label.startsWith('B')) source = profileB;
+                  else source = profileUnknown;
+                  const r = source[ctx.dataIndex];
+                  if (!r) return '';
+                  return `Checkpoint: ${r.checkpoint || 'none'}\nGen: ${r.gen}`;
+                },
+              },
             },
-            y: {
-              title: { display: true, text: 'Floor Reached', color: '#8b949e' },
-              ticks: { color: '#8b949e' },
-              grid: { color: '#21262d' },
-              min: 0,
-              max: Math.max(best + 5, 55),
-            },
+          },
+          scales: {
+            x: { title: { display: true, text: 'Run # (within profile)', color: '#8b949e' }, ticks: { color: '#8b949e' }, grid: { color: '#21262d' } },
+            y: { title: { display: true, text: 'Floor Reached', color: '#8b949e' }, ticks: { color: '#8b949e' }, grid: { color: '#21262d' }, min: 0, max: Math.max(best + 5, 55) },
           },
         },
       });

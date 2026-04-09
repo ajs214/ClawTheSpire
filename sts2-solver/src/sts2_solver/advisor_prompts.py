@@ -217,22 +217,16 @@ def build_card_reward_message(state: dict, game_data: GameDataDB) -> str:
         lines.append("Pick the card that best builds toward your archetype. "
                      "If none of the options fit your archetype or are high-quality, SKIP with skip_reward_cards.")
 
-    # Nudge toward defense if deck has none (character-aware)
-    if character == "silent":
-        _DEFENSE_CARDS = {"Untouchable", "Cloak and Dagger", "Leg Sweep", "Dodge and Roll",
-                          "Deflect", "Afterimage", "Calculated Gamble", "Dash", "Footwork",
-                          "Well-Laid Plans", "Haze"}
-    else:
-        _DEFENSE_CARDS = {"Shrug It Off", "Impervious", "Flame Barrier", "True Grit",
-                          "Power Through", "Metallicize", "Feel No Pain", "Ghostly Armor"}
-    if not (deck_names & _DEFENSE_CARDS):
+    # Nudge toward defense if deck has none (property-based detection)
+    from .deterministic_advisor import _is_defense_card
+    has_defense = any(_is_defense_card(n, character) for n in deck_names)
+    if not has_defense:
         run = state.get("run") or {}
         floor = run.get("floor", 0)
         if floor >= 4:
             lines.append("")
-            defense_examples = ", ".join(sorted(list(_DEFENSE_CARDS)[:4]))
-            lines.append(f"WARNING: Your deck has ZERO dedicated block cards. You need at least 1-2 "
-                         f"({defense_examples}) to survive elites and bosses. "
+            lines.append("WARNING: Your deck has ZERO dedicated block cards. You need at least 1-2 "
+                         "block/defense cards to survive elites and bosses. "
                          "Prioritize a block card if one is offered.")
 
     lines.append("")
@@ -475,22 +469,23 @@ def build_shop_message(state: dict, game_data: GameDataDB) -> str:
     if not any_affordable:
         lines.append(f"Nothing is affordable with {gold}g. Use close_shop_inventory to leave.")
     elif "remove_card_at_shop" in available:
-        lines.append("PRIORITY ORDER: 1) REMOVE A CARD (Strikes first, then Defends) — this is the most valuable thing in the shop! "
-                     "2) Buy a key relic if it fits your archetype. "
-                     "3) Buy a card ONLY if it is S-tier or A-tier below. "
-                     "4) Leave (close_shop_inventory) — save gold for future card removal and relics.")
+        lines.append("PRIORITY ORDER: 1) REMOVE the weakest card in your deck (Strikes/Defends first, "
+                     "then any card that doesn't fit your archetype or contribute meaningful value). "
+                     "2) Buy a relic that fits your archetype. "
+                     "3) Buy a card that scores well for your deck's direction (archetype fit + power). "
+                     "4) Buy a potion if HP is below 55%. "
+                     "5) Leave (close_shop_inventory) — save gold for future shops.")
     else:
         lines.append("Card removal already done or unavailable. "
                      "Buy a relic ONLY if it directly fits your archetype. "
-                     "Buy a card ONLY if it is S-tier or A-tier below. "
-                     "Do NOT buy potions — save gold for card removal and relics at future shops. "
-                     "Do NOT buy B-tier or unlisted cards — they bloat the deck. "
+                     "Buy a card that fits your archetype and has strong synergy. "
+                     "Buy a potion if HP is below 55% — surviving is more important than saving gold. "
                      "Otherwise leave (close_shop_inventory) and save your gold.")
 
     deck_size = len(_get_deck(state))
-    if deck_size >= 14:
-        lines.append(f"WARNING: Deck is already {deck_size} cards. Do NOT buy cards unless S-tier. "
-                     "A lean deck (12-13 cards) is much stronger than a bloated one.")
+    if deck_size >= 18:
+        lines.append(f"WARNING: Deck is already {deck_size} cards. Only buy cards that strongly fit "
+                     "your archetype. A focused 15-17 card deck is much stronger than a bloated one.")
 
     lines.append("")
     lines.append(f"CARD TIER LIST (only buy S or A tier):\n{tier_info}")

@@ -101,6 +101,8 @@ def solve_turn(
         for action in available:
             if action.action_type == "end_turn":
                 continue  # Already evaluated ending here
+            if action.card_idx is None:
+                continue  # Skip non-card actions (choose_card, use_potion, etc.)
 
             # Branch: deepcopy and play
             branch = deepcopy(current)
@@ -111,7 +113,7 @@ def solve_turn(
                     target_idx=action.target_idx,
                     card_db=card_db,
                 )
-            except (IndexError, ValueError) as exc:
+            except (IndexError, ValueError, TypeError) as exc:
                 import logging
                 logging.getLogger(__name__).debug(
                     "Skipping action %r: %s", action, exc

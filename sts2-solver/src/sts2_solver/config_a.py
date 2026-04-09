@@ -143,58 +143,79 @@ CARD_TIERS: dict[str, dict[str, list[str]]] = {
         # more valuable than single-target burst. Offering is the best card in
         # the game. The "holy trinity" (Corruption + Dark Embrace + Feel No Pain)
         # enables the strongest late-game engine.
+        # Cleaned April 2026: removed STS1 cards not in STS2 data.
         "S": [
             "Offering", "Demon Form", "Corruption", "Impervious",
             "Whirlwind", "Inflame", "Feel No Pain", "Dark Embrace",
         ],
         "A": [
             "Thunderclap", "Twin Strike", "Battle Trance", "Shrug It Off",
-            "Burning Pact", "Flame Barrier", "Spot Weakness", "Thrash",
+            "Burning Pact", "Flame Barrier", "Thrash",
             "Pommel Strike", "True Grit", "Barricade", "Rupture",
             "Hemokinesis", "Brand", "Feed", "Pact's End",
         ],
         "B": [
             "Uppercut", "Headbutt", "Iron Wave", "Body Slam",
-            "Breakthrough", "Armaments", "Carnage", "Bludgeon",
-            "Bloodletting", "Metallicize", "Inferno", "Juggernaut",
+            "Breakthrough", "Armaments", "Bludgeon",
+            "Bloodletting", "Inferno", "Juggernaut",
         ],
         "avoid": [
-            "Anger", "Setup Strike", "Clash", "Flex",
-            "Warcry", "Wild Strike", "Reckless Charge",
+            "Anger", "Setup Strike", "Clash",
         ],
     },
     "silent": {
-        # Based on Mobalytics Silent guide + 33-run analysis (gen6).
-        # Key findings: bot ignores Dash/Backstab/Well-Laid Plans/Leg Sweep/Footwork
-        # which are exactly the block scaling and front-loaded damage cards needed
-        # to survive Act 1. Archetype commitment is critical — mixed builds die early.
+        # Updated April 2026 from wiki.gg, Mobalytics, Nat1Gaming, PCGamesN guides.
+        # Sly is the strongest keyword — Master Planner + discard enablers dominate.
+        # Adrenaline is universally S-tier. After Image is elite with Shivs.
+        # Poison scales exponentially (n*(n+1)/2 total damage) — Noxious Fumes is
+        # the best sustained damage card. Keep decks THIN for Sly cycling.
         "S": [
-            "Accuracy", "Infinite Blades", "Tools of the Trade",
-            "Master Planner", "Knife Trap",
-            "Footwork",                   # Dexterity scaling — core block card
+            "Adrenaline",                 # Draw 2 + 1 energy, zero cost — universally #1
+            "Master Planner",             # Gives all Skills Sly — linchpin of best archetype
             "Well-Laid Plans",            # Retain best card — critical for consistency
-            "Dash",                       # 10 damage + 10 block — best Act 1 card
+            "Tools of the Trade",         # Draw + discard every turn — Sly engine
+            "Footwork",                   # Dexterity scaling — core block card
+            "Noxious Fumes",              # Auto-poison every turn — best sustained damage
+            "Wraith Form",                # Intangible — the best defensive card in the game
         ],
         "A": [
+            "Backflip",                   # Draw 2 + block — best utility card
+            "Acrobatics",                 # Draw 3 discard 1 — top draw + Sly trigger
+            "Dash",                       # 10 damage + 10 block — best Act 1 card
+            "Leg Sweep",                  # 12 damage + 12 block + Weak — top defensive
             "Backstab",                   # 11 free damage turn 1 — huge Act 1 tempo
-            "Leg Sweep",                  # 12 damage + 12 block + Weak — top defensive card
-            "Leading Strike", "Cloak and Dagger", "Blade Dance",
-            "Poisoned Stab", "Deadly Poison", "Acrobatics",
-            "Untouchable", "Flick-Flack", "Noxious Fumes",
-            "Accelerant", "Calculated Gamble", "Tactician",
-            "Burst", "Serpent Form",
+            "Blade Dance",                # 3-4 Shivs — defines the Shiv engine
+            "Cloak and Dagger",           # Shivs + block — dual purpose
+            "Calculated Gamble",          # Mass discard + redraw — Sly combo enabler
+            "Tactician",                  # Energy on discard — Sly economy card
+            "Accuracy",                   # Shivs deal +4 — but only in Shiv decks
+            "Infinite Blades",            # Free Shiv per turn — Shiv engine starter
+            "Deadly Poison",              # 5 base poison — efficient poison application
+            "Bouncing Flask",             # Poison to random enemies — good AoE poison
+            "Burst",                      # Double next skill — combo multiplier
             "Dodge and Roll",             # Block now + next turn — good defense
-            "Deflect",                    # Free block — never bad
+            "Prepared",                   # Draw 2 discard 1 — cheap Sly enabler
         ],
         "B": [
-            "Dagger Throw", "Ricochet", "Prepared", "Reflex",
-            "Speedster", "Abrasive", "Haze", "Outbreak",
-            "Bubble Bubble", "Mirage", "Fan of Knives",
-            "Hidden Daggers", "Finisher", "Afterimage",
-            "Catalyst",                   # Only good with heavy Poison commitment
+            "Knife Trap",                 # Conditional Shiv generation
+            "Dagger Throw",               # Draw + discard — cycling utility
+            "Reflex",                     # Draw on discard — Sly synergy piece
+            "Poisoned Stab",              # Damage + poison — decent filler
+            "Finisher",                   # Scales with cards played — Shiv payoff
+            "Hidden Daggers",             # Shiv generation
+            "Fan of Knives",              # AoE damage + draw — multi-enemy utility
+            "Deflect",                    # Free block — never bad
+            "Ricochet", "Speedster", "Abrasive", "Haze",
+            "Outbreak", "Bubble Bubble", "Mirage",
+            "Untouchable", "Flick-Flack",
+            "Accelerant",                 # Poison stays up — good in poison decks
+            "Storm of Steel",             # Discard hand for Shivs — Sly combo finisher
+            "Serpent Form",               # Weak scaling — long fights only
+            "Snakebite",                  # 7 poison — solid single-target poison
+            "Corrosive Wave",             # Draw-triggered AoE poison — strong in draw decks
         ],
         "avoid": [
-            "Bane", "Slice",
+            "Slice",                      # Worse Strike
         ],
     },
 }

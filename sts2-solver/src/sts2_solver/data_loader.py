@@ -64,6 +64,25 @@ def _parse_spawns(raw: list[dict] | None) -> tuple[str, ...]:
     return tuple(result)
 
 
+def _parse_vars(raw: dict | None) -> dict[str, int | float]:
+    """Parse card vars dict, converting values to numeric."""
+    if not raw:
+        return {}
+    result = {}
+    for k, v in raw.items():
+        if isinstance(v, (int, float)):
+            result[k] = v
+        elif isinstance(v, str):
+            try:
+                result[k] = int(v)
+            except ValueError:
+                try:
+                    result[k] = float(v)
+                except ValueError:
+                    pass
+    return result
+
+
 def _card_from_json(raw: dict) -> Card:
     """Parse a single card JSON object into a Card dataclass."""
     cost = raw.get("cost")
@@ -95,6 +114,9 @@ def _card_from_json(raw: dict) -> Card:
         tags=_parse_tags(raw.get("tags")),
         spawns_cards=_parse_spawns(raw.get("spawns_cards")),
         is_x_cost=bool(raw.get("is_x_cost")),
+        vars=_parse_vars(raw.get("vars")),
+        rarity=raw.get("rarity") or "Common",
+        description=raw.get("description") or "",
     )
 
 
@@ -160,6 +182,17 @@ def _make_upgraded(base: Card, upgrade: dict) -> Card:
         # Other upgrade keys (extradamage, calculationbase, etc.) are handled
         # by custom card effects that read the upgraded flag or card vars.
 
+    # Apply var upgrades (e.g. poisonperturn: +1 → PoisonPerTurn 2 → 3)
+    upgraded_vars = dict(base.vars)
+    for key, value in upgrade.items():
+        delta = _parse_upgrade_delta(value)
+        if isinstance(delta, int):
+            # Match var keys case-insensitively
+            for vk in list(upgraded_vars.keys()):
+                if vk.lower() == key.lower():
+                    upgraded_vars[vk] = upgraded_vars[vk] + delta
+                    break
+
     return Card(
         id=base.id,
         name=base.name,
@@ -178,6 +211,9 @@ def _make_upgraded(base: Card, upgrade: dict) -> Card:
         tags=base.tags,
         spawns_cards=base.spawns_cards,
         is_x_cost=base.is_x_cost,
+        vars=upgraded_vars,
+        rarity=base.rarity,
+        description=base.description,
     )
 
 

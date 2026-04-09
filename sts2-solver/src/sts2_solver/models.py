@@ -35,6 +35,15 @@ class Card:
     # X-cost
     is_x_cost: bool = False
 
+    # Card vars — raw effect parameters from JSON (e.g. PoisonPerTurn, Accelerant)
+    vars: dict[str, int | float] = field(default_factory=dict)
+
+    # Rarity tier (Common, Uncommon, Rare, Ancient)
+    rarity: str = "Common"
+
+    # Card description text (for fallback effect detection)
+    description: str = ""
+
     @property
     def exhausts(self) -> bool:
         return "Exhaust" in self.keywords

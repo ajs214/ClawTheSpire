@@ -167,8 +167,11 @@ class EncoderConfig:
     option_type_embed_dim: int = 16
 
     # Card stats vector: upgraded(1) + cost(1) + damage(1) + block(1) +
-    # is_x_cost(1) + card_type_onehot(5) + target_type_onehot(5) = 15
-    card_stats_dim: int = 15
+    # is_x_cost(1) + card_type_onehot(5) + target_type_onehot(5) +
+    # poison(1) + weak(1) + vulnerable(1) + cards_draw(1) +
+    # spawns_count(1) + energy_gain(1) + exhaust(1) + sly(1) +
+    # innate(1) + retain(1) + hit_count(1) + hp_loss(1) = 27
+    card_stats_dim: int = 27
 
     # Global scalars: floor, turn, gold, deck_size, has_pending_choice, choice_type
     num_scalars: int = 6
@@ -236,7 +239,13 @@ TARGET_TYPE_MAP = {"Self": 0, "AnyEnemy": 1, "AllEnemies": 2, "RandomEnemy": 3, 
 
 
 def card_stats_vector(card) -> list[float]:
-    """Extract numeric features from a Card object."""
+    """Extract numeric features from a Card object.
+
+    Returns a 27-dimensional vector capturing the card's mechanical properties.
+    The first 15 dims are the original features; dims 15-26 are new effect
+    features that give the network visibility into poison, weak, draw, shivs,
+    energy gain, and keywords — previously invisible to the model.
+    """
     ct = CARD_TYPE_MAP.get(card.card_type.value, 0)
     tt = TARGET_TYPE_MAP.get(card.target.value, 0)
     card_type_oh = [0.0] * 5
@@ -244,14 +253,47 @@ def card_stats_vector(card) -> list[float]:
     target_oh = [0.0] * 5
     target_oh[tt] = 1.0
 
+    # Extract power amounts from powers_applied tuple: ((name, amount), ...)
+    poison_amt = 0.0
+    weak_amt = 0.0
+    vuln_amt = 0.0
+    for power_name, amount in (card.powers_applied or ()):
+        pl = power_name.lower()
+        if "poison" in pl:
+            poison_amt += amount
+        elif "weak" in pl:
+            weak_amt += amount
+        elif "vulnerable" in pl:
+            vuln_amt += amount
+
+    # Count spawned cards (Shivs, etc.)
+    spawns_count = len(card.spawns_cards) if card.spawns_cards else 0
+
+    # Keywords
+    keywords = card.keywords if card.keywords else frozenset()
+
     return [
+        # Original 15 features
         float(card.upgraded),
-        card.cost / 5.0 if card.cost >= 0 else 0.0,  # Normalize cost
-        (card.damage or 0) / 30.0,  # Normalize damage
-        (card.block or 0) / 30.0,   # Normalize block
+        card.cost / 5.0 if card.cost >= 0 else 0.0,
+        (card.damage or 0) / 30.0,
+        (card.block or 0) / 30.0,
         float(card.is_x_cost),
         *card_type_oh,
         *target_oh,
+        # New effect features (12 dims)
+        poison_amt / 10.0,                          # Poison applied
+        weak_amt / 3.0,                             # Weak applied
+        vuln_amt / 3.0,                             # Vulnerable applied
+        (card.cards_draw or 0) / 5.0,               # Cards drawn
+        spawns_count / 5.0,                         # Cards spawned (Shivs etc.)
+        (card.energy_gain or 0) / 3.0,              # Energy gained
+        float("Exhaust" in keywords),               # Has Exhaust keyword
+        float("Sly" in keywords),                   # Has Sly keyword
+        float("Innate" in keywords),                # Has Innate keyword
+        float("Retain" in keywords),                # Has Retain keyword
+        (card.hit_count or 1) / 5.0,                # Multi-hit count
+        (card.hp_loss or 0) / 10.0,                 # HP self-damage
     ]
 
 

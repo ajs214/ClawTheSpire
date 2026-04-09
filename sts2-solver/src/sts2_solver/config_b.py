@@ -6,12 +6,14 @@ Silent needs to survive Act 1 to have any shot at winning.
 
 Key changes vs. champion:
   EVALUATOR:
-    - Higher block weights (+33%) → prioritize not dying over doing damage
+    - Higher kill bonus (50 → 62) and damage weight (3.0 → 3.5) → finish enemies
+    - Higher block weight (+15%, was +33% — pulled back to avoid over-blocking)
     - Higher lethal penalty (500 → 700) → avoid greed when close to death
+    - Higher Vulnerable value (3.5 → 4.5) → applying Vulnerable is offensive
     - Higher Weak value (+40%) → Neutralize and Leg Sweep are Silent's edge
     - Higher poison discount (1.0 → 1.3) → lean into Silent's unique scaling
     - Higher dexterity value (5 → 8) → Footwork is Silent's best defense
-    - Lower wasted block penalty (1.5 → 0.8) → stop punishing cautious play
+    - Moderate wasted block penalty (1.5 → 1.2) → some caution but not wasteful
   CARD TIERS:
     - Promoted Leg Sweep and Dodge and Roll to S-tier → survival cards
     - Promoted Backflip to A-tier → draw + block is exactly what Silent needs
@@ -44,13 +46,14 @@ RESPAWNING_ENEMIES: frozenset[str] = frozenset({
 
 EVALUATOR = {
     # ── Damage scoring ──
-    # Kill bonus unchanged — focus-firing is still correct.
-    "kill_bonus": 50.0,              # (unchanged from A)
-    "buff_kill_bonus": 85.0,         # (unchanged from A)
-    "strength_kill_bonus_per": 10.0, # (unchanged from A)
-    "damage_alive_weight": 3.0,      # (unchanged from A)
+    # Raised to counterbalance the higher block weights — removing an
+    # attacker permanently is better than blocking its damage every turn.
+    "kill_bonus": 62.0,              # ⬆ was 50 — finishing enemies removes threats forever
+    "buff_kill_bonus": 95.0,         # ⬆ was 85 — Buff enemies snowball; kill ASAP
+    "strength_kill_bonus_per": 12.0, # ⬆ was 10 — high-Str enemies are urgent kills
+    "damage_alive_weight": 3.5,      # ⬆ was 3.0 — each HP of damage is worth more
     "damage_dead_weight": 0.2,       # (unchanged from A)
-    "kill_proximity_weight": 10.0,   # (unchanged from A)
+    "kill_proximity_weight": 12.0,   # ⬆ was 10 — reward getting enemies close to dead
 
     # ── Enemy threat prioritisation ──
     # Slightly higher threat awareness — bot should respect dangerous enemies more
@@ -66,9 +69,10 @@ EVALUATOR = {
     # Silent has low HP (70 max) and needs to survive long fights.
     # Raising block weight by ~33% should make the solver play defensively
     # when threatened instead of always going face.
-    "effective_block_weight": 2.7,   # ⬆ was 2.0 — block matters more for Silent
-    "wasted_block_penalty": 0.8,     # ⬇ was 1.5 — stop punishing cautious play;
-                                     #   over-blocking is much less bad than dying
+    "effective_block_weight": 2.3,   # ⬆ was 2.0 (was 2.7 — too defensive, pulled back)
+    "wasted_block_penalty": 1.2,     # ⬇ was 1.5 (was 0.8 — too lenient on over-block;
+                                     #   1.2 still forgives some caution but punishes
+                                     #   wasting energy on block when you should attack)
     "idle_block_weight": 0.15,       # ⬆ was 0.1 — proactive block has some value
 
     # HP-aware block scaling — raise the threshold so bot blocks earlier
@@ -88,7 +92,8 @@ EVALUATOR = {
     # ── Debuffs on enemies ──
     # Weak is Silent's bread and butter (Neutralize, Leg Sweep, Crippling Cloud).
     # Raising Weak value makes the solver use these defensively.
-    "vulnerable_value": 3.5,         # (unchanged from A)
+    "vulnerable_value": 4.5,         # ⬆ was 3.5 — Vulnerable makes enemies take 50%
+                                     #   more damage; applying it IS an offensive play
     "weak_vs_attack_value": 3.5,     # ⬆ was 2.5 — Weak reduces incoming damage by 25%,
                                      #   which compounds over multi-turn boss fights
     "weak_vs_other_value": 1.2,      # ⬆ was 1.0 — Weak still useful even on non-attackers
@@ -182,18 +187,17 @@ CARD_TIERS: dict[str, dict[str, list[str]]] = {
         ],
         "A": [
             "Thunderclap", "Twin Strike", "Battle Trance", "Shrug It Off",
-            "Burning Pact", "Flame Barrier", "Spot Weakness", "Thrash",
+            "Burning Pact", "Flame Barrier", "Thrash",
             "Pommel Strike", "True Grit", "Barricade", "Rupture",
             "Hemokinesis", "Brand", "Feed", "Pact's End",
         ],
         "B": [
             "Uppercut", "Headbutt", "Iron Wave", "Body Slam",
-            "Breakthrough", "Armaments", "Carnage", "Bludgeon",
-            "Bloodletting", "Metallicize", "Inferno", "Juggernaut",
+            "Breakthrough", "Armaments", "Bludgeon",
+            "Bloodletting", "Inferno", "Juggernaut",
         ],
         "avoid": [
-            "Anger", "Setup Strike", "Clash", "Flex",
-            "Warcry", "Wild Strike", "Reckless Charge",
+            "Anger", "Setup Strike", "Clash",
         ],
     },
     "silent": {
@@ -220,6 +224,9 @@ CARD_TIERS: dict[str, dict[str, list[str]]] = {
             "Tools of the Trade",         # Draw + discard engine — finds your key cards
             "Dodge and Roll",             # ⬆ from A — block this turn AND next turn;
                                           #   exactly what you need in long boss fights
+            "Wraith Form",                # Intangible — take 1 dmg per hit for 2-3 turns;
+                                          #   the best defensive card in the game
+            "Adrenaline",                 # 0 cost, +2 energy, draw 2 — tempo king
         ],
         "A": [
             "Accuracy",                   # ⬇ from S — Shivs need setup and are slow vs bosses
@@ -227,8 +234,7 @@ CARD_TIERS: dict[str, dict[str, list[str]]] = {
             "Master Planner",             # ⬇ from S — good but not essential early
             "Knife Trap",                 # ⬇ from S — situational; strong but not core
             "Backstab",                   # 11 free damage turn 1 — huge early game tempo
-            "Catalyst",                   # ⬆ from B — doubles/triples poison; this is how
-                                          #   you kill bosses with 200+ HP
+            "Accelerant",                 # Poison triggered extra times — key for boss kills
             "Deadly Poison",              # Core poison card — 5 stacks = 15 future damage
             "Cloak and Dagger",           # Block + Shivs — does both jobs
             "Blade Dance",                # Shiv generation — good with Accuracy
@@ -242,6 +248,19 @@ CARD_TIERS: dict[str, dict[str, list[str]]] = {
             "Deflect",                    # Free block — zero-cost = always playable
             "Calculated Gamble",          # Full hand refresh — powerful with lean deck
             "Tactician",                  # Energy on discard — fuels big turns
+            "Malaise",                    # X-cost Str reduction + Weak — shuts down bosses
+            "Bullet Time",               # All cards cost 0 this turn — explosive combos
+            "Piercing Wail",             # ALL enemies -6 Str — huge defensive swing
+            "Blur",                       # Block carries over — compounds with Footwork
+            "Escape Plan",               # 0 cost draw + block — free cycle + defense
+            "Predator",                   # 15 dmg + draw 2 — offense + card flow
+            "Bouncing Flask",            # 9 poison spread — strong AoE poison
+            "Pounce",                     # 12 dmg + next skill costs 0 — great tempo
+            "Snakebite",                 # 7 poison for 2 energy — efficient poison source
+            "Blade of Ink",              # +Str on attack play — scaling for Shiv builds
+            "Corrosive Wave",            # Poison on draw — passive scaling engine
+            "Echoing Slash",             # 10 AoE dmg per enemy — strong multi-enemy clear
+            "Tracking",                   # Weak enemies take double damage — synergy payoff
         ],
         "B": [
             "Leading Strike",             # ⬇ from A — damage only, doesn't block
@@ -250,13 +269,33 @@ CARD_TIERS: dict[str, dict[str, list[str]]] = {
             "Speedster", "Abrasive", "Haze", "Outbreak",
             "Bubble Bubble", "Mirage", "Fan of Knives",
             "Hidden Daggers", "Finisher", "Afterimage",
+            "Dagger Spray",              # 4 AoE dmg × 2 — decent hallway clear
+            "Anticipate",                 # Temp 3 Dex — good for one big block turn
+            "Precise Cut",               # 15 dmg conditional — unreliable
+            "Memento Mori",              # 12 dmg + discard bonus — deck-dependent
+            "Strangle",                   # 8 dmg + damage on card play — slow setup
+            "Hand Trick",                # 7 block + Sly — decent utility
+            "Flechettes",               # Dmg per skill in hand — variable value
+            "Follow Through",            # 6 AoE conditional — needs setup
+            "Skewer",                     # X-cost multi-hit — energy hungry
+            "Pinpoint",                   # 17 dmg w/ cost reduction — situational
+            "Expertise",                  # Draw to 6 — good in small hands only
+            "Up My Sleeve",              # 3 Shivs — okay with Accuracy, mediocre without
+            "Phantom Blades",            # Shiv retain — niche Shiv synergy
+            "Expose",                     # Strip artifact + block — utility vs elites
+            "Shadowmeld",                # Double block — good with Footwork
+            "Storm of Steel",            # Discard hand → Shivs — risky, high ceiling
+            "The Hunt",                   # 10 dmg + conditional reward — inconsistent
+            "Murder",                     # 2+ scaling dmg — slow buildup
+            "Shadow Step",               # Double attack next turn — setup required
         ],
         "avoid": [
-            "Bane",                       # Only works on poisoned enemies — too conditional
             "Slice",                      # 6 damage for 0 cost — but adds junk to deck
-            "Sucker Punch",               # ⬆ NEW — 7 dmg + 1 Weak is not enough impact
-            "Quick Slash",                # ⬆ NEW — damage + draw 1 doesn't do enough
-            "Riddle with Holes",          # ⬆ NEW — high damage but no block or utility
+            "Sucker Punch",               # 7 dmg + 1 Weak is not enough impact
+            "Flanking",                   # Multiplayer only — useless in solo
+            "Sneaky",                     # Multiplayer only — useless in solo
+            "Grand Finale",              # Must empty draw pile — far too conditional
+            "Nightmare",                  # Cost 3, needs specific card in hand — too slow
         ],
     },
 }

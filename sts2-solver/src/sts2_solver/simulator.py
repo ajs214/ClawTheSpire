@@ -76,6 +76,14 @@ def _ensure_data_loaded():
     for c in _load_json("characters.json"):
         _CHARACTERS_BY_ID[c["id"]] = c
 
+    # Load XGBoost card picker model if available (for blended scoring)
+    try:
+        from .card_picker import load_ml_model
+        if load_ml_model():
+            print("[Simulator] XGBoost card picker model loaded", flush=True)
+    except Exception:
+        pass
+
 
 # ---------------------------------------------------------------------------
 # Card ID normalization: characters.json uses "StrikeIronclad" but
@@ -247,6 +255,342 @@ ENEMY_MOVE_TABLES: dict[str, list[dict]] = {
         {"type": "Debuff", "player_weak": 2, "damage": 8},        # Orb Of Weakness
         {"type": "Attack", "damage": 3, "hits": 5},                # Beam x5
         {"type": "Buff", "all_strength": 3},                       # Ritual (buffs team)
+    ],
+
+    # ── New weak encounters ──
+    "CORPSE_SLUG": [
+        {"type": "Attack", "damage": 5, "hits": 2},                # Whip Slap x2
+        {"type": "Attack", "damage": 10, "hits": 1},               # Glomp
+        {"type": "Debuff", "player_frail": 1},                     # Goop
+    ],
+    "EXOSKELETON": [
+        {"type": "Attack", "damage": 5, "hits": 2},                # Skitter x2
+        {"type": "Attack", "damage": 12, "hits": 1},               # Mandible
+        {"type": "Buff", "self_strength": 2},                       # Enrage
+    ],
+    "SCROLL_OF_BITING": [
+        {"type": "Attack", "damage": 10, "hits": 1},               # Chomp
+        {"type": "Attack", "damage": 4, "hits": 3},                # Chew x3
+        {"type": "Buff", "self_strength": 3},                       # More Teeth
+    ],
+    "SEAPUNK": [
+        {"type": "Attack", "damage": 9, "hits": 1},                # Sea Kick
+        {"type": "Attack", "damage": 6, "hits": 2},                # Spinning Kick x2
+        {"type": "Debuff", "player_weak": 1, "self_block": 6},    # Bubble Burp
+    ],
+    "SLUDGE_SPINNER": [
+        {"type": "Debuff", "player_frail": 1, "player_weak": 1},  # Oil Spray
+        {"type": "Attack", "damage": 12, "hits": 1},               # Slam
+        {"type": "Buff", "self_strength": 2},                       # Rage
+    ],
+    "TUNNELER": [
+        {"type": "Attack", "damage": 8, "hits": 1},                # Bite
+        {"type": "Defend", "block": 10},                            # Burrow (digs down)
+        {"type": "Attack", "damage": 14, "hits": 1},               # Below Move (emerges)
+        {"type": "Debuff", "player_weak": 1},                      # Dizzy
+    ],
+    "TOADPOLE": [
+        {"type": "Attack", "damage": 6, "hits": 1},                # Spike Spit
+        {"type": "Attack", "damage": 3, "hits": 3},                # Whirl x3
+        {"type": "Buff", "self_strength": 2, "self_block": 4},    # Spiken
+    ],
+    "THIEVING_HOPPER": [
+        {"type": "Attack", "damage": 6, "hits": 1},                # Thievery (steals gold)
+        {"type": "Attack", "damage": 8, "hits": 1},                # Nab
+        {"type": "Attack", "damage": 4, "hits": 3},                # Hat Trick x3
+        {"type": "Defend", "block": 8},                             # Flutter
+    ],
+    "DEVOTED_SCULPTOR": [
+        {"type": "Buff", "self_strength": 4},                       # Forbidden Incantation
+        {"type": "Attack", "damage": 16, "hits": 1},               # Savage
+    ],
+    "WRIGGLER": [
+        {"type": "Attack", "damage": 7, "hits": 1},                # Nasty Bite
+        {"type": "Attack", "damage": 4, "hits": 2},                # Wriggle x2
+    ],
+
+    # ── New normal encounters ──
+    "CHOMPER": [
+        {"type": "Attack", "damage": 8, "hits": 1, "self_block": 4},  # Clamp (dmg + block)
+        {"type": "Attack", "damage": 8, "hits": 1, "self_block": 4},  # Clamp repeats
+        {"type": "Debuff", "player_vulnerable": 2},                    # Screech
+    ],
+    "BOWLBUG_EGG": [
+        {"type": "Attack", "damage": 6, "hits": 1},                # Bite
+    ],
+    "BOWLBUG_NECTAR": [
+        {"type": "Attack", "damage": 7, "hits": 1},                # Thrash
+        {"type": "Buff", "all_strength": 1},                        # Buff (heals/buffs team)
+        {"type": "Attack", "damage": 10, "hits": 1},               # Thrash (stronger)
+    ],
+    "BOWLBUG_ROCK": [
+        {"type": "Attack", "damage": 14, "hits": 1},               # Headbutt
+        {"type": "Debuff", "player_weak": 1},                      # Dizzy
+    ],
+    "BOWLBUG_SILK": [
+        {"type": "Attack", "damage": 9, "hits": 1},                # Trash
+        {"type": "Debuff", "player_frail": 2, "damage": 5},       # Toxic Spit
+    ],
+    "TWO_TAILED_RAT": [
+        {"type": "Attack", "damage": 5, "hits": 2},                # Scratch x2
+        {"type": "Attack", "damage": 8, "hits": 1, "player_frail": 1},  # Disease Bite
+        {"type": "Debuff", "player_weak": 1},                      # Screech
+    ],
+    "PUNCH_CONSTRUCT": [
+        {"type": "Buff", "self_strength": 3},                       # Ready (charge up)
+        {"type": "Attack", "damage": 18, "hits": 1},               # Strong Punch
+        {"type": "Attack", "damage": 6, "hits": 3},                # Fast Punch x3
+    ],
+    "FROG_KNIGHT": [
+        {"type": "Buff", "self_strength": 2, "self_block": 8},    # For the Queen
+        {"type": "Attack", "damage": 16, "hits": 1},               # Strike Down Evil
+        {"type": "Attack", "damage": 5, "hits": 3},                # Tongue Lash x3
+        {"type": "Attack", "damage": 20, "hits": 1},               # Beetle Charge
+    ],
+    "FOSSIL_STALKER": [
+        {"type": "Attack", "damage": 10, "hits": 1},               # Tackle
+        {"type": "Debuff", "player_vulnerable": 2, "damage": 6},  # Latch
+        {"type": "Attack", "damage": 4, "hits": 4},                # Lash x4
+    ],
+    "SPINY_TOAD": [
+        {"type": "Defend", "block": 10},                            # Protruding Spikes (thorns)
+        {"type": "Attack", "damage": 6, "hits": 4},                # Spike Explosion x4
+        {"type": "Attack", "damage": 14, "hits": 1},               # Tongue Lash
+    ],
+    "LIVING_FOG": [
+        {"type": "Debuff", "player_frail": 1, "player_weak": 1},  # Advanced Gas
+        {"type": "Buff", "self_strength": 3},                       # Bloat
+        {"type": "Attack", "damage": 18, "hits": 1},               # Super Gas Blast
+    ],
+    "GAS_BOMB": [
+        {"type": "Attack", "damage": 20, "hits": 1},               # Explode (dies after)
+    ],
+    "LOUSE_PROGENITOR": [
+        {"type": "Attack", "damage": 8, "hits": 2},                # Web Cannon x2
+        {"type": "Attack", "damage": 14, "hits": 1},               # Pounce
+        {"type": "Buff", "self_strength": 3, "self_block": 10},   # Curl and Grow
+    ],
+    "HUNTER_KILLER": [
+        {"type": "Debuff", "player_vulnerable": 2},                # Tenderizing Goop
+        {"type": "Attack", "damage": 12, "hits": 1},               # Bite
+        {"type": "Attack", "damage": 5, "hits": 3},                # Puncture x3
+    ],
+    "FABRICATOR": [
+        {"type": "Buff", "self_strength": 2, "self_block": 6},    # Fabricate
+        {"type": "Attack", "damage": 10, "hits": 1},               # Fabricating Strike
+        {"type": "Attack", "damage": 22, "hits": 1},               # Disintegrate
+    ],
+    "CALCIFIED_CULTIST": [
+        {"type": "Buff", "self_strength": 2},                       # Ritual
+        {"type": "Attack", "damage": 10, "hits": 1},               # Smash
+        {"type": "Attack", "damage": 6, "hits": 2},                # Dark Strike x2
+    ],
+    "DAMP_CULTIST": [
+        {"type": "Debuff", "player_weak": 2},                      # Hex
+        {"type": "Attack", "damage": 8, "hits": 1},                # Chop
+        {"type": "Buff", "all_strength": 1},                        # Incantation
+    ],
+    "OWL_MAGISTRATE": [
+        {"type": "Debuff", "player_frail": 2, "player_weak": 1},  # Judgement
+        {"type": "Attack", "damage": 10, "hits": 2},               # Talon Strike x2
+        {"type": "Buff", "self_strength": 3, "self_block": 8},    # Roost
+    ],
+    "SLIMED_BERSERKER": [
+        {"type": "Attack", "damage": 7, "hits": 1},                # Slime Attack
+        {"type": "Buff", "self_strength": 4},                       # Rage
+        {"type": "Attack", "damage": 5, "hits": 3},                # Flurry x3
+    ],
+    "MYTE": [
+        {"type": "Attack", "damage": 4, "hits": 1},                # Nibble
+        {"type": "Buff", "self_strength": 1},                       # Swarm
+    ],
+    "AXEBOT": [
+        {"type": "Attack", "damage": 10, "hits": 1, "self_block": 5},  # Axe Swing
+        {"type": "Attack", "damage": 6, "hits": 2},                     # Double Chop x2
+        {"type": "Buff", "self_strength": 2},                            # Sharpen
+    ],
+    "GLOBE_HEAD": [
+        {"type": "Attack", "damage": 8, "hits": 1},                # Beam
+        {"type": "Debuff", "player_vulnerable": 1, "damage": 6},  # Flash
+        {"type": "Attack", "damage": 12, "hits": 1},               # Overload
+    ],
+    "HAUNTED_SHIP": [
+        {"type": "Attack", "damage": 6, "hits": 3},                # Broadside x3
+        {"type": "Debuff", "player_frail": 2},                     # Ghost Wind
+        {"type": "Attack", "damage": 18, "hits": 1},               # Ram
+    ],
+    "SEWER_CLAM": [
+        {"type": "Defend", "block": 8},                             # Shell Up
+        {"type": "Attack", "damage": 10, "hits": 1, "player_weak": 1},  # Spit
+        {"type": "Attack", "damage": 14, "hits": 1},               # Snap
+    ],
+    "THE_LOST": [
+        {"type": "Attack", "damage": 6, "hits": 2},                # Slash x2
+        {"type": "Debuff", "player_frail": 1},                     # Haunt
+    ],
+    "THE_FORGOTTEN": [
+        {"type": "Attack", "damage": 12, "hits": 1},               # Crush
+        {"type": "Buff", "self_strength": 2, "self_block": 6},    # Remember
+    ],
+    "THE_OBSCURA": [
+        {"type": "Debuff", "player_weak": 2, "player_frail": 1},  # Obscure
+        {"type": "Attack", "damage": 9, "hits": 2},                # Shadow Strike x2
+        {"type": "Attack", "damage": 16, "hits": 1},               # Void Blast
+    ],
+    "OVICOPTER": [
+        {"type": "Attack", "damage": 8, "hits": 1},                # Swoop
+        {"type": "Buff"},                                           # Lay Egg (summons)
+        {"type": "Attack", "damage": 5, "hits": 3},                # Barrage x3
+    ],
+    "TOUGH_EGG": [
+        {"type": "Defend", "block": 6},                             # Harden
+        {"type": "Attack", "damage": 8, "hits": 1},                # Hatch (emerges)
+    ],
+
+    # ── New elites ──
+    "DECIMILLIPEDE_SEGMENT_FRONT": [
+        {"type": "Attack", "damage": 6, "hits": 3},                # Mandible Flurry x3
+        {"type": "Buff", "self_strength": 2, "self_block": 8},    # Burrow
+    ],
+    "DECIMILLIPEDE_SEGMENT_MIDDLE": [
+        {"type": "Attack", "damage": 8, "hits": 2},                # Body Slam x2
+        {"type": "Defend", "block": 12},                            # Curl Up
+    ],
+    "DECIMILLIPEDE_SEGMENT_BACK": [
+        {"type": "Attack", "damage": 5, "hits": 4},                # Tail Whip x4
+        {"type": "Debuff", "player_vulnerable": 2},                # Acid Spray
+    ],
+    "ENTOMANCER": [
+        {"type": "Buff", "self_strength": 3},                       # Summon Swarm
+        {"type": "Attack", "damage": 7, "hits": 3},                # Bug Barrage x3
+        {"type": "Debuff", "player_frail": 2, "damage": 10},      # Parasite
+        {"type": "Attack", "damage": 20, "hits": 1},               # Devour
+    ],
+    "SKULKING_COLONY": [
+        {"type": "Attack", "damage": 4, "hits": 5},                # Swarm x5
+        {"type": "Buff", "self_strength": 3, "self_block": 10},   # Regroup
+        {"type": "Attack", "damage": 18, "hits": 1},               # Colony Crush
+        {"type": "Debuff", "player_weak": 2, "player_frail": 1},  # Overwhelm
+    ],
+    "MECHA_KNIGHT": [
+        {"type": "Attack", "damage": 12, "hits": 1, "self_block": 8},  # Shield Bash
+        {"type": "Attack", "damage": 8, "hits": 3},                     # Triple Strike x3
+        {"type": "Buff", "self_strength": 4},                            # Overclock
+        {"type": "Attack", "damage": 25, "hits": 1},                    # Mega Slash
+    ],
+    "INFESTED_PRISM": [
+        {"type": "Attack", "damage": 6, "hits": 3},                # Refracted Beam x3
+        {"type": "Debuff", "player_vulnerable": 2, "player_weak": 1},  # Prismatic Haze
+        {"type": "Attack", "damage": 20, "hits": 1},               # Overcharge
+        {"type": "Buff", "self_strength": 3, "self_block": 12},   # Crystal Shell
+    ],
+    "TERROR_EEL": [
+        {"type": "Attack", "damage": 5, "hits": 4},                # Electric Bite x4
+        {"type": "Debuff", "player_frail": 2, "player_vulnerable": 2},  # Terrify
+        {"type": "Attack", "damage": 22, "hits": 1},               # Thunder Slam
+        {"type": "Buff", "self_strength": 4},                       # Charge Up
+    ],
+    "SOUL_NEXUS": [
+        {"type": "Debuff", "player_weak": 3},                      # Soul Drain
+        {"type": "Attack", "damage": 8, "hits": 3},                # Spirit Barrage x3
+        {"type": "Buff", "self_strength": 5},                       # Absorb
+        {"type": "Attack", "damage": 25, "hits": 1},               # Obliterate
+    ],
+    "PHANTASMAL_GARDENER": [
+        {"type": "Debuff", "player_frail": 2},                     # Wilt
+        {"type": "Attack", "damage": 10, "hits": 2},               # Vine Lash x2
+        {"type": "Buff", "self_strength": 3, "self_block": 10},   # Overgrow
+        {"type": "Attack", "damage": 7, "hits": 4},                # Thorn Storm x4
+    ],
+    "FLAIL_KNIGHT": [
+        {"type": "Attack", "damage": 14, "hits": 1},               # Flail Swing
+        {"type": "Attack", "damage": 6, "hits": 3},                # Chain Whip x3
+        {"type": "Buff", "self_strength": 2, "self_block": 10},   # Rally
+    ],
+    "MAGI_KNIGHT": [
+        {"type": "Debuff", "player_weak": 2, "damage": 8},        # Arcane Bolt
+        {"type": "Attack", "damage": 12, "hits": 1},               # Magic Slash
+        {"type": "Buff", "all_strength": 2},                        # Empower (team buff)
+    ],
+    "SPECTRAL_KNIGHT": [
+        {"type": "Attack", "damage": 5, "hits": 4},                # Phase Strike x4
+        {"type": "Debuff", "player_vulnerable": 2},                # Haunt
+        {"type": "Defend", "block": 15},                            # Ethereal Shield
+    ],
+
+    # ── New bosses ──
+    "DOORMAKER": [
+        {"type": "Buff", "self_strength": 3, "self_block": 15},    # Seal Door
+        {"type": "Attack", "damage": 10, "hits": 3},               # Door Slam x3
+        {"type": "Debuff", "player_frail": 2, "player_weak": 2},  # Dimensional Rip
+        {"type": "Attack", "damage": 28, "hits": 1},               # Grand Slam
+    ],
+    "DOOR": [
+        {"type": "Defend", "block": 20},                            # Reinforce
+        {"type": "Attack", "damage": 12, "hits": 1},               # Slam
+    ],
+    "WATERFALL_GIANT": [
+        {"type": "Attack", "damage": 8, "hits": 3},                # Cascade x3
+        {"type": "Buff", "self_strength": 4, "self_block": 12},   # Rising Tide
+        {"type": "Attack", "damage": 30, "hits": 1},               # Tidal Crush
+        {"type": "Debuff", "player_frail": 3},                     # Drenching Wave
+        {"type": "Attack", "damage": 12, "hits": 3},               # Torrent x3
+    ],
+    "LAGAVULIN_MATRIARCH": [
+        {"type": "Buff"},                                           # Slumber (asleep T1)
+        {"type": "Buff"},                                           # Slumber (asleep T2)
+        {"type": "Debuff", "player_shrink": 2, "player_frail": 2},  # Wake (debuff burst)
+        {"type": "Attack", "damage": 20, "hits": 1},               # Pummel
+        {"type": "Attack", "damage": 8, "hits": 3},                # Flurry x3
+        {"type": "Buff", "self_strength": 3},                       # Roar
+    ],
+    "KNOWLEDGE_DEMON": [
+        {"type": "Debuff", "player_weak": 2, "player_vulnerable": 2},  # Dark Knowledge
+        {"type": "Attack", "damage": 7, "hits": 4},                     # Mind Rend x4
+        {"type": "Buff", "self_strength": 5},                            # Study
+        {"type": "Attack", "damage": 30, "hits": 1},                    # Enlightened Fury
+    ],
+    "CRUSHER": [
+        {"type": "Attack", "damage": 12, "hits": 2},               # Claw Crush x2
+        {"type": "Buff", "self_strength": 3, "self_block": 15},   # Harden Shell
+        {"type": "Attack", "damage": 25, "hits": 1},               # Mega Claw
+    ],
+    "ROCKET": [
+        {"type": "Attack", "damage": 5, "hits": 5},                # Rocket Barrage x5
+        {"type": "Debuff", "player_vulnerable": 2},                # Lock On
+        {"type": "Attack", "damage": 20, "hits": 1},               # Big Shot
+    ],
+    "QUEEN": [
+        {"type": "Buff", "self_strength": 4, "self_block": 12},   # Royal Decree
+        {"type": "Attack", "damage": 8, "hits": 4},                # Swarm Command x4
+        {"type": "Debuff", "player_frail": 2, "player_weak": 2},  # Weakening Aura
+        {"type": "Attack", "damage": 30, "hits": 1},               # Queen's Wrath
+    ],
+    "TORCH_HEAD_AMALGAM": [
+        {"type": "Attack", "damage": 10, "hits": 2},               # Flame Lash x2
+        {"type": "Buff", "self_strength": 3},                       # Ignite
+        {"type": "Attack", "damage": 18, "hits": 1},               # Fireball
+    ],
+    "SOUL_FYSH": [
+        {"type": "Debuff", "player_weak": 2},                      # Soul Siphon
+        {"type": "Attack", "damage": 6, "hits": 4},                # Bubble Barrage x4
+        {"type": "Buff", "self_strength": 4, "self_block": 10},   # Deep Dive
+        {"type": "Attack", "damage": 25, "hits": 1},               # Leviathan Crush
+        {"type": "Debuff", "player_frail": 3, "damage": 12},      # Abyssal Wave
+    ],
+    "TEST_SUBJECT": [
+        {"type": "Buff", "self_strength": 3},                       # Mutate
+        {"type": "Attack", "damage": 10, "hits": 2},               # Lash x2
+        {"type": "Attack", "damage": 7, "hits": 4},                # Frenzy x4
+        {"type": "Debuff", "player_vulnerable": 3},                # Acid Spray
+        {"type": "Attack", "damage": 28, "hits": 1},               # Annihilate
+    ],
+    "THE_INSATIABLE": [
+        {"type": "Attack", "damage": 8, "hits": 3},                # Devour x3
+        {"type": "Buff", "self_strength": 5},                       # Hunger
+        {"type": "Debuff", "player_weak": 2, "player_frail": 2},  # Consume
+        {"type": "Attack", "damage": 35, "hits": 1},               # Feast
+        {"type": "Attack", "damage": 12, "hits": 3},               # Ravage x3
     ],
 }
 
@@ -466,6 +810,22 @@ def _score_card_for_pick(card: Card, deck: list[Card]) -> float:
     return score
 
 
+def _smart_pick_or_fallback(
+    offered: list[Card], deck: list[Card],
+    floor: int = 1, hp: int = 50, max_hp: int = 80,
+) -> Card | None:
+    """Use the organic card picker (rule-based + alpha-blended ML).
+
+    Falls back to the old tier-list picker if the new system fails.
+    """
+    try:
+        from .card_picker import pick_card
+        return pick_card(offered, deck, floor, hp, max_hp)
+    except Exception:
+        pass
+    return _pick_card_reward(offered, deck)
+
+
 def _pick_card_reward(offered: list[Card], deck: list[Card]) -> Card | None:
     """Pick the best card from offered rewards, or skip if nothing good.
 
@@ -591,6 +951,77 @@ def _generate_act1_map_with_choices(rng: random.Random) -> list:
 
 
 # ---------------------------------------------------------------------------
+# Dynamic room choice — mirrors the live advisor's decide_map() logic
+# ---------------------------------------------------------------------------
+
+def _choose_room(
+    options: list[str],
+    hp: int,
+    max_hp: int,
+    gold: int,
+    deck_size: int,
+    character: str = "SILENT",
+) -> str:
+    """Choose the best room from a list of options based on game state.
+
+    Ports the live advisor's HP-threshold routing into the simulator so
+    that training games make the same pathing decisions as live play.
+
+    Priority bands:
+      - HP < 35%: rest > shop > event > anything (survival mode)
+      - HP < 55%: rest > shop > event > treasure > monster (cautious)
+      - HP >= 55%: elite > treasure > monster > event > shop > rest (greedy)
+
+    Gold and deck-size bonuses push toward shops when they'd be useful.
+    """
+    hp_pct = hp / max(1, max_hp)
+
+    def _score(room: str) -> float:
+        if room == "boss":
+            return 100.0
+
+        if hp_pct < 0.35:
+            # Critical HP: survival mode
+            scores = {"rest": 90, "shop": 80, "event": 60, "treasure": 50,
+                      "normal": 10, "weak": 10, "elite": 0}
+            return scores.get(room, 30)
+
+        if hp_pct < 0.55:
+            # Low HP: avoid elites, prefer safe nodes
+            scores = {"rest": 85, "shop": 80, "event": 65, "treasure": 70,
+                      "normal": 40, "weak": 40, "elite": 15}
+            return scores.get(room, 30)
+
+        # Healthy: be greedy
+        scores = {"elite": 80, "normal": 55, "weak": 45, "event": 50,
+                  "shop": 45, "treasure": 70, "rest": 30}
+        s = scores.get(room, 40)
+
+        # Elite bonus when HP is high
+        if room == "elite" and hp_pct > 0.75:
+            s += 15
+
+        # Shop bonus when deck is large (removal value) or gold is high
+        if room == "shop":
+            if deck_size > 10:
+                s += 15
+            if gold >= 150:
+                s += 25
+
+        # Rest penalty when HP is high (don't waste it)
+        if room == "rest" and hp_pct > 0.70:
+            s -= 10
+
+        # Silent-specific: push rest when HP < 50%
+        if character.upper() == "SILENT" and hp_pct < 0.50 and room == "rest":
+            s += 30
+
+        return s
+
+    return max(options, key=_score)
+
+
+# ---------------------------------------------------------------------------
 # Encounter selection
 # ---------------------------------------------------------------------------
 
@@ -676,6 +1107,7 @@ def simulate_combat(
     rng: random.Random,
     potions: list[dict] | None = None,
     solver_time_limit_ms: float = 500.0,
+    is_boss: bool = False,
 ) -> tuple[CombatResult, list[dict]]:
     """Run a full combat from start to finish using the solver.
 
@@ -714,8 +1146,14 @@ def simulate_combat(
 
     hp_before = player_hp
 
-    # Use pre-combat potions (strength, block on turn 1)
-    potions = _use_precombat_potions(state, potions)
+    # Boss fights: dump ALL offensive potions immediately + heal at 40% HP.
+    # Non-boss: save offensive potions for the boss, only emergency heal.
+    if is_boss:
+        potions = _use_precombat_potions(state, potions)
+        # Also use healing potion if HP is below 40% (HP resets next act,
+        # so surviving is all that matters)
+        if state.player.hp < state.player.max_hp * 0.40:
+            potions = _use_emergency_potion(state, potions)
 
     # Set initial enemy intents
     _set_enemy_intents(state, enemy_ais)
@@ -733,7 +1171,10 @@ def simulate_combat(
             ), potions
 
         # Emergency potion use: heal if HP critically low
-        if state.player.hp < state.player.max_hp * 0.25:
+        # Boss: lower threshold (35%) since we already used healing pre-combat
+        # Non-boss: standard 25% threshold
+        emergency_threshold = 0.35 if is_boss else 0.25
+        if state.player.hp < state.player.max_hp * emergency_threshold:
             potions = _use_emergency_potion(state, potions)
 
         # Solve: find best card play sequence
@@ -1045,35 +1486,81 @@ def _rest_site_decision(
     deck: list[Card],
     card_db: CardDB,
     rng: random.Random,
+    character: str = "IRONCLAD",
+    floor: int = 10,
 ) -> dict:
     """Decide rest site action: rest (heal) or smith (upgrade).
+
+    Character-specific HP thresholds (matching the live advisor):
+      - Silent: rest below 50%, always upgrade above 70%
+      - Ironclad: rest below 40%, always upgrade above 60%
+    Gray zone: upgrade if the deck has a high-value unupgraded card.
+
+    Also uses the organic card picker scoring to identify the best
+    upgrade target by intrinsic card power.
 
     Returns dict with hp_delta and optionally upgraded card index.
     """
     hp_pct = hp / max_hp if max_hp > 0 else 1.0
 
-    if hp_pct < STRATEGY["rest_heal_threshold"]:
-        # Rest: heal 30% max HP
+    # Character-specific thresholds
+    is_silent = character.upper() == "SILENT"
+    rest_threshold = 0.50 if is_silent else 0.40
+    upgrade_threshold = 0.70 if is_silent else 0.60
+
+    # Always rest when HP is critical
+    if hp_pct < rest_threshold:
         heal = int(max_hp * 0.3)
         return {"action": "rest", "hp_delta": heal, "upgrade_card_idx": None}
 
-    # Smith: upgrade the best card
+    # Score upgradeable cards using the organic picker's power scoring
     upgradeable = []
     for i, card in enumerate(deck):
         if card.upgraded:
             continue
         if card.card_type in (CardType.STATUS, CardType.CURSE):
             continue
-        # Score: prefer upgrading higher-tier cards
-        _init_tier_scores()
-        score = _TIER_SCORES.get(card.name.lower(), 40)
-        # Also prefer upgrading cards with good upgrade deltas
-        upgraded = card_db.get_upgraded(card.id)
-        if upgraded:
-            if upgraded.damage and card.damage:
-                score += (upgraded.damage - card.damage) * 2
-            if upgraded.block and card.block:
-                score += (upgraded.block - card.block) * 2
+        # Skip basic cards — upgrading Strike/Defend is almost never worth it
+        if card.name in ("Strike", "Defend"):
+            continue
+
+        score = 0.0
+        try:
+            from .card_picker import extract_properties, _card_power_score
+            props = extract_properties(card)
+            score = _card_power_score(card, props) * 100
+
+            # Bonus for upgrading cards with large stat deltas
+            upgraded = card_db.get_upgraded(card.id)
+            if upgraded:
+                uprops = extract_properties(upgraded)
+                # Damage improvement
+                if uprops.deals_damage > props.deals_damage:
+                    score += (uprops.deals_damage - props.deals_damage) * 2
+                # Block improvement
+                if uprops.grants_block > props.grants_block:
+                    score += (uprops.grants_block - props.grants_block) * 2
+                # Draw improvement
+                if uprops.draws_cards > props.draws_cards:
+                    score += (uprops.draws_cards - props.draws_cards) * 10
+                # Poison improvement
+                if uprops.applies_poison > props.applies_poison:
+                    score += (uprops.applies_poison - props.applies_poison) * 3
+
+            # Powers are high-priority upgrades (permanent effects)
+            if props.is_power:
+                score += 15
+        except Exception:
+            # Fallback: tier-based scoring
+            _init_tier_scores()
+            score = _TIER_SCORES.get(card.name.lower(), 40)
+            upgraded = card_db.get_upgraded(card.id)
+            if upgraded:
+                if upgraded.damage and card.damage:
+                    score += (upgraded.damage - card.damage) * 2
+                if upgraded.block and card.block:
+                    score += (upgraded.block - card.block) * 2
+
         upgradeable.append((i, score))
 
     if not upgradeable:
@@ -1082,16 +1569,120 @@ def _rest_site_decision(
         return {"action": "rest", "hp_delta": heal, "upgrade_card_idx": None}
 
     upgradeable.sort(key=lambda x: x[1], reverse=True)
-    return {"action": "smith", "hp_delta": 0, "upgrade_card_idx": upgradeable[0][0]}
+    best_idx, best_score = upgradeable[0]
+
+    # Always upgrade when HP is high
+    if hp_pct >= upgrade_threshold:
+        return {"action": "smith", "hp_delta": 0, "upgrade_card_idx": best_idx}
+
+    # Gray zone: upgrade if we have a genuinely high-value target
+    if best_score >= 50:
+        return {"action": "smith", "hp_delta": 0, "upgrade_card_idx": best_idx}
+
+    # Otherwise rest
+    heal = int(max_hp * 0.3)
+    return {"action": "rest", "hp_delta": heal, "upgrade_card_idx": None}
 
 
 # ---------------------------------------------------------------------------
-# Shop simulation (simplified)
+# Shop simulation — archetype-aware, multi-step
 # ---------------------------------------------------------------------------
 
 SHOP_CARD_REMOVE_COST = 75
 SHOP_CARD_COSTS = {"Common": 50, "Uncommon": 75, "Rare": 150}
 SHOP_POTION_COST = 50  # Flat cost for any potion
+SHOP_RELIC_COST = 150   # Simplified flat relic price
+
+# Cards that should never be removed — core identity cards
+_PROTECTED_CARDS = frozenset({"Survivor", "Neutralize", "Bash", "Eruption", "Vigilance"})
+
+
+def _score_card_for_removal(card: Card, deck: list[Card], floor: int,
+                            hp: int, max_hp: int) -> float:
+    """Score a card for removal — lower score = better removal candidate.
+
+    Uses intrinsic card power + archetype alignment but weights differently
+    from the *pick* scorer: a card already in the deck has proven value
+    from its raw stats (damage, block, draw) even if off-archetype.
+    The alignment penalty is halved so useful generics (Dash, Backflip)
+    aren't removal targets just because they don't match the archetype.
+
+    Protected cards get a high score so they are never removed.
+    """
+    if card.name in _PROTECTED_CARDS:
+        return 999.0
+
+    try:
+        from .card_picker import (extract_properties, build_signature,
+                                  _card_power_score, _alignment_score)
+
+        props = extract_properties(card)
+        sig = build_signature(deck)
+
+        # Intrinsic power is the main driver for removal scoring
+        power = _card_power_score(card, props)
+        # Halve the alignment penalty — off-archetype cards that are
+        # already in the deck still contribute raw stats
+        alignment = _alignment_score(card, props, sig) * 0.5
+
+        # Upgraded cards are more valuable than their base versions
+        upgrade_bonus = 0.05 if card.upgraded else 0.0
+
+        return max(0.01, power + alignment + upgrade_bonus)
+    except Exception:
+        # Fallback: basic starters are worst, everything else is neutral
+        if card.name in ("Strike", "Defend") and not card.upgraded:
+            return 0.05
+        return 0.50
+
+
+def _score_relic_for_purchase(relic_name: str, deck: list[Card],
+                              character: str) -> float:
+    """Score a relic for purchase based on archetype fit.
+
+    Returns 0.0–2.0.  Uses the RELIC_GUIDE from config if available.
+    """
+    try:
+        from .config_a import RELIC_GUIDE
+        from .card_picker import build_signature
+
+        sig = build_signature(deck)
+        archetype = sig.dominant_archetype
+
+        guide = RELIC_GUIDE.get(character, {})
+
+        # Check avoid list first
+        avoid = guide.get("avoid", {}).get("relics", [])
+        if relic_name in avoid:
+            return -1.0
+
+        # Top picks are always good
+        top = guide.get("top_picks", {}).get("relics", [])
+        if relic_name in top:
+            return 2.0
+
+        # Archetype-specific match
+        archetype_to_category = {
+            "poison": "poison_synergy",
+            "shiv": "shiv_synergy",
+            "sly": "sly_synergy",
+        }
+        if archetype in archetype_to_category:
+            cat_key = archetype_to_category[archetype]
+            cat_relics = guide.get(cat_key, {}).get("relics", [])
+            if relic_name in cat_relics:
+                return 1.5
+
+        # Partial match — in some category but not our archetype
+        for key, info in guide.items():
+            if key in ("top_picks", "avoid"):
+                continue
+            if relic_name in info.get("relics", []):
+                return 0.5
+
+        return 0.0
+    except Exception:
+        return 0.0
 
 
 def _simulate_shop(
@@ -1100,37 +1691,83 @@ def _simulate_shop(
     card_db: CardDB,
     pools: dict[str, list[Card]],
     rng: random.Random,
+    floor: int = 8,
+    hp: int = 50,
+    max_hp: int = 80,
+    character: str = "SILENT",
+    potions: list[dict] | None = None,
 ) -> dict:
-    """Simulate a shop visit.
+    """Simulate a shop visit with archetype-aware multi-step purchasing.
 
-    Strategy: always try to remove a Strike/Defend first, then consider
-    buying a good card.
+    Priority order:
+      1. Remove the weakest card (by organic scorer, not just Strike/Defend)
+      2. Buy a relic that fits the archetype (if score >= 1.0)
+      3. Buy an archetype-fitting card (using score_card)
+      4. Buy a potion if HP is low and we have room
 
-    Returns: {gold_delta, cards_added, cards_removed, card_upgraded}
+    Returns: {gold_delta, cards_added, cards_removed, card_upgraded,
+              relics_bought, potions_bought}
     """
-    result = {"gold_delta": 0, "cards_added": [], "cards_removed": [],
-              "card_upgraded": None}
+    if potions is None:
+        potions = []
 
-    # Priority 1: remove a basic card
-    if gold >= SHOP_CARD_REMOVE_COST:
-        removable = [
-            (i, c) for i, c in enumerate(deck)
-            if c.name in ("Strike", "Defend") and not c.upgraded
+    result = {
+        "gold_delta": 0,
+        "cards_added": [],
+        "cards_removed": [],
+        "card_upgraded": None,
+        "relics_bought": [],
+        "potions_bought": [],
+    }
+
+    # --- Step 1: Remove the weakest card in the deck ---
+    if gold >= SHOP_CARD_REMOVE_COST and len(deck) >= 8:
+        # Score every card; find the worst contributor
+        scored = [
+            (i, c, _score_card_for_removal(c, deck, floor, hp, max_hp))
+            for i, c in enumerate(deck)
         ]
-        if removable:
-            idx, card = removable[0]
-            result["cards_removed"].append(idx)
+        scored.sort(key=lambda x: x[2])  # Lowest score = worst card
+
+        worst_idx, worst_card, worst_score = scored[0]
+        # Only remove if the card is genuinely weak (below 0.25 contribution)
+        # or is an unupgraded basic (Strike/Defend always worth removing)
+        is_basic = worst_card.name in ("Strike", "Defend") and not worst_card.upgraded
+        if worst_score < 0.25 or is_basic:
+            result["cards_removed"].append(worst_idx)
             result["gold_delta"] -= SHOP_CARD_REMOVE_COST
             gold -= SHOP_CARD_REMOVE_COST
 
-    # Priority 2: buy a good card if we can afford it and deck isn't bloated
-    if gold >= 50 and len(deck) < STRATEGY["deck_warn_threshold"]:
-        # Offer 3 cards from the pool
-        offered = _offer_card_rewards(pools, deck, 3)
-        pick = _pick_card_reward(offered, deck)
+    # --- Step 2: Buy a relic (if affordable and good fit) ---
+    if gold >= SHOP_RELIC_COST:
+        # Simulate shop relic offering: pick 3 from available relics
+        _ensure_data_loaded()
+        all_relic_names = [r.get("name", r["id"]) for r in _RELICS_BY_ID.values()]
+        if all_relic_names:
+            shop_relics = rng.sample(all_relic_names,
+                                     min(3, len(all_relic_names)))
+            best_relic, best_relic_score = None, 0.0
+            for rname in shop_relics:
+                score = _score_relic_for_purchase(rname, deck, character)
+                if score > best_relic_score:
+                    best_relic = rname
+                    best_relic_score = score
+
+            # Only buy relics that are top picks or strong archetype matches
+            if best_relic_score >= 1.0 and best_relic is not None:
+                result["relics_bought"].append(best_relic)
+                result["gold_delta"] -= SHOP_RELIC_COST
+                gold -= SHOP_RELIC_COST
+
+    # --- Step 3: Buy a card (archetype-aware, using organic scorer) ---
+    if gold >= 50:
+        # Shop offers more cards than combat rewards (typically 6-7 in STS2)
+        offered = _offer_card_rewards(pools, deck, 6)
+        # Use the organic picker for scoring
+        pick = _smart_pick_or_fallback(offered, deck, floor, hp, max_hp)
         if pick:
-            # Estimate cost from pool membership
-            cost = 75  # Default
+            # Determine cost by rarity
+            cost = 75  # Default (Uncommon)
             for rarity, cards in pools.items():
                 if any(c.id == pick.id for c in cards):
                     cost = SHOP_CARD_COSTS.get(rarity, 75)
@@ -1138,6 +1775,22 @@ def _simulate_shop(
             if gold >= cost:
                 result["cards_added"].append(pick)
                 result["gold_delta"] -= cost
+                gold -= cost
+
+    # --- Step 4: Buy a potion if HP is low and we have room ---
+    hp_ratio = hp / max(1, max_hp)
+    potion_count = len(potions) + len(result["potions_bought"])
+    if (gold >= SHOP_POTION_COST
+            and hp_ratio < 0.55
+            and potion_count < POTION_SLOTS):
+        # Pick a useful potion — heal potion prioritised when low HP
+        if hp_ratio < 0.35:
+            pot = {"name": "Blood Potion", "heal": 20}
+        else:
+            pot = rng.choice(POTION_TYPES)
+        result["potions_bought"].append(pot)
+        result["gold_delta"] -= SHOP_POTION_COST
+        gold -= SHOP_POTION_COST
 
     return result
 
@@ -1254,8 +1907,8 @@ def simulate_act1(
     # Act data
     act_data = _ACTS_BY_ID.get("OVERGROWTH", {})
 
-    # Generate map
-    room_sequence = _generate_act1_map(rng)
+    # Generate map with choices (dynamic pathing based on game state)
+    map_with_choices = _generate_act1_map_with_choices(rng)
 
     # Potions
     potions: list[dict] = []  # Start with no potions (acquired from combat)
@@ -1271,12 +1924,22 @@ def simulate_act1(
     rng.shuffle(events_list)
     event_idx = 0
 
-    for floor_num, room_type in enumerate(room_sequence, 1):
+    for floor_num, floor_entry in enumerate(map_with_choices, 1):
         result.floor_reached = floor_num
 
+        # Resolve room type: either forced (string) or chosen from options (list)
+        if isinstance(floor_entry, list):
+            room_type = _choose_room(
+                floor_entry, hp, max_hp, gold, len(deck), character)
+        else:
+            room_type = floor_entry
+
         if verbose:
-            print(f"  Floor {floor_num}: {room_type} (HP: {hp}/{max_hp}, "
-                  f"Gold: {gold}, Deck: {len(deck)})")
+            choices_str = ""
+            if isinstance(floor_entry, list):
+                choices_str = f" (chose from {floor_entry})"
+            print(f"  Floor {floor_num}: {room_type}{choices_str} "
+                  f"(HP: {hp}/{max_hp}, Gold: {gold}, Deck: {len(deck)})")
 
         if room_type in ("weak", "normal", "elite", "boss"):
             # Pick encounter
@@ -1284,12 +1947,14 @@ def simulate_act1(
             if enc_id is None:
                 continue
 
-            # Run combat
+            # Run combat (boss fights get is_boss=True for potion dump + deeper search)
+            _is_boss = (room_type == "boss")
             combat, potions = simulate_combat(
                 deck=deck, player_hp=hp, player_max_hp=max_hp,
                 player_max_energy=max_energy, encounter_id=enc_id,
                 card_db=card_db, rng=rng, potions=potions,
                 solver_time_limit_ms=solver_time_limit_ms,
+                is_boss=_is_boss,
             )
             result.combats_fought += 1
             result.total_turns += combat.turns
@@ -1334,7 +1999,8 @@ def simulate_act1(
             # Card reward (not for boss — boss gives relic)
             if room_type != "boss":
                 offered = _offer_card_rewards(pools, deck)
-                pick = _pick_card_reward(offered, deck)
+                # Use organic picker (rule-based + alpha-blended ML)
+                pick = _smart_pick_or_fallback(offered, deck, floor_num, hp, max_hp)
                 if pick:
                     deck.append(pick)
                     result.cards_picked.append(pick.name)
@@ -1347,7 +2013,8 @@ def simulate_act1(
                 result.outcome = "win"
 
         elif room_type == "rest":
-            decision = _rest_site_decision(hp, max_hp, deck, card_db, rng)
+            decision = _rest_site_decision(hp, max_hp, deck, card_db, rng,
+                                           character=character, floor=floor_num)
             if decision["action"] == "rest":
                 hp = min(hp + decision["hp_delta"], max_hp)
                 result.rests_taken += 1
@@ -1393,17 +2060,35 @@ def simulate_act1(
                     print(f"    Event: {eid} (HP: {hp}/{max_hp})")
 
         elif room_type == "shop":
-            shop_result = _simulate_shop(deck, gold, card_db, pools, rng)
+            shop_result = _simulate_shop(
+                deck, gold, card_db, pools, rng,
+                floor=floor_num, hp=hp, max_hp=max_hp,
+                character=character, potions=potions,
+            )
             gold += shop_result["gold_delta"]
 
             # Remove cards (descending index)
             for idx in sorted(shop_result["cards_removed"], reverse=True):
                 if idx < len(deck):
+                    removed_name = deck[idx].name
                     deck.pop(idx)
+                    if verbose:
+                        print(f"    Shop removed: {removed_name}")
 
             for card in shop_result["cards_added"]:
                 deck.append(card)
                 result.cards_picked.append(card.name)
+                if verbose:
+                    print(f"    Shop bought card: {card.name}")
+
+            for relic_name in shop_result.get("relics_bought", []):
+                if verbose:
+                    print(f"    Shop bought relic: {relic_name}")
+
+            for pot in shop_result.get("potions_bought", []):
+                potions.append(dict(pot))
+                if verbose:
+                    print(f"    Shop bought potion: {pot['name']}")
 
             if verbose:
                 print(f"    Shop: gold now {gold}")

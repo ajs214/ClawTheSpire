@@ -33,7 +33,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.optim import Adam
-from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
 
 from ..actions import Action, END_TURN, enumerate_actions
 from ..combat_engine import (
@@ -58,7 +58,7 @@ from ..simulator import (
 )
 
 from .encoding import EncoderConfig, Vocabs, build_vocabs_from_card_db
-from .mcts import MCTS
+from .mcts import MCTS, scale_simulations
 from .network import STS2Network
 from .state_tensor import encode_state, encode_actions
 
@@ -77,6 +77,8 @@ class TrainingSample:
     action_features: torch.Tensor
     action_mask: torch.Tensor
     num_actions: int
+    wasted_energy: bool = False  # True if this was an END_TURN with playable cards
+    value_penalty: float = 0.0   # Additional penalty applied when value is assigned
 
 
 @dataclass
@@ -113,6 +115,29 @@ ROOM_TYPE_TO_OPTION = {
     "shop": OPTION_MAP_SHOP,
     "rest": OPTION_MAP_REST,
 }
+
+
+_JUNK_TYPES = {CardType.STATUS, CardType.CURSE}
+
+
+def _affordable_play_actions(
+    actions: list[Action], state: CombatState,
+) -> list[Action]:
+    """Return playable non-junk card actions the player can afford right now."""
+    hand = state.player.hand
+    energy = state.player.energy
+    affordable = []
+    for a in actions:
+        if a.action_type != "play_card" or a.card_idx is None:
+            continue
+        if a.card_idx >= len(hand):
+            continue
+        card = hand[a.card_idx]
+        if card.card_type in _JUNK_TYPES:
+            continue
+        if card.cost <= energy:
+            affordable.append(a)
+    return affordable
 
 
 class ReplayBuffer:
@@ -169,6 +194,16 @@ TRAINING_ENCOUNTERS = [
     "SHRINKER_BEETLE_WEAK",            # Single Shrinker Beetle
     "FUZZY_WURM_CRAWLER_WEAK",         # Single Fuzzy Wurm Crawler
     "SLIMES_WEAK",                     # Leaf Slime (M/S) + Twig Slime (M/S)
+    "CORPSE_SLUGS_WEAK",              # Single Corpse Slug
+    "EXOSKELETONS_WEAK",              # Single Exoskeleton
+    "SCROLLS_OF_BITING_WEAK",         # Single Scroll of Biting
+    "SEAPUNK_WEAK",                    # Single Seapunk
+    "SLUDGE_SPINNER_WEAK",            # Single Sludge Spinner
+    "TUNNELER_WEAK",                   # Single Tunneler
+    "TOADPOLES_WEAK",                  # Toadpoles
+    "THIEVING_HOPPER_WEAK",           # Single Thieving Hopper
+    "DEVOTED_SCULPTOR_WEAK",          # Single Devoted Sculptor
+    "BOWLBUGS_WEAK",                   # 3 Bowlbugs
 
     # ── Normal encounters (floors 4-12, the bulk of Act 1) ──
     "NIBBITS_NORMAL",                  # Nibbit (stronger variant)
@@ -183,16 +218,61 @@ TRAINING_ENCOUNTERS = [
     "FOGMOG_NORMAL",                   # Eye With Teeth + Fogmog
     "OVERGROWTH_CRAWLERS",             # Fuzzy Wurm Crawler + Shrinker Beetle
     "SLITHERING_STRANGLER_NORMAL",     # 6-enemy fight — hardest normal encounter
+    "CHOMPERS_NORMAL",                 # Chomper — blocks + debuffs
+    "BOWLBUGS_NORMAL",                 # 4 Bowlbugs — mixed group
+    "CORPSE_SLUGS_NORMAL",            # Corpse Slugs
+    "CONSTRUCT_MENAGERIE_NORMAL",      # Cubex + Punch Construct
+    "CULTISTS_NORMAL",                 # Calcified + Damp Cultist
+    "FOSSIL_STALKER_NORMAL",           # Fossil Stalker
+    "FROG_KNIGHT_NORMAL",              # Frog Knight — high damage
+    "LOUSE_PROGENITOR_NORMAL",         # Louse Progenitor — tanky
+    "LIVING_FOG_NORMAL",               # Living Fog + Gas Bomb
+    "TWO_TAILED_RATS_NORMAL",         # Two Tailed Rats
+    "PUNCH_CONSTRUCT_NORMAL",          # Punch Construct — charge up + big hits
+    "SPINY_TOAD_NORMAL",              # Spiny Toad — thorns + AoE
+    "HUNTER_KILLER_NORMAL",            # Hunter Killer — debuff + multi-hit
+    "OWL_MAGISTRATE_NORMAL",           # Owl Magistrate — debuffs + tanky
+    "SLIMED_BERSERKER_NORMAL",         # Slimed Berserker — ramps strength
+    "MYTES_NORMAL",                    # Mytes — small swarm
+    "AXEBOTS_NORMAL",                  # Axebots
+    "HAUNTED_SHIP_NORMAL",             # Haunted Ship — multi-hit + debuffs
+    "SEWER_CLAM_NORMAL",              # Sewer Clam — blocks + attacks
+    "THE_LOST_AND_FORGOTTEN_NORMAL",   # The Lost + The Forgotten
+    "THE_OBSCURA_NORMAL",             # The Obscura — heavy debuffs
+    "OVICOPTER_NORMAL",                # Ovicopter + Tough Egg
+    "EXOSKELETONS_NORMAL",             # Exoskeletons (normal variant)
+    "SCROLLS_OF_BITING_NORMAL",        # Scrolls of Biting (normal)
+    "TOADPOLES_NORMAL",                # Toadpoles + Calcified Cultist
+    "FABRICATOR_NORMAL",               # Fabricator — ramps + big hit
+    "GLOBE_HEAD_NORMAL",               # Globe Head
 
-    # ── Elites (high-threat fights the bot currently struggles with) ──
+    # ── Elites (high-threat fights) ──
     "BYRDONIS_ELITE",                  # Single elite — high damage
     "BYGONE_EFFIGY_ELITE",             # Single elite — 0% win rate in logs
     "PHROG_PARASITE_ELITE",            # Phrog Parasite + Wriggler
+    "DECIMILLIPEDE_ELITE",             # 3-segment segmented enemy
+    "ENTOMANCER_ELITE",                # Summons + multi-hit + big finisher
+    "SKULKING_COLONY_ELITE",           # Swarm + crush
+    "MECHA_KNIGHT_ELITE",              # Shield bash + triple strike + overclock
+    "INFESTED_PRISMS_ELITE",           # Beam + haze + crystal shell
+    "TERROR_EEL_ELITE",                # Electric multi-hit + terrify
+    "SOUL_NEXUS_ELITE",                # Soul drain + spirit barrage
+    "PHANTASMAL_GARDENERS_ELITE",      # Vine lash + thorn storm
+    "KNIGHTS_ELITE",                   # 3-knight team (Flail + Magi + Spectral)
 
-    # ── Bosses (0% win rate in logs — highest priority for improvement) ──
+    # ── Bosses ──
     "VANTOM_BOSS",                     # Act 1 boss — long fight
     "CEREMONIAL_BEAST_BOSS",           # Act 1 boss — high HP
     "THE_KIN_BOSS",                    # Act 1 boss — Kin Follower + Kin Priest
+    "DOORMAKER_BOSS",                  # Doormaker + Door
+    "WATERFALL_GIANT_BOSS",            # High HP, cascade + tidal crush
+    "LAGAVULIN_MATRIARCH_BOSS",        # Sleeps then bursts, strength ramp
+    "KNOWLEDGE_DEMON_BOSS",            # Heavy debuffs + mind rend
+    "KAISER_CRAB_BOSS",                # Crusher + Rocket duo
+    "QUEEN_BOSS",                      # Queen + Torch Head Amalgam
+    "SOUL_FYSH_BOSS",                  # Soul siphon + bubble barrage
+    "TEST_SUBJECT_BOSS",               # Mutates + frenzy + annihilate
+    "THE_INSATIABLE_BOSS",             # Devour + feast — highest damage boss
 ]
 
 
@@ -269,11 +349,14 @@ def play_one_game(
     turn_count = 0
     outcome = None
 
+    player_max_hp = state.player.max_hp
+
     for turn_num in range(1, max_turns + 1):
         start_turn(state)
         turn_count = turn_num
         _set_enemy_intents(state, enemy_ais)
 
+        turn_start_sample = len(samples)
         cards_this_turn = 0
         while cards_this_turn < 12:
             outcome = is_combat_over(state)
@@ -287,10 +370,24 @@ def play_one_game(
             state_tensors = encode_state(state, vocabs, config)
             action_features, action_mask = encode_actions(actions, state, vocabs, config)
 
+            scaled_sims = scale_simulations(mcts_simulations, len(actions))
             action, policy, _root_value = mcts.search(
-                state, num_simulations=mcts_simulations,
+                state, num_simulations=scaled_sims,
                 temperature=temperature,
             )
+
+            # -- Force-play override: if MCTS wants END_TURN but there are
+            # affordable non-junk cards in hand, override with a random
+            # playable card 80% of the time during training.  This generates
+            # exploration data so the network learns the value of playing
+            # affordable cards vs ending early.
+            wasted = False
+            if action.action_type == "end_turn":
+                affordable = _affordable_play_actions(actions, state)
+                if affordable:
+                    wasted = True
+                    if rng.random() < 0.80:
+                        action = rng.choice(affordable)
 
             samples.append(TrainingSample(
                 state_tensors=state_tensors,
@@ -299,6 +396,7 @@ def play_one_game(
                 action_features=action_features,
                 action_mask=action_mask,
                 num_actions=len(actions),
+                wasted_energy=wasted,
             ))
 
             if action.action_type == "end_turn":
@@ -325,13 +423,64 @@ def play_one_game(
             if outcome:
                 break
 
+        turn_end_sample = len(samples)
+
         if outcome:
             break
+
+        # -- Intent-aware reward signals --
+        incoming_damage = 0
+        for e in state.enemies:
+            if e.is_alive and e.intent_type == "Attack" and e.intent_damage:
+                incoming_damage += e.intent_damage * max(1, e.intent_hits)
+
+        hp_before_enemy = state.player.hp
+        player_block_played = state.player.block
+        hand_block_available = sum(
+            c.block for c in state.player.hand
+            if c.block and c.block > 0 and c.cost <= state.player.energy
+        )
+        hand_damage_available = sum(
+            c.damage for c in state.player.hand
+            if c.damage and c.damage > 0 and c.cost <= state.player.energy
+        )
+
+        # Signal 1: Offensive-when-safe
+        if (incoming_damage == 0 and player_block_played > 0
+                and turn_start_sample < turn_end_sample):
+            safe_block_penalty = min(0.08, player_block_played / max(1, player_max_hp) * 0.3)
+            for idx in range(turn_start_sample, turn_end_sample):
+                samples[idx].value_penalty += safe_block_penalty
+
+        # Signal 2: Lethal-awareness
+        for e in state.enemies:
+            if e.is_alive and e.hp > 0 and e.hp <= hand_damage_available:
+                lethal_penalty = min(0.10, e.hp / max(1, player_max_hp) * 0.25)
+                for idx in range(turn_start_sample, turn_end_sample):
+                    samples[idx].value_penalty += lethal_penalty
+                break
 
         end_turn(state)
         resolve_enemy_intents(state)
         _resolve_sim_intents(state, enemy_ais)
         tick_enemy_powers(state)
+
+        hp_after_enemy = state.player.hp
+        damage_taken = max(0, hp_before_enemy - hp_after_enemy)
+
+        # Signal 3: Intent-weighted blocking
+        if turn_start_sample < turn_end_sample and incoming_damage > 0:
+            if player_block_played < incoming_damage:
+                gap = incoming_damage - player_block_played
+                under_penalty = min(0.15, gap / max(1, player_max_hp) * 0.4)
+                if hand_block_available > 0:
+                    for idx in range(turn_start_sample, turn_end_sample):
+                        samples[idx].value_penalty += under_penalty
+            elif player_block_played > incoming_damage * 1.5:
+                excess = player_block_played - incoming_damage
+                over_penalty = min(0.06, excess / max(1, player_max_hp) * 0.15)
+                for idx in range(turn_start_sample, turn_end_sample):
+                    samples[idx].value_penalty += over_penalty
 
         outcome = is_combat_over(state)
         if outcome:
@@ -352,6 +501,12 @@ def play_one_game(
 
     for sample in samples:
         sample.value = value
+        # Per-step penalties: wasted energy + any block penalty
+        penalty = sample.value_penalty
+        if sample.wasted_energy:
+            penalty += 0.15
+        if penalty > 0:
+            sample.value = max(-1.0, sample.value - penalty)
 
     return samples, outcome, turn_count, encounter_id
 
@@ -399,7 +554,7 @@ def train_batch(
         log_probs = F.log_softmax(logits[0, :len(sample.policy)], dim=0)
         p_loss = -torch.sum(target_policy[:len(log_probs)] * log_probs)
 
-        loss = 0.25 * v_loss + p_loss
+        loss = 0.5 * v_loss + p_loss
         if torch.isnan(loss):
             nan_combat += 1
             continue
@@ -483,6 +638,81 @@ def _read_progress(path: Path) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# XGBoost card picker refresh
+# ---------------------------------------------------------------------------
+
+def _refresh_xgboost(card_db, games: int = 200) -> None:
+    """Collect fresh card pick data and retrain the XGBoost model.
+
+    Runs before the AlphaZero training loop so the blended card picker
+    has an up-to-date ML component from the start.  Takes ~1-2 min for
+    200 games.
+    """
+    try:
+        from ..card_picker_xgb import (
+            CardPickCollector,
+            CardPickerXGB,
+            MODEL_DIR,
+            records_to_training_data,
+        )
+        from ..collect_card_picks import collect_one_run
+    except ImportError as e:
+        print(f"[XGBoost] Skipping refresh — missing dependency: {e}", flush=True)
+        return
+
+    print(f"[XGBoost] Refreshing card picker model ({games} games)...", flush=True)
+    t0 = time.time()
+
+    collector = CardPickCollector()
+    wins = 0
+    for i in range(games):
+        seed = random.randint(0, 2**31)
+        result = collect_one_run(
+            run_id=i,
+            collector=collector,
+            character="SILENT",
+            seed=seed,
+        )
+        if result.outcome == "win":
+            wins += 1
+
+    elapsed = time.time() - t0
+    n_records = len(collector.records)
+    print(f"[XGBoost] Collected {n_records} card pick records "
+          f"({wins}/{games} wins) in {elapsed:.1f}s", flush=True)
+
+    if n_records < 50:
+        print("[XGBoost] Too few records, skipping model training", flush=True)
+        return
+
+    # Save raw data for reference
+    data_path = MODEL_DIR.parent / "card_pick_data_latest.json"
+    collector.save(str(data_path))
+
+    # Convert to training arrays and train
+    try:
+        import numpy as np
+
+        X, y = records_to_training_data(str(data_path), card_db)
+        print(f"[XGBoost] Training on {len(X)} samples "
+              f"(label mean={y.mean():.3f}, std={y.std():.3f})", flush=True)
+
+        model_path = MODEL_DIR / "card_picker.json"
+        MODEL_DIR.mkdir(parents=True, exist_ok=True)
+        picker = CardPickerXGB()
+        picker.train(X, y, save_path=str(model_path))
+
+        # Reload into the global card picker
+        from ..card_picker import load_ml_model
+        load_ml_model(str(model_path))
+        print(f"[XGBoost] Model refreshed and loaded ({len(X)} samples, "
+              f"{time.time() - t0:.1f}s total)", flush=True)
+
+    except Exception as e:
+        print(f"[XGBoost] Training failed: {e}", flush=True)
+
+
+# ---------------------------------------------------------------------------
 # Worker: headless training loop
 # ---------------------------------------------------------------------------
 
@@ -510,7 +740,14 @@ def train_worker(
         {"params": embed_params, "weight_decay": 0},
         {"params": other_params, "weight_decay": 1e-4},
     ], lr=lr)
-    scheduler = CosineAnnealingLR(optimizer, T_max=num_generations, eta_min=1e-5)
+    # Warm restarts: LR resets every T_0 generations, giving the network
+    # periodic chances to escape local minima as its own play improves.
+    # T_0=120 means ~9 restart cycles over 1080 gens, each starting at
+    # full LR and decaying to eta_min before resetting.
+    restart_period = max(60, num_generations // 9)
+    scheduler = CosineAnnealingWarmRestarts(
+        optimizer, T_0=restart_period, T_mult=1, eta_min=5e-5
+    )
     replay_buffer = ReplayBuffer(capacity=50_000)
     option_buffer = ReplayBuffer(capacity=15_000)  # All non-combat decisions (cards, rest, map, shop)
     mcts = MCTS(network, vocabs, config, card_db=card_db, device="cpu")
@@ -554,6 +791,9 @@ def train_worker(
 
     from .full_run import play_full_run
 
+    # --- Refresh XGBoost card picker model before training ---
+    _refresh_xgboost(card_db, games=200)
+
     print(f"AlphaZero training (full runs): {num_generations} generations, {games_per_generation} runs/gen, {mcts_simulations} sims", flush=True)
     print(f"Checkpoints: {save_path}", flush=True)
     print(f"Progress: {progress_path}", flush=True)
@@ -563,16 +803,23 @@ def train_worker(
 
         # --- Self-play: full Act 1 runs ---
         gen_wins = 0
+        progress = gen / num_generations
         for game_num in range(games_per_generation):
-            # Cosine decay: smooth exploration → exploitation over full training.
-            # Stays above 0.5 for ~60% of training, floors at 0.3 (not 0.1).
-            progress = gen / num_generations
-            game_temp = 0.3 + 0.7 * temperature * (1 + math.cos(math.pi * progress)) / 2
+            # Temperature: cosine decay, exploration → exploitation.
+            # Stays above 0.5 for ~60% of training, floors at 0.2 late.
+            game_temp = 0.2 + 0.8 * temperature * (1 + math.cos(math.pi * progress)) / 2
+
+            # Progressive sim scaling: ramp up sims as training progresses.
+            # Early gens (network is random): base sims are sufficient.
+            # Late gens (network is trained): deeper search finds better plays.
+            # Scales from 60% → 140% of base sims over training.
+            sim_scale = 0.6 + 0.8 * progress
+            gen_sims = int(mcts_simulations * sim_scale)
 
             result = play_full_run(
                 mcts, card_db, vocabs, config,
                 character="SILENT",
-                mcts_simulations=mcts_simulations,
+                mcts_simulations=gen_sims,
                 temperature=game_temp,
                 rng=rng,
             )
@@ -589,6 +836,12 @@ def train_worker(
             if result.outcome == "win":
                 gen_wins += 1
                 total_wins += 1
+                # Update XGBoost alpha blend so card picker ramps ML weight
+                try:
+                    from ..card_picker import set_win_count
+                    set_win_count(total_wins)
+                except Exception:
+                    pass
 
             recent_games.append({
                 "num": total_games,
@@ -596,6 +849,8 @@ def train_worker(
                 "outcome": result.outcome,
                 "floor": result.floor_reached,
                 "hp": result.final_hp,
+                "archetype": getattr(result, 'archetype', 'unknown'),
+                "commitment": round(getattr(result, 'archetype_commitment', 0.0), 2),
             })
             if len(recent_games) > 50:
                 recent_games = recent_games[-50:]
@@ -618,6 +873,24 @@ def train_worker(
         mins, secs = divmod(int(total_elapsed), 60)
         hours, mins = divmod(mins, 60)
 
+        # Archetype stats from recent games
+        _recent_50 = recent_games[-50:]
+        _arch_counts = {}
+        _arch_wins = {}
+        for _g in _recent_50:
+            _a = _g.get("archetype", "unknown")
+            _arch_counts[_a] = _arch_counts.get(_a, 0) + 1
+            if _g["outcome"] == "win":
+                _arch_wins[_a] = _arch_wins.get(_a, 0) + 1
+        _arch_stats = {}
+        for _a, _cnt in _arch_counts.items():
+            _wins = _arch_wins.get(_a, 0)
+            _arch_stats[_a] = {
+                "count": _cnt,
+                "wins": _wins,
+                "win_rate": round(_wins / max(1, _cnt), 3),
+            }
+
         # Write progress
         stats = {
             "generation": gen,
@@ -637,6 +910,7 @@ def train_worker(
             "elapsed": f"{hours}:{mins:02d}:{secs:02d}",
             "gen_time": round(gen_elapsed, 1),
             "recent_games": recent_games[-20:],
+            "archetype_stats": _arch_stats,
             "status": f"Gen {gen}/{num_generations} complete",
             "timestamp": time.time(),
         }

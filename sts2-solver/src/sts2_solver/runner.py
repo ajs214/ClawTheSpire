@@ -50,7 +50,7 @@ from .run_logger import RunLogger
 from .solver import solve_turn, format_solution
 from .alphazero.encoding import build_vocabs_from_card_db, EncoderConfig
 from .alphazero.network import STS2Network
-from .alphazero.mcts import MCTS as AlphaZeroMCTS
+from .alphazero.mcts import MCTS as AlphaZeroMCTS, scale_simulations
 from .alphazero.state_tensor import encode_state as az_encode_state
 from .alphazero.self_play import (
     OPTION_REST, OPTION_SMITH, OPTION_SHOP_REMOVE, OPTION_SHOP_BUY,
@@ -58,7 +58,7 @@ from .alphazero.self_play import (
 )
 
 
-DEFAULT_CHARACTER = "Ironclad"
+DEFAULT_CHARACTER = "Silent"
 MAX_LOG_LINES = 50
 
 
@@ -227,10 +227,14 @@ class Runner:
         self._mcts_config = EncoderConfig()
         import torch
         network = STS2Network(self._mcts_vocabs, self._mcts_config)
-        # Load latest checkpoint if available
+        # Load latest checkpoint if available (prefer v3, fall back to v2)
         from pathlib import Path as _Path
-        ckpt_dir = _Path(__file__).resolve().parents[3] / "alphazero_checkpoints"
+        _base = _Path(__file__).resolve().parents[3]
+        ckpt_dir = _base / "alphazero_checkpoints_v3"
         ckpts = sorted(ckpt_dir.glob("gen_*.pt"), key=lambda p: p.stat().st_mtime) if ckpt_dir.exists() else []
+        if not ckpts:
+            ckpt_dir = _base / "alphazero_checkpoints_v2"
+            ckpts = sorted(ckpt_dir.glob("gen_*.pt"), key=lambda p: p.stat().st_mtime) if ckpt_dir.exists() else []
         self._checkpoint_name = None
         if ckpts:
             ckpt = torch.load(ckpts[-1], map_location="cpu", weights_only=True)
@@ -348,6 +352,38 @@ class Runner:
         if screen == "BUNDLE_SELECTION" and "choose_bundle" in actions:
             self._handle_bundle_selection()
             return False
+
+        # Fallback: "Choose a Pack" sub-screen sometimes reports as UNKNOWN
+        # instead of BUNDLE_SELECTION.  Detect by available action.
+        if "choose_bundle" in actions or "confirm_bundle" in actions:
+            self._handle_bundle_selection()
+            return False
+
+        # "Choose a Pack" may also appear as an event sub-screen where
+        # the only action is choose_event_option and the screen text
+        # indicates pack selection.  Auto-pick option 0.
+        if (screen not in ("MAIN_MENU", "CHARACTER_SELECT", "GAME_OVER")
+                and "choose_event_option" in actions
+                and len(actions) <= 2):
+            event = self.game_state.get("event") or {}
+            event_name = (event.get("name") or "").lower()
+            options = event.get("options") or []
+            # Detect pack/bundle sub-screens by checking option text
+            _option_text = " ".join(
+                (o.get("text") or o.get("label") or "") for o in options
+            ).lower()
+            _screen_text = (self.game_state.get("screen_text") or "").lower()
+            if any(kw in f"{event_name} {_option_text} {_screen_text}"
+                   for kw in ("pack", "bundle", "scroll boxes")):
+                self._log_action("[dim]auto: choose_event_option(0) — pack select[/dim]")
+                if not self.dry_run:
+                    try:
+                        self._execute_with_retry("choose_event_option", option_index=0)
+                        self.action_count += 1
+                        time.sleep(1.0)
+                    except Exception as e:
+                        self._log_action(f"  [red]Pack select failed: {e}[/red]")
+                return False
 
         if not actions:
             return False
@@ -808,11 +844,14 @@ class Runner:
                                           move_indices=self._combat_move_indices)
                 hand = list(sim_state.player.hand)
                 t0 = time.perf_counter()
+                from .actions import enumerate_actions as _enum_actions
+                _n_actions = len(_enum_actions(sim_state))
+                _sims = scale_simulations(200, _n_actions)
                 first_action, policy, root_value = self._mcts.search(
-                    sim_state, num_simulations=200, temperature=0,
+                    sim_state, num_simulations=_sims, temperature=0,
                 )
                 solve_ms = (time.perf_counter() - t0) * 1000
-                total_states += 200
+                total_states += _sims
                 total_solve_ms += solve_ms
                 best_score = max(policy) if policy else 0
                 if turn_root_value is None:
@@ -863,7 +902,7 @@ class Runner:
                         break
 
                     self._refresh()
-                    self._wait_for_ready()
+                    self._wait_for_ready(min_wait=0.5)
                     try:
                         gs = self.client.get_state()
                         self.game_state = gs
@@ -898,7 +937,9 @@ class Runner:
                 self._log_action(f"  [dim]\\[dry-run] Would play: {label}[/dim]")
                 break
 
-            # Execute the single card play
+            # Execute the single card play.
+            # Card animations take 0.4-0.8s; give the game a brief pause
+            # before sending the next action to reduce 409 rejections.
             mcp_action = action_to_mcp(first_action)
             try:
                 self._execute_with_retry(
@@ -914,8 +955,9 @@ class Runner:
 
             self._refresh()
 
-            # Wait for game to process, then get fresh state
-            self._wait_for_ready()
+            # Wait for game to process — use a longer min_wait for combat
+            # card plays (animations take longer than menu transitions).
+            self._wait_for_ready(min_wait=0.5)
             try:
                 gs = self.client.get_state()
                 self.game_state = gs
@@ -1027,6 +1069,93 @@ class Runner:
                         )
         except Exception:
             pass
+
+    # ------------------------------------------------------------------
+    # Mid-combat discard helper
+    # ------------------------------------------------------------------
+
+    def _pick_card_to_discard(self, gs: dict, cards: list[dict]) -> int:
+        """Pick the best card to discard from hand.
+
+        Priority (lowest score = discard first):
+          0  — Status / Curse cards (Slimed, Wound, Dazed, Burn, etc.)
+          1  — Unplayable: Ethereal cards about to exhaust, or
+               Unplayable flag set
+          2  — Too expensive: cost > remaining energy (can't play this turn)
+          3  — avoid-tier cards
+          5  — Strikes / Defends (basic filler)
+          8  — B-tier
+         12  — A-tier
+         15  — S-tier  (never discard if possible)
+         16  — Protected / key cards
+        """
+        from .config import CHARACTER_CONFIG, detect_character
+        from .deterministic_advisor import _card_tier
+
+        character = detect_character(gs)
+        cfg = CHARACTER_CONFIG.get(character, CHARACTER_CONFIG.get("ironclad", {}))
+        protect_cards = set(cfg.get("protect_cards", [cfg.get("key_card", "Bash")]))
+
+        # Get remaining energy from combat state
+        combat = gs.get("combat") or {}
+        player = combat.get("player") or {}
+        energy = player.get("energy", 3)
+
+        _STATUS_CURSE_TYPES = {"status", "curse"}
+
+        scored: list[tuple[int, int]] = []  # (score, index)
+        for card in cards:
+            name = card.get("name", card.get("card_id", "?"))
+            idx = card.get("index", card.get("i", 0))
+            card_type = (card.get("type") or "").lower()
+            cost = card.get("cost", card.get("energy_cost", 99))
+            # Handle X-cost and non-numeric costs
+            if not isinstance(cost, (int, float)):
+                cost = 99
+
+            # Protected / key card — never discard
+            if name in protect_cards:
+                scored.append((16, idx))
+                continue
+
+            # Status / Curse — always discard first
+            if card_type in _STATUS_CURSE_TYPES:
+                scored.append((0, idx))
+                continue
+
+            # Unplayable flag
+            if card.get("unplayable") or card.get("is_unplayable"):
+                scored.append((1, idx))
+                continue
+
+            # Too expensive to play this turn
+            if cost > energy:
+                scored.append((2, idx))
+                continue
+
+            # Tier-based scoring (reverse of play priority)
+            tier = _card_tier(name.rstrip("+"), character, card)
+            if tier == "avoid":
+                score = 3
+            elif "Strike" in name or "Defend" in name:
+                score = 5
+            elif tier == "B":
+                score = 8
+            elif tier == "A":
+                score = 12
+            elif tier == "S":
+                score = 15
+            else:
+                score = 6  # unknown tier — treat as low-B
+
+            scored.append((score, idx))
+
+        if not scored:
+            return 0
+
+        # Pick the card with the lowest score (most expendable)
+        scored.sort(key=lambda x: x[0])
+        return scored[0][1]
 
     # ------------------------------------------------------------------
     # Non-combat
@@ -1246,6 +1375,31 @@ class Runner:
                 if not self.dry_run:
                     try:
                         self._execute_with_retry("select_deck_card", option_index=0)
+                    except Exception:
+                        pass
+                return
+
+            # Mid-combat discard prompts (Survivor "Choose a card to Discard",
+            # Gambler's Brew, etc.): smart discard — drop unplayable/junk first,
+            # then least valuable by tier.
+            _is_discard = (
+                "discard" in prompt
+                and "discard pile" not in prompt
+            )
+            if _is_discard:
+                cards = sel.get("cards", [])
+                pick_idx = self._pick_card_to_discard(gs, cards)
+                pick_name = ""
+                for c in cards:
+                    if c.get("index", c.get("i", 0)) == pick_idx:
+                        pick_name = c.get("name", "?")
+                        break
+                self._log_action(
+                    f"  [dim]auto: select_deck_card({pick_idx}) — discard {pick_name}[/dim]"
+                )
+                if not self.dry_run:
+                    try:
+                        self._execute_with_retry("select_deck_card", option_index=pick_idx)
                     except Exception:
                         pass
                 return
@@ -1896,10 +2050,14 @@ class Runner:
             self._handle_single_deck_select(gs)
 
     def _handle_single_deck_select(self, gs: dict) -> None:
-        """Single-select deck screen — try network, fall back to deterministic."""
-        decision = self._az_decide_deck_select(gs)
-        if decision is None:
-            decision = decide_deck_select(gs)
+        """Single-select deck screen — deterministic tier-list decision.
+
+        NOTE: _az_decide_deck_select is disabled because the network's
+        evaluate_deck_change method was never implemented.  Calling it
+        adds ~200ms of wasted tensor work + exception overhead per screen.
+        Re-enable once evaluate_deck_change exists on STS2Network.
+        """
+        decision = decide_deck_select(gs)
         actions = gs.get("available_actions", [])
         run = gs.get("run") or {}
         self._execute_deterministic(gs, decision, "deck_select", actions, run)
@@ -2114,6 +2272,18 @@ class Runner:
         state" (retriable — game is animating) and permanent errors like
         "invalid_target" or "card cannot be played" (not retriable).
         """
+        # Truly permanent 409 errors — never retry these
+        _PERMANENT_409 = (
+            "invalid_target", "out of range",
+            "is locked", "out of stock", "not supported",
+        )
+        # Transient 409 errors — game is animating or card state shifted.
+        # "cannot be played" is often caused by sending a play_card while
+        # a previous card's animation is still resolving.
+        _TRANSIENT_409 = (
+            "cannot be played", "not available",
+        )
+
         for attempt in range(retries + 1):
             try:
                 return self.client.execute_action(
@@ -2127,21 +2297,19 @@ class Runner:
                 if "409" not in err_str:
                     raise
                 # Permanent errors — don't retry
-                if any(kw in err_str for kw in (
-                    "invalid_target", "cannot be played", "out of range",
-                    "is locked", "out of stock", "not supported",
-                )):
+                if any(kw in err_str for kw in _PERMANENT_409):
                     self._log_action(
                         f"  [yellow]rejected: {err_str[:120]}[/yellow]"
                     )
                     return {}
-                # Retriable (action not available — likely animating)
+                # Transient / animation timing — retry with backoff
                 if attempt < retries:
                     wait = min(delay * (1.5 ** attempt), 2.0)
                     time.sleep(wait)
                     continue
+                # Exhausted retries — log and move on
                 self._log_action(
-                    f"  [yellow]skipped (game busy after {retries} retries)[/yellow]"
+                    f"  [yellow]skipped after {retries} retries: {err_str[:80]}[/yellow]"
                 )
                 return {}
 

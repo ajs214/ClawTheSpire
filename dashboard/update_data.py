@@ -79,6 +79,7 @@ def _parse_run(fp: Path, gen: str) -> dict | None:
         "floor": last.get("floor", 0),
         "checkpoint": first.get("checkpoint", first.get("advisor_model", "unknown")),
         "character": first.get("character", "?"),
+        "config_profile": first.get("config_profile", "?"),
     }
 
 
@@ -99,6 +100,7 @@ def build_data(runs: list[dict]) -> dict:
                 "checkpoint": r["checkpoint"],
                 "run_id": r["run_id"],
                 "character": r.get("character", "The Ironclad"),
+                "config_profile": r.get("config_profile", "?"),
             }
             for r in runs
         ],

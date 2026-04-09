@@ -32,6 +32,7 @@ from ..combat_engine import (
     start_turn,
     tick_enemy_powers,
 )
+from ..card_picker import classify_deck
 from ..data_loader import CardDB, load_cards
 from ..models import Card, CombatState, EnemyState, PlayerState
 from ..simulator import (
@@ -63,13 +64,14 @@ from ..simulator import (
 )
 
 from .encoding import EncoderConfig, Vocabs
-from .mcts import MCTS
+from .mcts import MCTS, scale_simulations
 from .network import STS2Network
 from .self_play import (
     TrainingSample, OptionSample,
     OPTION_REST, OPTION_SMITH, OPTION_SHOP_REMOVE, OPTION_SHOP_BUY,
     OPTION_SHOP_LEAVE, OPTION_CARD_REWARD, OPTION_CARD_SKIP,
     OPTION_SHOP_BUY_POTION, ROOM_TYPE_TO_OPTION,
+    _affordable_play_actions,
 )
 from ..effects import discard_card_from_hand
 from .state_tensor import encode_state, encode_actions
@@ -109,6 +111,7 @@ def mcts_combat(
     max_turns: int = 30,
     potions: list[dict] | None = None,
     relics: frozenset[str] | None = None,
+    is_boss: bool = False,
 ) -> tuple[list[TrainingSample], str, int, int, list[dict]]:
     """Run one combat using MCTS. Returns (samples, outcome, turns, hp_after, remaining_potions)."""
     _ensure_data_loaded()
@@ -135,13 +138,28 @@ def mcts_combat(
     )
     state = CombatState(player=player, enemies=enemies, relics=relics or frozenset())
     start_combat(state)
+
+    # Boss fights: dump all offensive potions pre-combat and heal if low.
+    # This front-loads burst damage/buffs when it matters most.
+    # Non-boss fights: MCTS decides potion usage organically (save for boss).
+    if is_boss and state.player.potions:
+        from ..simulator import _use_precombat_potions, _use_emergency_potion
+        pre_potions = [p for p in state.player.potions if p]
+        remaining = _use_precombat_potions(state, pre_potions)
+        if state.player.hp < state.player.max_hp * 0.40:
+            remaining = _use_emergency_potion(state, remaining)
+        # Update the player's potion list (keep slots, clear used ones)
+        state.player.potions = remaining
+
     samples: list[TrainingSample] = []
+    turn_sample_ranges: list[tuple[int, int]] = []  # (start_idx, end_idx) per turn
     outcome = None
 
     for turn_num in range(1, max_turns + 1):
         start_turn(state)
         _set_enemy_intents(state, enemy_ais)
 
+        turn_start_sample = len(samples)
         cards_this_turn = 0
         while cards_this_turn < 12:
             outcome = is_combat_over(state)
@@ -155,10 +173,22 @@ def mcts_combat(
             state_tensors = encode_state(state, vocabs, config)
             action_card_ids, action_features, action_mask = encode_actions(actions, state, vocabs, config)
 
+            scaled_sims = scale_simulations(mcts_simulations, len(actions), is_boss=is_boss)
             action, policy, _root_value = mcts.search(
-                state, num_simulations=mcts_simulations,
+                state, num_simulations=scaled_sims,
                 temperature=temperature,
             )
+
+            # Force-play override: if MCTS wants END_TURN but affordable
+            # non-junk cards exist, override 80% of the time to generate
+            # exploration data showing the value of playing those cards.
+            wasted = False
+            if action.action_type == "end_turn":
+                affordable = _affordable_play_actions(actions, state)
+                if affordable:
+                    wasted = True
+                    if rng.random() < 0.80:
+                        action = rng.choice(affordable)
 
             samples.append(TrainingSample(
                 state_tensors=state_tensors,
@@ -168,6 +198,7 @@ def mcts_combat(
                 action_features=action_features,
                 action_mask=action_mask,
                 num_actions=len(actions),
+                wasted_energy=wasted,
             ))
 
             if action.action_type == "end_turn":
@@ -196,13 +227,77 @@ def mcts_combat(
             if outcome:
                 break
 
+        turn_end_sample = len(samples)
+        turn_sample_ranges.append((turn_start_sample, turn_end_sample))
+
         if outcome:
             break
+
+        # -- Intent-aware reward signals --
+        # Compute expected incoming damage from enemy intents
+        incoming_damage = 0
+        for e in state.enemies:
+            if e.is_alive and e.intent_type == "Attack" and e.intent_damage:
+                incoming_damage += e.intent_damage * max(1, e.intent_hits)
+
+        # Snapshot state before enemy phase
+        hp_before_enemy = state.player.hp
+        player_block_played = state.player.block  # block accumulated this turn
+        hand_block_available = sum(
+            c.block for c in state.player.hand
+            if c.block and c.block > 0 and c.cost <= state.player.energy
+        )
+        hand_damage_available = sum(
+            c.damage for c in state.player.hand
+            if c.damage and c.damage > 0 and c.cost <= state.player.energy
+        )
+
+        # Signal 1: Offensive-when-safe — penalise block plays when
+        # no enemies intend to attack (wasted tempo).
+        if (incoming_damage == 0 and player_block_played > 0
+                and turn_start_sample < turn_end_sample):
+            # Scale by how much block was wasted relative to energy
+            safe_block_penalty = min(0.08, player_block_played / max(1, player_max_hp) * 0.3)
+            for idx in range(turn_start_sample, turn_end_sample):
+                samples[idx].value_penalty += safe_block_penalty
+
+        # Signal 2: Lethal-awareness — penalise not killing an enemy
+        # that could have been killed this turn (they'll deal more
+        # damage on future turns if left alive).
+        for e in state.enemies:
+            if e.is_alive and e.hp > 0 and e.hp <= hand_damage_available:
+                # An enemy was killable but survived
+                lethal_penalty = min(0.10, e.hp / max(1, player_max_hp) * 0.25)
+                for idx in range(turn_start_sample, turn_end_sample):
+                    samples[idx].value_penalty += lethal_penalty
+                break  # only penalise for one missed lethal per turn
 
         end_turn(state)
         resolve_enemy_intents(state)
         _resolve_sim_intents(state, enemy_ais)
         tick_enemy_powers(state)
+
+        hp_after_enemy = state.player.hp
+        damage_taken = max(0, hp_before_enemy - hp_after_enemy)
+
+        # Signal 3: Intent-weighted blocking — penalise based on how
+        # far actual block was from optimal (matching incoming damage).
+        # Under-blocking penalises harder than over-blocking.
+        if turn_start_sample < turn_end_sample and incoming_damage > 0:
+            if player_block_played < incoming_damage:
+                # Under-blocked: took avoidable damage
+                gap = incoming_damage - player_block_played
+                under_penalty = min(0.15, gap / max(1, player_max_hp) * 0.4)
+                # Only penalise if they had block cards available
+                if hand_block_available > 0:
+                    for idx in range(turn_start_sample, turn_end_sample):
+                        samples[idx].value_penalty += under_penalty
+            elif player_block_played > incoming_damage * 1.5:
+                # Over-blocked by >50%: wasted resources on defence
+                excess = player_block_played - incoming_damage
+                over_penalty = min(0.06, excess / max(1, player_max_hp) * 0.15)
+                for idx in range(turn_start_sample, turn_end_sample):
+                    samples[idx].value_penalty += over_penalty
 
         outcome = is_combat_over(state)
         if outcome:
@@ -231,31 +326,36 @@ def _network_pick_card(
     config: EncoderConfig,
     card_db: CardDB,
 ) -> tuple[Card | None, OptionSample | None]:
-    """Use the option evaluation head to pick a card reward.
+    """Pick a card reward using the organic card picker.
 
-    Each offered card is scored as OPTION_CARD_REWARD with its card embedding.
-    A OPTION_CARD_SKIP option competes on the same scale.
+    The organic picker uses property-based archetype detection, momentum
+    scoring, and alpha-blended ML handoff — it's designed to build coherent
+    decks from game one. The neural network's option head still trains on
+    the card picks (via OptionSample) so it can learn deck-building over
+    time, but the actual decision comes from the organic system.
 
     Returns (picked_card_or_None, training_sample_or_None).
     """
     if not offered:
         return None, None
 
-    network = mcts.network
+    # --- Organic picker makes the decision ---
+    from ..card_picker import pick_card as organic_pick
+    pick = organic_pick(offered, deck, floor, hp, max_hp)
 
-    # Build a minimal combat state to encode the deck context
-    player = PlayerState(
-        hp=hp, max_hp=max_hp, energy=3, max_energy=3,
-        hand=[], draw_pile=list(deck),
-    )
-    dummy_state = CombatState(player=player, enemies=[], turn=0, floor=floor)
-
+    # --- Build a training sample for the option head (learns from the pick) ---
+    sample = None
     try:
-        import torch
+        network = mcts.network
+        player = PlayerState(
+            hp=hp, max_hp=max_hp, energy=3, max_energy=3,
+            hand=[], draw_pile=list(deck),
+        )
+        dummy_state = CombatState(player=player, enemies=[], turn=0, floor=floor)
+
         state_tensors = encode_state(dummy_state, vocabs, config)
         state_tensors = {k: v.to(mcts.device) for k, v in state_tensors.items()}
 
-        # Build options: one CARD_REWARD per offered card + one CARD_SKIP
         opt_types = [OPTION_CARD_REWARD] * len(offered) + [OPTION_CARD_SKIP]
         opt_cards = []
         for card in offered:
@@ -263,30 +363,26 @@ def _network_pick_card(
             opt_cards.append(vocabs.cards.get(base_id))
         opt_cards.append(0)  # PAD for skip
 
-        with torch.no_grad():
-            hidden = network.encode_state(**state_tensors)
-            best_idx, scores = network.pick_best_option(
-                hidden, opt_types, opt_cards)
+        # Record which index the organic picker chose
+        if pick is None:
+            chosen_idx = len(offered)  # skip
+        else:
+            chosen_idx = next(
+                (i for i, c in enumerate(offered) if c.id == pick.id),
+                len(offered),
+            )
 
-        # Build training sample
         sample = OptionSample(
             state_tensors={k: v.cpu() for k, v in state_tensors.items()},
             option_types=opt_types,
             option_cards=opt_cards,
-            chosen_idx=best_idx,
+            chosen_idx=chosen_idx,
             value=0.0,  # Filled after run ends
         )
-
-        # Last option is skip
-        if best_idx < len(offered):
-            return offered[best_idx], sample
-        return None, sample
-
     except Exception:
-        # Fallback to deterministic pick
-        from ..simulator import _pick_card_reward
-        pick = _pick_card_reward(offered, deck)
-        return pick, None
+        pass  # Sample building failed — pick still valid
+
+    return pick, sample
 
 
 # ---------------------------------------------------------------------------
@@ -306,6 +402,8 @@ class FullRunResult:
     deck_samples: list  # OptionSample list (card rewards, routed through option head)
     option_samples: list  # OptionSample list (rest/map/shop)
     combat_log: list[dict]
+    archetype: str = "undecided"     # emergent archetype of final deck
+    archetype_commitment: float = 0.0  # 0.0–1.0
 
 
 def play_full_run(
@@ -419,6 +517,7 @@ def play_full_run(
             if enc_id is None:
                 continue
 
+            _is_boss = (room_type == "boss")
             potions_before = len([p for p in potions if p])
             samples, outcome, turns, hp_after, potions = mcts_combat(
                 deck=deck, player_hp=hp, player_max_hp=max_hp,
@@ -427,6 +526,7 @@ def play_full_run(
                 rng=rng, mcts_simulations=mcts_simulations,
                 temperature=temperature, potions=potions,
                 relics=frozenset(relics),
+                is_boss=_is_boss,
             )
             potions_after = len([p for p in potions if p])
             potions_used = max(0, potions_before - potions_after)
@@ -451,6 +551,7 @@ def play_full_run(
                                    deck_change_samples, option_samples,
                                    combat_hp_data=combat_hp_data,
                                    boss_floors=boss_floors)
+                _arch = classify_deck(deck)
                 return FullRunResult(
                     outcome="lose", floor_reached=floor_reached,
                     final_hp=0, max_hp=max_hp,
@@ -458,6 +559,8 @@ def play_full_run(
                     deck_size=len(deck), samples=all_samples,
                     deck_samples=deck_change_samples,
                     option_samples=option_samples, combat_log=combat_log,
+                    archetype=_arch.archetype,
+                    archetype_commitment=_arch.commitment,
                 )
 
             combats_won += 1
@@ -500,6 +603,7 @@ def play_full_run(
                                    deck_change_samples, option_samples,
                                    combat_hp_data=combat_hp_data,
                                    boss_floors=boss_floors)
+                _arch = classify_deck(deck)
                 return FullRunResult(
                     outcome="win", floor_reached=floor_reached,
                     final_hp=hp, max_hp=max_hp,
@@ -507,6 +611,8 @@ def play_full_run(
                     deck_size=len(deck), samples=all_samples,
                     deck_samples=deck_change_samples,
                     option_samples=option_samples, combat_log=combat_log,
+                    archetype=_arch.archetype,
+                    archetype_commitment=_arch.commitment,
                 )
 
         elif room_type == "rest":
@@ -682,6 +788,7 @@ def play_full_run(
                        deck_change_samples, option_samples,
                        combat_hp_data=combat_hp_data,
                        boss_floors=boss_floors)
+    _arch = classify_deck(deck)
     return FullRunResult(
         outcome="lose", floor_reached=floor_reached,
         final_hp=hp, max_hp=max_hp,
@@ -689,6 +796,8 @@ def play_full_run(
         deck_size=len(deck), samples=all_samples,
         deck_samples=deck_change_samples,
         option_samples=option_samples, combat_log=combat_log,
+        archetype=_arch.archetype,
+        archetype_commitment=_arch.commitment,
     )
 
 
@@ -743,10 +852,10 @@ def _assign_run_values(
                     # Lost the boss fight — strong negative signal
                     combat_value = -1.0
                 else:
-                    # Won the boss fight — strong positive, small potion penalty
-                    potion_penalty = potions_used * 0.15
-                    combat_value = 1.0 - potion_penalty
-                    combat_value = max(0.0, combat_value)
+                    # Won the boss fight — strong positive signal.
+                    # No potion penalty: using potions at the boss is the
+                    # correct strategy (they're pre-dumped for burst damage).
+                    combat_value = 1.0
             else:
                 combat_value = 0.0
 
@@ -774,6 +883,12 @@ def _assign_run_values(
         for j, sample in enumerate(floor_samples):
             turns_from_end = n - 1 - j
             sample.value = blended * (turn_discount ** turns_from_end)
+            # Per-step penalties: wasted energy (0.15) + any block penalty
+            penalty = sample.value_penalty
+            if sample.wasted_energy:
+                penalty += 0.15
+            if penalty > 0:
+                sample.value = max(-1.0, sample.value - penalty)
 
     # Deck change and option samples get the full run value
     if deck_change_samples:

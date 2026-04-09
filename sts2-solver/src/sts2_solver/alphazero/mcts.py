@@ -19,6 +19,11 @@ The tree handles STS2's sequential card play naturally:
     - Actions are individual card plays OR end_turn
     - end_turn triggers enemy phase → new turn → new set of actions
     - Terminal nodes (combat won/lost) have fixed values
+
+Dynamic simulation budget:
+    scale_simulations(base, num_actions) adjusts simulation count based on
+    decision complexity.  Simple decisions (≤3 actions) get fewer sims,
+    complex ones (10+ actions) get more.
 """
 
 from __future__ import annotations
@@ -33,13 +38,169 @@ import torch
 
 from ..actions import Action, END_TURN, enumerate_actions
 from ..combat_engine import is_combat_over
+from ..models import CombatState
 from ..sim_step import step
 
 if TYPE_CHECKING:
     from ..data_loader import CardDB
-    from ..models import CombatState
     from .encoding import EncoderConfig, Vocabs
     from .network import STS2Network
+
+
+# ---------------------------------------------------------------------------
+# Dynamic simulation budget
+# ---------------------------------------------------------------------------
+
+def scale_simulations(base_sims: int, num_actions: int, *, is_boss: bool = False) -> int:
+    """Scale MCTS simulations based on decision complexity and encounter type.
+
+    Simple decisions (1-3 actions) need fewer sims — the answer is often
+    obvious. Complex decisions (10+ actions) benefit from extra search
+    to find the right card sequencing.
+
+    Boss fights get a 1.5x multiplier on top of complexity scaling because
+    they're the highest-leverage combats (determine win/loss for the run).
+
+    Returns an adjusted simulation count, roughly in [base*0.25, base*3.0].
+    """
+    if num_actions <= 1:
+        sims = max(10, base_sims // 4)      # trivial: ~25%
+    elif num_actions <= 3:
+        sims = max(25, base_sims // 2)      # simple: ~50%
+    elif num_actions <= 6:
+        sims = base_sims                     # normal: 100%
+    elif num_actions <= 10:
+        sims = int(base_sims * 1.4)          # complex: 140%
+    else:
+        sims = int(base_sims * 2.0)          # very complex: 200% (big hands need deep search)
+
+    if is_boss:
+        sims = int(sims * 1.5)              # boss: +50% on top of complexity scaling
+
+    return sims
+
+
+# ---------------------------------------------------------------------------
+# Prior boosting for under-explored free / energy-positive plays
+# ---------------------------------------------------------------------------
+
+def _boost_free_card_priors(
+    actions: list[Action],
+    probs: list[float],
+    state: CombatState,
+) -> list[float]:
+    """Boost network priors for playable cards and dampen premature END_TURN.
+
+    The neural network may undervalue card plays (especially early in
+    training), causing MCTS to skip affordable plays and end turn with
+    unspent energy.  We give multiplicative boosts so the tree search at
+    least *tries* these actions, while still deferring to the network for
+    relative ordering.
+
+    Returns a re-normalised probability list (same length as input).
+    """
+    if state is None:
+        return probs
+
+    hand = state.player.hand
+    energy = state.player.energy
+    boosted = list(probs)
+
+    # Card types that should never be boosted (junk cards enemies add to
+    # your deck — Slimed, Wound, Dazed, Burn, etc.)
+    from ..constants import CardType
+    _JUNK_TYPES = {CardType.STATUS, CardType.CURSE}
+
+    has_free = False       # any 0-cost non-junk play
+    has_affordable = False  # any non-junk play the player can afford
+
+    for i, action in enumerate(actions):
+        if i >= len(boosted):
+            break
+        if action.action_type != "play_card" or action.card_idx is None:
+            continue
+        if action.card_idx >= len(hand):
+            continue
+        card = hand[action.card_idx]
+
+        # Never boost Status/Curse cards — they're junk even if playable
+        if card.card_type in _JUNK_TYPES:
+            continue
+
+        is_affordable = card.cost <= energy
+
+        if card.cost == 0:
+            has_free = True
+        if is_affordable:
+            has_affordable = True
+
+        # 0-cost cards: always free to play, no reason to skip
+        if card.cost == 0:
+            boosted[i] *= 4.0
+        # Energy-positive cards (e.g. Adrenaline): playing them opens options
+        elif card.energy_gain and card.energy_gain > card.cost:
+            boosted[i] *= 3.5
+        # Cards that draw (e.g. Backflip, Acrobatics): expand options
+        elif card.cards_draw and card.cards_draw >= 2:
+            boosted[i] *= 2.5
+        # Affordable cards the player can play right now
+        elif is_affordable:
+            boosted[i] *= 2.5
+
+    # Dampen END_TURN when there are playable cards.
+    # As the network improves from training with wasted-energy penalties,
+    # these boosts will matter less — but keep them moderate for now.
+    if has_free or has_affordable:
+        dampen = 0.15 if has_free else 0.2
+        for i, action in enumerate(actions):
+            if i >= len(boosted):
+                break
+            if action.action_type == "end_turn":
+                boosted[i] *= dampen
+
+    # Re-normalise
+    total = sum(boosted)
+    if total > 0:
+        return [p / total for p in boosted]
+    return probs
+
+
+# ---------------------------------------------------------------------------
+# Transposition table — state hashing
+# ---------------------------------------------------------------------------
+
+def _hash_state(state: CombatState) -> int | None:
+    """Compute a hash of the combat state for transposition detection.
+
+    Two states that are strategically identical (same hand contents, HP,
+    energy, enemy states, etc.) map to the same hash.  Returns None if
+    the state has a pending choice (those are rare and order-sensitive).
+    """
+    if state.pending_choice is not None:
+        return None
+
+    p = state.player
+    try:
+        # Hand as a sorted tuple of card IDs (order doesn't matter)
+        hand_key = tuple(sorted(c.id for c in p.hand))
+
+        # Enemy state: (id, hp, block, powers_tuple) per enemy
+        enemy_key = tuple(
+            (e.id, e.hp, e.block, tuple(sorted(e.powers.items())))
+            for e in state.enemies if e.is_alive
+        )
+
+        key = (
+            p.hp, p.block, p.energy,
+            tuple(sorted(p.powers.items())),
+            hand_key,
+            enemy_key,
+            state.turn,
+            state.cards_played_this_turn,
+        )
+        return hash(key)
+    except Exception:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -109,6 +270,10 @@ class MCTS:
         self.network.to(device)
         self.network.eval()
 
+        # Transposition table: state_hash → value (float)
+        # Cleared at the start of each search() call.
+        self._transposition: dict[int, float] = {}
+
     def search(
         self,
         state: CombatState,
@@ -123,6 +288,7 @@ class MCTS:
             policy: Visit-count-based policy distribution over legal actions
             root_value: Mean backed-up value at the root (win expectancy)
         """
+        self._transposition.clear()
         root = Node(state=deepcopy(state))
         self._expand(root)
 
@@ -198,7 +364,17 @@ class MCTS:
     def _expand(self, node: Node) -> float:
         """Expand a leaf node: get legal actions, query network for priors and value.
 
-        Returns the network's value estimate for this state.
+        Uses a transposition table keyed on a full state hash.  Because the
+        hash captures HP, energy, block, powers, hand *contents* (sorted),
+        and enemy states, two nodes only share a hash when the resulting
+        game state is truly identical — regardless of how they got there.
+
+        On a cache hit we still run the network for policy priors (so child
+        nodes get proper exploration guidance) but substitute the cached
+        value, which has been refined by prior search and is more accurate
+        than a single network evaluation.
+
+        Returns the value estimate for this state.
         """
         # Lazy state computation: compute on first visit
         if node.state is None and node.parent is not None and node.parent_action is not None:
@@ -226,7 +402,13 @@ class MCTS:
             node.is_expanded = True
             return 0.0
 
-        # Query network
+        # --- Transposition table lookup ---
+        state_hash = _hash_state(node.state)
+        cached_value = None
+        if state_hash is not None and state_hash in self._transposition:
+            cached_value = self._transposition[state_hash]
+
+        # Query network (always needed for policy priors on child nodes)
         from .state_tensor import encode_state, encode_actions
 
         with torch.no_grad():
@@ -249,6 +431,15 @@ class MCTS:
             probs = probs.cpu().tolist()
             value = value.item()
 
+        # On transposition hit, use the cached value (refined by prior
+        # search) instead of the raw network estimate.
+        if cached_value is not None:
+            value = cached_value
+
+        # Boost priors for free / energy-positive card plays so MCTS
+        # actually explores them even when the network prior is weak.
+        probs = _boost_free_card_priors(node.legal_actions, probs, node.state)
+
         # Create child nodes lazily — state computed on first visit
         for i, action in enumerate(node.legal_actions):
             child = Node(
@@ -260,6 +451,11 @@ class MCTS:
             node.children[i] = child
 
         node.is_expanded = True
+
+        # Store in transposition table (first visit — raw network value)
+        if state_hash is not None and cached_value is None:
+            self._transposition[state_hash] = value
+
         return value
 
     def _backup(self, node: Node, value: float) -> None:
