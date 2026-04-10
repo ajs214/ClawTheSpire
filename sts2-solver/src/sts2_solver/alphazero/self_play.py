@@ -718,6 +718,16 @@ def train_worker(
     BOSS_FLOOR = 17          # Act 1 boss floor
     recent_games: list[dict] = []
 
+    # V8: relic telemetry (cumulative pickups across all runs)
+    from collections import Counter as _Counter
+    relic_counts: _Counter = _Counter()
+    total_relics_seen: int = 0  # total pickups (sum of counter)
+    try:
+        from .. import relic_effects as _relic_effects
+        relic_pool_size = len(_relic_effects.simulated_relic_ids())
+    except Exception:
+        relic_pool_size = 0
+
     from .full_run import play_full_run
 
     # --- Boss-fight detail log (appended JSONL) ---
@@ -806,6 +816,14 @@ def train_worker(
                     # Never crash training because of a log write.
                     print(f"[boss-log] write failed: {_e}", flush=True)
 
+            # V8: record relic pickups for this run (excluding the starter)
+            _run_relics = getattr(result, "final_relics", None) or []
+            for _rid in _run_relics:
+                if _rid == "RING_OF_THE_SNAKE":
+                    continue  # starter relic, not informative
+                relic_counts[_rid] += 1
+                total_relics_seen += 1
+
             recent_games.append({
                 "num": total_games,
                 "encounter": f"Act1 ({result.combats_won}/{result.combats_fought})",
@@ -814,6 +832,7 @@ def train_worker(
                 "hp": result.final_hp,
                 "archetype": getattr(result, 'archetype', 'unknown'),
                 "commitment": round(getattr(result, 'archetype_commitment', 0.0), 2),
+                "relics": [r for r in _run_relics if r != "RING_OF_THE_SNAKE"],
             })
             if len(recent_games) > 50:
                 recent_games = recent_games[-50:]
@@ -891,6 +910,15 @@ def train_worker(
             "gen_time": round(gen_elapsed, 1),
             "recent_games": recent_games[-20:],
             "archetype_stats": _arch_stats,
+            # V8: relic telemetry
+            "relic_pool_size": relic_pool_size,
+            "unique_relics_seen": len(relic_counts),
+            "total_relics_picked": total_relics_seen,
+            "avg_relics_per_run": round(total_relics_seen / max(1, total_games), 2),
+            "top_relics": [
+                {"id": _rid, "count": _cnt}
+                for _rid, _cnt in relic_counts.most_common(20)
+            ],
             "status": f"Gen {gen}/{num_generations} complete",
             "timestamp": time.time(),
         }

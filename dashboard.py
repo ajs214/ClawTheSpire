@@ -31,12 +31,13 @@ VERSION_FILES = {
     "v5": "training_v5_progress.json",
     "v6": "training_v6_progress.json",
     "v7": "training_v7_progress.json",
+    "v8": "training_v8_progress.json",
 }
 
 # --- Shared state ---
 lock = threading.Lock()
 all_history: dict[str, list[dict]] = {
-    "v1": [], "v2": [], "v3": [], "v4": [], "v5": [], "v6": [], "v7": [],
+    "v1": [], "v2": [], "v3": [], "v4": [], "v5": [], "v6": [], "v7": [], "v8": [],
 }
 snapshots: dict[str, dict] = {}
 active_version: str = ""  # whichever is currently training
@@ -213,9 +214,11 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .v2c { color: #d29922; }
   .v3c { color: #58a6ff; }
   .v4c { color: #3fb950; }
+  .earlyc { color: #6e7681; }
   .v5c { color: #bc8cff; }
   .v6c { color: #ff7b72; }
   .v7c { color: #ffa657; }
+  .v8c { color: #2ea9e6; }
   .recent { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; }
   .recent h2 { color: #8b949e; font-size: 0.85em; text-transform: uppercase; margin-bottom: 10px; }
   .recent table { width: 100%; border-collapse: collapse; }
@@ -256,7 +259,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <div class="version-table">
   <h2>Version Comparison</h2>
   <table>
-    <thead><tr><th>Version</th><th>Gens</th><th>Games</th><th>Win Rate</th><th>Boss Reach</th><th>Boss-Fight WR</th><th>Policy Loss</th><th>Value Loss</th><th>Total Loss</th></tr></thead>
+    <thead><tr><th>Version</th><th>Gens</th><th>Games</th><th>Win Rate</th><th>Boss Reach</th><th>Boss-Fight WR</th><th>Relics Used</th><th>Policy Loss</th><th>Value Loss</th><th>Total Loss</th></tr></thead>
     <tbody id="version-body"></tbody>
   </table>
 </div>
@@ -278,6 +281,15 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <div class="arch-grid" id="arch-stats"></div>
 </div>
 
+<div class="version-table" id="relic-panel" style="display:none">
+  <h2>Relic Pool <span style="color:#484f58;font-size:0.8em;font-weight:normal"> &middot; V8+ only</span></h2>
+  <div id="relic-summary" style="color:#8b949e;font-size:0.8em;margin-bottom:12px"></div>
+  <table>
+    <thead><tr><th>#</th><th>Relic</th><th>Pickups</th><th>Frequency</th><th></th></tr></thead>
+    <tbody id="relic-body"></tbody>
+  </table>
+</div>
+
 <div class="recent">
   <h2>Recent Games (Active Version)</h2>
   <table>
@@ -289,9 +301,52 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <div class="updated" id="updated"></div>
 
 <script>
-const COLORS = { v1: '#8b949e', v2: '#d29922', v3: '#58a6ff', v4: '#3fb950', v5: '#bc8cff', v6: '#ff7b72', v7: '#ffa657' };
-const LABELS = { v1: 'V1', v2: 'V2', v3: 'V3', v4: 'V4', v5: 'V5', v6: 'V6', v7: 'V7' };
-const VERSIONS = ['v1','v2','v3','v4','v5','v6','v7'];
+const COLORS = { early: '#6e7681', v5: '#bc8cff', v6: '#ff7b72', v7: '#ffa657', v8: '#2ea9e6' };
+const LABELS = { early: 'Early (V1–V4)', v5: 'V5', v6: 'V6', v7: 'V7', v8: 'V8' };
+// Display versions collapse V1–V4 into a single "early" track for readability.
+const VERSIONS = ['early','v5','v6','v7','v8'];
+const EARLY_SOURCES = ['v1','v2','v3','v4'];
+
+// Concatenate V1→V4 histories in order, remapping generation numbers
+// so each subsequent version's generations continue after the previous
+// version's max. Produces one smooth "early training" line.
+function buildEarlyHistory(histories) {
+  const merged = [];
+  let offset = 0;
+  for (const src of EARLY_SOURCES) {
+    const h = histories[src] || [];
+    if (!h.length) continue;
+    for (const pt of h) {
+      const clone = Object.assign({}, pt);
+      clone.generation = (clone.generation || 0) + offset;
+      merged.push(clone);
+    }
+    const last = h[h.length-1];
+    offset = (last.generation || 0) + offset;
+  }
+  return merged;
+}
+
+// Aggregate V1–V4 snapshots into one synthetic snapshot for the
+// version-comparison table. Uses latest V4 values where available,
+// summed totals for games/gens.
+function buildEarlySnap(snapshots) {
+  let snap = null;
+  let totalGames = 0;
+  let totalGens = 0;
+  for (const src of EARLY_SOURCES) {
+    const s = snapshots[src];
+    if (!s) continue;
+    totalGames += s.games_played || 0;
+    totalGens += s.generation || 0;
+    snap = s;  // keep the most recent (V4 if present)
+  }
+  if (!snap) return null;
+  const copy = Object.assign({}, snap);
+  copy.games_played = totalGames;
+  copy.generation = totalGens;
+  return copy;
+}
 
 const baseOpts = {
   responsive: true,
@@ -309,8 +364,8 @@ pctOpts.scales.y.ticks = { ...pctOpts.scales.y.ticks, callback: function(v) { re
 function makeVersionDatasets(field) {
   return VERSIONS.map(v => ({
     label: LABELS[v], data: [], borderColor: COLORS[v],
-    borderWidth: (v==='v7') ? 2.8 : (v==='v6') ? 2 : (v==='v5') ? 1.8 : 1.5,
-    pointRadius: 0, tension: 0.3, borderDash: v==='v1' ? [4,4] : [],
+    borderWidth: (v==='v8') ? 3 : (v==='v7') ? 2.2 : (v==='v6') ? 1.8 : (v==='v5') ? 1.5 : 1.2,
+    pointRadius: 0, tension: 0.3, borderDash: v==='early' ? [4,4] : [],
   }));
 }
 
@@ -422,6 +477,14 @@ function updateStats(snap, activeVer) {
   const bfReached = snap.boss_fights_reached != null ? snap.boss_fights_reached : reachedBoss.length;
   const bfWins = snap.boss_fights_won != null ? snap.boss_fights_won : reachedBoss.filter(g => g.outcome === 'win').length;
 
+  // V8+ relic telemetry (may be missing on older versions)
+  const poolSize = snap.relic_pool_size || 0;
+  const uniqueSeen = snap.unique_relics_seen || 0;
+  const avgRelics = snap.avg_relics_per_run;
+  const relicCard = poolSize > 0
+    ? `<div class="stat-card"><div class="label">Relic Pool</div><div class="value good">${poolSize}</div><div class="sub">${uniqueSeen} unique seen &middot; ${avgRelics != null ? avgRelics.toFixed(1) : '—'} /run</div></div>`
+    : '';
+
   document.getElementById('stats').innerHTML = `
     <div class="stat-card"><div class="label">Win Rate</div><div class="value ${wrClass}">${(wr*100).toFixed(1)}%</div><div class="sub">Gen: ${((snap.gen_win_rate||0)*100).toFixed(1)}%</div></div>
     <div class="stat-card"><div class="label">Boss Reach</div><div class="value ${brClass}">${bossReach.toFixed(0)}%</div><div class="sub">Of last ${recent.length} games</div></div>
@@ -432,6 +495,7 @@ function updateStats(snap, activeVer) {
     <div class="stat-card"><div class="label">Buffer</div><div class="value">${snap.buffer_size?.toLocaleString() || '—'}</div><div class="sub">Options: ${snap.option_buffer_size?.toLocaleString() || '—'}</div></div>
     <div class="stat-card"><div class="label">Learning Rate</div><div class="value">${snap.lr?.toExponential(1) || '—'}</div></div>
     <div class="stat-card"><div class="label">Gen Time</div><div class="value">${snap.gen_time?.toFixed(1) || '—'}s</div><div class="sub">Elapsed: ${snap.elapsed || '—'}</div></div>
+    ${relicCard}
   `;
 
   const gen = snap.generation || 0;
@@ -463,6 +527,13 @@ function updateVersionTable(snaps, histories) {
     }
     const bfCell = bfWr == null ? '—' : bfWr.toFixed(0) + '%';
     const totalGens = (histories[v] || []).length || s.generation || 0;
+    // Relics-used cell: only V8+ emits relic_pool_size; older versions
+    // show a dash.
+    const poolSize = s.relic_pool_size || 0;
+    const uniqueSeen = s.unique_relics_seen || 0;
+    const relicCell = poolSize > 0
+      ? `${uniqueSeen}/${poolSize} <span style="color:#8b949e">(${(uniqueSeen/poolSize*100).toFixed(0)}%)</span>`
+      : '—';
     return `<tr>
       <td class="${v}c">${LABELS[v]}</td>
       <td>${totalGens}</td>
@@ -470,6 +541,7 @@ function updateVersionTable(snaps, histories) {
       <td>${((s.win_rate||0)*100).toFixed(1)}%</td>
       <td>${br.toFixed(0)}%</td>
       <td>${bfCell}</td>
+      <td>${relicCell}</td>
       <td>${s.policy_loss?.toFixed(4) || '—'}</td>
       <td>${s.value_loss?.toFixed(4) || '—'}</td>
       <td>${s.total_loss?.toFixed(4) || '—'}</td>
@@ -539,6 +611,45 @@ function updateArchStats(snap) {
   }).join('');
 }
 
+function updateRelics(snap) {
+  const panel = document.getElementById('relic-panel');
+  const poolSize = snap.relic_pool_size || 0;
+  const topRelics = snap.top_relics || [];
+  if (poolSize === 0 && topRelics.length === 0) {
+    panel.style.display = 'none';
+    return;
+  }
+  panel.style.display = '';
+
+  const uniqueSeen = snap.unique_relics_seen || 0;
+  const totalPicks = snap.total_relics_picked || 0;
+  const avgRelics = snap.avg_relics_per_run;
+  const games = snap.games_played || 0;
+  const coverage = poolSize ? (uniqueSeen / poolSize * 100).toFixed(0) : 0;
+
+  document.getElementById('relic-summary').innerHTML =
+    `<b>${poolSize}</b> simulated relics in the pool &middot; ` +
+    `<b>${uniqueSeen}</b> unique seen so far (${coverage}% coverage) &middot; ` +
+    `<b>${totalPicks.toLocaleString()}</b> total pickups across ${games.toLocaleString()} runs &middot; ` +
+    `<b>${avgRelics != null ? avgRelics.toFixed(2) : '—'}</b> relics/run average`;
+
+  const maxCount = topRelics.length ? topRelics[0].count : 1;
+  const body = document.getElementById('relic-body');
+  body.innerHTML = topRelics.slice(0, 15).map((r, i) => {
+    const pct = totalPicks ? (r.count / totalPicks * 100) : 0;
+    const barPct = maxCount ? (r.count / maxCount * 100) : 0;
+    // Humanize relic ID: "RING_OF_THE_SNAKE" -> "Ring Of The Snake"
+    const name = r.id.toLowerCase().replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+    return `<tr>
+      <td>${i+1}</td>
+      <td style="text-align:left">${name}</td>
+      <td>${r.count}</td>
+      <td>${pct.toFixed(1)}%</td>
+      <td style="text-align:left"><div class="bar" style="width:${barPct}%;max-width:160px;background:#2ea9e6;height:10px"></div></td>
+    </tr>`;
+  }).join('');
+}
+
 function updateArchCharts(history, activeVer) {
   const h = thin(history[activeVer] || [], 300);
   // Collect all archetype names across history
@@ -578,19 +689,35 @@ async function poll() {
   try {
     const res = await fetch('/api/data');
     const d = await res.json();
-    const activeVer = d.active_version || 'v7';
-    const snap = d.snapshots[activeVer] || d.snapshots.v7 || d.snapshots.v6 || d.snapshots.v5 || {};
+
+    // --- Collapse V1–V4 into a single "early" group for display ---
+    const earlyHist = buildEarlyHistory(d.history);
+    const earlySnap = buildEarlySnap(d.snapshots);
+    const histDisplay = { early: earlyHist };
+    const snapsDisplay = {};
+    if (earlySnap) snapsDisplay.early = earlySnap;
+    for (const v of ['v5','v6','v7','v8']) {
+      histDisplay[v] = d.history[v] || [];
+      if (d.snapshots[v]) snapsDisplay[v] = d.snapshots[v];
+    }
+
+    // Active version: if the backend reports v1–v4, map it to "early".
+    let activeVer = d.active_version || 'v8';
+    if (EARLY_SOURCES.includes(activeVer)) activeVer = 'early';
+    const snap = snapsDisplay[activeVer] || snapsDisplay.v8 || snapsDisplay.v7 || snapsDisplay.v6 || snapsDisplay.v5 || snapsDisplay.early || {};
 
     updateStats(snap, activeVer);
-    updateVersionTable(d.snapshots, d.history);
-    updateMultiChart(policyChart, d.history, 'policy_loss');
-    updateMultiChart(valueChart, d.history, 'value_loss');
-    updateMultiChart(winChart, d.history, 'win_rate');
-    updateMultiChart(bossChart, d.history, 'boss_reach');
-    updateMultiChart(bossFightChart, d.history, 'boss_fight_wr');
+    updateVersionTable(snapsDisplay, histDisplay);
+    updateMultiChart(policyChart, histDisplay, 'policy_loss');
+    updateMultiChart(valueChart, histDisplay, 'value_loss');
+    updateMultiChart(winChart, histDisplay, 'win_rate');
+    updateMultiChart(bossChart, histDisplay, 'boss_reach');
+    updateMultiChart(bossFightChart, histDisplay, 'boss_fight_wr');
 
-    // Time chart: active version only
-    const activeHist = thin(d.history[activeVer] || [], 300);
+    // Time chart: active version only (use raw history for the active
+    // individual version, or the collapsed early history).
+    const timeSrc = activeVer === 'early' ? earlyHist : (d.history[activeVer] || []);
+    const activeHist = thin(timeSrc, 300);
     timeChart.data.datasets[0].data = activeHist.map(h => ({ x: h.generation, y: h.gen_time }));
     timeChart.options.scales.x.type = 'linear';
     timeChart.update('none');
@@ -598,7 +725,13 @@ async function poll() {
     updateFloors(snap.recent_games || []);
     updateGames(snap.recent_games || []);
     updateArchStats(snap);
-    updateArchCharts(d.history, activeVer);
+    // Arch charts still use the raw per-version history so early
+    // archetype stats stay attached to their originating version when
+    // someone clicks through; if the active version is "early", we
+    // show whichever sub-version actually has archetype data.
+    const archHistSrc = activeVer === 'early' ? { early: earlyHist } : d.history;
+    updateArchCharts(archHistSrc, activeVer);
+    updateRelics(snap);
     document.getElementById('updated').textContent = 'Updated: ' + new Date().toLocaleTimeString();
   } catch(e) { console.error(e); }
 }

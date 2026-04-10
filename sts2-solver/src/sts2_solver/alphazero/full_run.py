@@ -667,6 +667,7 @@ class FullRunResult:
     archetype_commitment: float = 0.0  # 0.0–1.0
     boss_detail: dict | None = None  # Rich per-turn log of the boss combat
     final_deck: list[str] | None = None  # Card IDs in deck at boss-fight time
+    final_relics: list[str] | None = None  # Relic IDs owned at end of run (V8)
 
 
 def play_full_run(
@@ -838,6 +839,7 @@ def play_full_run(
                     archetype_commitment=_arch.commitment,
                     boss_detail=boss_detail_holder,
                     final_deck=[c.id for c in deck],
+                    final_relics=sorted(relics),
                 )
 
             combats_won += 1
@@ -917,6 +919,7 @@ def play_full_run(
                     archetype_commitment=_arch.commitment,
                     boss_detail=boss_detail_holder,
                     final_deck=[c.id for c in deck],
+                    final_relics=sorted(relics),
                 )
 
         elif room_type == "rest":
@@ -1137,6 +1140,7 @@ def play_full_run(
         archetype_commitment=_arch.commitment,
         boss_detail=boss_detail_holder,
         final_deck=[c.id for c in deck],
+        final_relics=sorted(relics),
     )
 
 
