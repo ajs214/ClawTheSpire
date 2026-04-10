@@ -651,6 +651,7 @@ def train_worker(
     temperature: float = 1.0,
     save_dir: str | None = None,
     progress_file: str | None = None,
+    boss_log_file: str | None = None,
 ):
     """Headless training loop. Writes progress to JSON file."""
     card_db = load_cards()
@@ -712,6 +713,9 @@ def train_worker(
     t_start = time.time()
     total_wins = 0
     total_games = 0
+    total_boss_reached = 0   # runs where floor_reached >= BOSS_FLOOR
+    total_boss_wins = 0      # runs that beat the boss outright
+    BOSS_FLOOR = 17          # Act 1 boss floor
     recent_games: list[dict] = []
 
     from .full_run import play_full_run
@@ -719,7 +723,13 @@ def train_worker(
     # --- Boss-fight detail log (appended JSONL) ---
     # Each line: one run that reached the boss, with per-turn detail.
     # Lets us analyse play patterns, card usage, and loss modes.
-    boss_log_path = Path(__file__).resolve().parents[4] / "boss_fights.jsonl"
+    # By default the log sits next to the checkpoints so each training
+    # version gets its own log; --boss-log-file overrides.
+    if boss_log_file:
+        boss_log_path = Path(boss_log_file)
+    else:
+        boss_log_path = save_path / "boss_fights.jsonl"
+    boss_log_path.parent.mkdir(parents=True, exist_ok=True)
     print(f"Boss-fight log: {boss_log_path}", flush=True)
 
     print(f"AlphaZero training (full runs): {num_generations} generations, {games_per_generation} runs/gen, {mcts_simulations} sims", flush=True)
@@ -764,6 +774,15 @@ def train_worker(
             if result.outcome == "win":
                 gen_wins += 1
                 total_wins += 1
+
+            # Boss-fight tracking: a run that reached floor >= BOSS_FLOOR is
+            # a "boss fight attempted"; a run that won is a "boss fight won".
+            # (You can only win an Act 1 run by beating the boss, so total
+            # wins == total boss wins in practice.)
+            if result.floor_reached >= BOSS_FLOOR:
+                total_boss_reached += 1
+                if result.outcome == "win":
+                    total_boss_wins += 1
 
             # Persist boss-fight detail if the run reached the boss.
             # Written as one JSON object per line (JSONL) so we can stream-parse.
@@ -835,6 +854,17 @@ def train_worker(
                 "win_rate": round(_wins / max(1, _cnt), 3),
             }
 
+        # --- Boss-fight metrics (cumulative + recent-50 window) ---
+        boss_fight_wr = total_boss_wins / max(1, total_boss_reached)
+        _recent_boss_reached = sum(
+            1 for _g in _recent_50 if _g.get("floor", 0) >= BOSS_FLOOR
+        )
+        _recent_boss_wins = sum(
+            1 for _g in _recent_50
+            if _g.get("floor", 0) >= BOSS_FLOOR and _g.get("outcome") == "win"
+        )
+        recent_boss_fight_wr = _recent_boss_wins / max(1, _recent_boss_reached)
+
         # Write progress
         stats = {
             "generation": gen,
@@ -842,6 +872,12 @@ def train_worker(
             "games_played": total_games,
             "win_rate": total_wins / max(1, total_games),
             "gen_win_rate": gen_wins / max(1, games_per_generation),
+            "boss_fights_reached": total_boss_reached,
+            "boss_fights_won": total_boss_wins,
+            "boss_fight_win_rate": round(boss_fight_wr, 4),
+            "recent_boss_fights_reached": _recent_boss_reached,
+            "recent_boss_fights_won": _recent_boss_wins,
+            "recent_boss_fight_win_rate": round(recent_boss_fight_wr, 4),
             "buffer_size": len(replay_buffer),
             "total_loss": round(total_loss, 4),
             "value_loss": round(v_loss, 4),
@@ -1004,6 +1040,9 @@ if __name__ == "__main__":
     train_parser.add_argument("--temperature", type=float, default=1.0)
     train_parser.add_argument("--save-dir", type=str, default=None)
     train_parser.add_argument("--progress-file", type=str, default=None)
+    train_parser.add_argument("--boss-log-file", type=str, default=None,
+                              help="Where to append boss-fight detail JSONL "
+                                   "(default: <save-dir>/boss_fights.jsonl)")
 
     # Monitor command
     monitor_parser = subparsers.add_parser("monitor", help="Live TUI dashboard")
@@ -1023,6 +1062,7 @@ if __name__ == "__main__":
             temperature=args.temperature,
             save_dir=args.save_dir,
             progress_file=args.progress_file,
+            boss_log_file=args.boss_log_file,
         )
     elif args.command == "monitor":
         train_monitor(
