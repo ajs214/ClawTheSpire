@@ -32,22 +32,6 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 _CARD_PROPS_CACHE: dict[str, dict] | None = None
-_ML_LOADED: bool = False
-
-
-def _ensure_ml_model() -> None:
-    """Load the XGBoost card picker model once (if available)."""
-    global _ML_LOADED
-    if _ML_LOADED:
-        return
-    _ML_LOADED = True
-    try:
-        from .card_picker import load_ml_model
-        loaded = load_ml_model()
-        if loaded:
-            print("[Advisor] XGBoost card picker model loaded", flush=True)
-    except Exception:
-        pass
 
 
 def _get_card_props() -> dict[str, dict]:
@@ -134,6 +118,28 @@ def _floor(state: dict) -> int:
 
 def _gold(state: dict) -> int:
     return (state.get("run") or {}).get("gold", 0)
+
+
+def _get_relics(state: dict) -> frozenset[str]:
+    """Extract the set of owned relic names from the game state.
+
+    Relics live under run.relics.  Each entry may be a dict (with
+    ``name`` / ``id`` keys) or a bare string.  We normalise to a
+    frozenset of display names so the relic synergy layer can look
+    them up by catalog name (e.g. "Snecko Skull", "Wrist Blade").
+    """
+    run = state.get("run") or {}
+    raw = run.get("relics") or []
+    names: set[str] = set()
+    for r in raw:
+        if isinstance(r, str):
+            if r:
+                names.add(r)
+        elif isinstance(r, dict):
+            nm = r.get("name") or r.get("id")
+            if nm:
+                names.add(nm)
+    return frozenset(names)
 
 
 def _card_tier(card_name: str, character: str, card_raw: dict | None = None) -> str:
@@ -504,6 +510,7 @@ def decide_card_reward(state: dict, game_data: GameDataDB) -> Decision:
     run = state.get("run") or {}
     hp = run.get("current_hp", 50)
     max_hp = run.get("max_hp", 80)
+    relics = _get_relics(state)
 
     # Extract card options from game state
     reward = state.get("reward") or state.get("selection") or {}
@@ -519,12 +526,11 @@ def decide_card_reward(state: dict, game_data: GameDataDB) -> Decision:
 
     actions = state.get("available_actions", [])
 
-    # --- Primary path: organic card picker (rules + XGBoost blend) ---
-    _ensure_ml_model()
+    # --- Primary path: organic card picker (rule-based) ---
     deck_objs = _build_deck_card_objects(state)
     if deck_objs:
         try:
-            from .card_picker import blended_score, score_skip
+            from .card_picker import score_card, score_skip
 
             skip_score = score_skip(deck_objs, floor)
             best_idx, best_score, best_name = None, -1.0, ""
@@ -535,7 +541,8 @@ def decide_card_reward(state: dict, game_data: GameDataDB) -> Decision:
                 card_obj = _resolve_card_obj(card_name)
                 if not card_obj:
                     continue
-                card_score = blended_score(card_obj, deck_objs, floor, hp, max_hp)
+                card_score = score_card(
+                    card_obj, deck_objs, floor, hp, max_hp, relics=relics)
                 if card_score > best_score:
                     best_idx = idx
                     best_score = card_score
@@ -803,6 +810,7 @@ def decide_shop(state: dict, game_data: GameDataDB) -> Decision:
     run = state.get("run") or {}
     hp = run.get("current_hp", 50)
     max_hp = run.get("max_hp", 80)
+    owned_relics = _get_relics(state)
 
     shop = state.get("shop") or {}
     if not shop:
@@ -855,16 +863,28 @@ def decide_shop(state: dict, game_data: GameDataDB) -> Decision:
                                 f"Removing {best_remove_name} "
                                 f"(value={best_remove_score:.2f}, {remove_cost}g)")
 
-    # Priority 2: Buy a relic that matches archetype
+    # Priority 2: Buy a relic that matches the *actual* deck composition
     if "buy_relic" in actions:
-        relics = shop.get("relics", [])
+        shop_relics = shop.get("relics", [])
         best_relic_idx, best_relic_score, best_relic_name = None, 0.0, ""
-        for i, relic in enumerate(relics):
+        # Prefer the deck-aware scorer; fall back to archetype match if
+        # relic_synergy or deck_objs aren't available.
+        deck_aware_scorer = None
+        try:
+            from .relic_synergy import score_relic_for_deck
+            deck_aware_scorer = score_relic_for_deck
+        except Exception:
+            deck_aware_scorer = None
+
+        for i, relic in enumerate(shop_relics):
             price = relic.get("price", relic.get("cost", 999))
             if not isinstance(price, int) or price > gold:
                 continue
             name = relic.get("name", relic.get("id", "?"))
-            score = _relic_matches_archetype(name, archetype, character)
+            if deck_aware_scorer is not None and deck_objs:
+                score = deck_aware_scorer(name, deck_objs)
+            else:
+                score = _relic_matches_archetype(name, archetype, character)
             if score > best_relic_score:
                 best_relic_idx = i
                 best_relic_score = score
@@ -873,7 +893,7 @@ def decide_shop(state: dict, game_data: GameDataDB) -> Decision:
         # Only buy relics that are top picks or archetype matches
         if best_relic_score >= 1.0 and best_relic_idx is not None:
             return Decision("buy_relic", best_relic_idx,
-                            f"Buying {best_relic_name} (archetype fit={best_relic_score})")
+                            f"Buying {best_relic_name} (deck fit={best_relic_score:.2f})")
 
     # Priority 3: Buy a card (organic scorer, relaxed deck-size threshold)
     if "buy_card" in actions:
@@ -894,7 +914,9 @@ def decide_shop(state: dict, game_data: GameDataDB) -> Decision:
                     card_obj = _resolve_card_obj(name)
                     if not card_obj:
                         continue
-                    card_score = score_card(card_obj, deck_objs, floor, hp, max_hp)
+                    card_score = score_card(
+                        card_obj, deck_objs, floor, hp, max_hp,
+                        relics=owned_relics)
                     # Must beat skip threshold to be worth buying
                     if card_score > skip_score and card_score > best_card_score:
                         best_card_idx = i
@@ -1092,25 +1114,37 @@ def decide_neow(state: dict) -> Decision | None:
 # ---------------------------------------------------------------------------
 
 def decide_boss_relic(state: dict, game_data: GameDataDB) -> Decision:
-    """Deterministic boss relic pick: score against archetype."""
+    """Deterministic boss relic pick: score against the actual deck."""
     character = detect_character(state)
     archetype, _ = _detect_archetype(state, character)
+    deck_objs = _build_deck_card_objects(state)
 
     # Find relic options
     chest = state.get("chest") or {}
     reward = state.get("reward") or state.get("selection") or {}
-    relics = chest.get("relics", []) or reward.get("relics", [])
-    if not relics:
-        relics = ((state.get("agent_view") or {}).get("chest") or {}).get("relics", [])
+    relic_options = chest.get("relics", []) or reward.get("relics", [])
+    if not relic_options:
+        relic_options = ((state.get("agent_view") or {}).get("chest") or {}).get("relics", [])
 
-    if not relics:
+    if not relic_options:
         return Decision("choose_treasure_relic", 0, "No relic data, picking first")
 
+    # Prefer the deck-aware relic scorer; fall back to archetype fit.
+    deck_aware_scorer = None
+    try:
+        from .relic_synergy import score_relic_for_deck
+        deck_aware_scorer = score_relic_for_deck
+    except Exception:
+        deck_aware_scorer = None
+
     best_idx, best_score, best_name = 0, -999.0, ""
-    for i, relic in enumerate(relics):
+    for i, relic in enumerate(relic_options):
         name = relic.get("name", relic.get("relic_id", relic.get("id", "?")))
         idx = relic.get("index", i)
-        score = _relic_matches_archetype(name, archetype, character)
+        if deck_aware_scorer is not None and deck_objs:
+            score = deck_aware_scorer(name, deck_objs)
+        else:
+            score = _relic_matches_archetype(name, archetype, character)
         if score > best_score:
             best_idx = idx
             best_score = score
@@ -1124,8 +1158,77 @@ def decide_boss_relic(state: dict, game_data: GameDataDB) -> Decision:
 # Deck select (upgrade / remove / transform)
 # ---------------------------------------------------------------------------
 
+def _organic_removal_score(card_obj, deck_objs) -> float:
+    """Lower score = better removal candidate (shares the simulator formula).
+
+    Uses intrinsic power + halved archetype alignment penalty.  Matches
+    simulator._score_card_for_removal and the shop-removal path in
+    decide_shop so every 'remove a card' surface agrees.
+    """
+    try:
+        from .card_picker import (
+            extract_properties, build_signature,
+            _card_power_score, _alignment_score,
+        )
+        props = extract_properties(card_obj)
+        sig = build_signature(deck_objs)
+        power = _card_power_score(card_obj, props)
+        alignment = _alignment_score(card_obj, props, sig) * 0.5
+        upgrade_bonus = 0.05 if getattr(card_obj, "upgraded", False) else 0.0
+        return max(0.01, power + alignment + upgrade_bonus)
+    except Exception:
+        return 0.50
+
+
+def _organic_upgrade_value(card_obj, deck_objs, floor: int, hp: int, max_hp: int,
+                           relics: frozenset[str] | set[str] | None = None) -> float:
+    """Score how valuable it is to upgrade this card.
+
+    Uses score_card on the upgraded version (if resolvable), plus a stat
+    delta kicker.  Falls back to raw power score.  Higher = better upgrade
+    target.  Matches the spirit of simulator._rest_site_decision.
+    """
+    try:
+        from .card_picker import score_card, extract_properties, _card_power_score
+        from .data_loader import load_cards
+
+        db = load_cards()
+        base_id = getattr(card_obj, "id", "") or ""
+        upgraded = db.get_upgraded(base_id) if base_id else None
+
+        base_props = extract_properties(card_obj)
+        base_power = _card_power_score(card_obj, base_props)
+
+        if upgraded is not None:
+            # Value = score of the upgraded card in this deck.
+            value = score_card(upgraded, deck_objs, floor, hp, max_hp,
+                               relics=relics)
+            up_props = extract_properties(upgraded)
+            # Stat-delta kicker (helps break ties with clearer upgrades)
+            if up_props.deals_damage > base_props.deals_damage:
+                value += (up_props.deals_damage - base_props.deals_damage) * 0.02
+            if up_props.grants_block > base_props.grants_block:
+                value += (up_props.grants_block - base_props.grants_block) * 0.02
+            if up_props.draws_cards > base_props.draws_cards:
+                value += (up_props.draws_cards - base_props.draws_cards) * 0.10
+            if up_props.applies_poison > base_props.applies_poison:
+                value += (up_props.applies_poison - base_props.applies_poison) * 0.03
+            return value
+
+        # No upgraded variant available — fall back to power of the base card.
+        return base_power
+    except Exception:
+        return 0.0
+
+
 def decide_deck_select(state: dict) -> Decision:
-    """Deterministic deck card selection for upgrade/remove/transform."""
+    """Deterministic deck card selection for upgrade/remove/transform.
+
+    Uses the organic scorer from card_picker for remove/transform/discard
+    and the upgrade-value helper for upgrades, so every deck-edit surface
+    (shop removal, event removal, rest site upgrades) agrees on what a
+    card is worth in the current deck's archetype.
+    """
     character = detect_character(state)
     cfg = CHARACTER_CONFIG.get(character, CHARACTER_CONFIG["ironclad"])
     protect_cards = set(cfg.get("protect_cards", [cfg["key_card"]]))
@@ -1142,54 +1245,64 @@ def decide_deck_select(state: dict) -> Decision:
     is_transform = "transform" in prompt
     is_discard = "discard" in prompt and "discard pile" not in prompt
 
+    floor = _floor(state)
+    run = state.get("run") or {}
+    hp = run.get("current_hp", 50)
+    max_hp = run.get("max_hp", 80)
+    owned_relics = _get_relics(state)
+
+    deck_objs = _build_deck_card_objects(state)
+
     if is_discard:
-        # Discard: drop least valuable card (status/curse first, then lowest tier)
-        best_idx, best_score, best_name = None, 999, ""
+        # Discard: drop least valuable card.  Status/curse/unplayable first,
+        # then lowest-value real card by the organic removal scorer.
+        best_idx, best_score, best_name = None, 999.0, ""
         for card in cards:
             name = card.get("name", card.get("card_id", "?"))
             idx = card.get("index", 0)
             card_type = (card.get("type") or "").lower()
-            if name in protect_cards:
-                score = 100  # never discard protected
+
+            if name in protect_cards or name in _LIVE_PROTECTED_CARDS:
+                score = 100.0  # never discard protected
             elif card_type in ("status", "curse"):
-                score = 0
+                score = -1.0   # always discard junk first
             elif card.get("unplayable") or card.get("is_unplayable"):
-                score = 1
+                score = -0.5
             else:
-                tier = _card_tier(name.rstrip("+"), character, card)
-                score = {"avoid": 2, "B": 5, "A": 10, "S": 15}.get(tier, 4)
-                if "Strike" in name or "Defend" in name:
-                    score = 3
+                card_obj = _resolve_card_obj(name)
+                if card_obj and deck_objs:
+                    score = _organic_removal_score(card_obj, deck_objs)
+                else:
+                    # No deck context — rough fallback on starter cards.
+                    base = name.rstrip("+")
+                    score = 0.05 if base in ("Strike", "Defend") else 0.40
+
             if score < best_score:
                 best_idx = idx
                 best_score = score
                 best_name = name
         if best_idx is not None:
             return Decision("select_deck_card", best_idx,
-                            f"Discard {best_name}")
+                            f"Discard {best_name} (value={best_score:.2f})")
 
     if is_remove or is_transform:
-        # Remove/transform: Strikes first, then Defends, never key card
-        # Score: lower is better for removal
-        best_idx, best_score, best_name = None, 999, ""
+        # Remove/transform: organic removal scorer — lower score wins.
+        # Protected cards are never touched.
+        best_idx, best_score, best_name = None, 999.0, ""
         for card in cards:
             name = card.get("name", card.get("card_id", "?"))
             idx = card.get("index", 0)
-            if name in protect_cards:
-                continue  # Never remove/transform protected cards
-            base = name.rstrip("+")
-            if "Strike" in base:
-                score = 0  # Remove Strikes first
-            elif "Defend" in base:
-                score = 1  # Then Defends
+            if name in protect_cards or name in _LIVE_PROTECTED_CARDS:
+                continue
+
+            card_obj = _resolve_card_obj(name)
+            if card_obj and deck_objs:
+                score = _organic_removal_score(card_obj, deck_objs)
             else:
-                tier = _card_tier(base, character, card)
-                if tier == "avoid":
-                    score = 0  # Remove avoid-tier cards too
-                elif tier == "B":
-                    score = 2
-                else:
-                    score = 5  # A/S tier — keep
+                base = name.rstrip("+")
+                # Weak fallback: starters are best removal targets.
+                score = 0.05 if base in ("Strike", "Defend") else 0.40
+
             if score < best_score:
                 best_idx = idx
                 best_score = score
@@ -1198,30 +1311,27 @@ def decide_deck_select(state: dict) -> Decision:
         if best_idx is not None:
             action = "remove" if is_remove else "transform"
             return Decision("select_deck_card", best_idx,
-                            f"{action} {best_name}")
+                            f"{action} {best_name} (value={best_score:.2f})")
 
     elif is_upgrade:
-        # Upgrade: highest-tier un-upgraded card, powers > attacks
-        best_idx, best_score, best_name = None, -1, ""
+        # Upgrade: highest organic-value target given the current deck.
+        best_idx, best_score, best_name = None, -999.0, ""
         for card in cards:
             name = card.get("name", card.get("card_id", "?"))
             idx = card.get("index", 0)
-            base = name.rstrip("+")
-            tier = _card_tier(base, character, card)
 
-            if tier == "S":
-                score = 100
-            elif tier == "A":
-                score = 70
-            elif tier == "B":
-                score = 30
-            elif tier == "avoid":
-                score = 0
-
-            # Bonus for powers (more value from upgrading scaling cards)
-            card_type = card.get("type", "").lower()
-            if card_type == "power":
-                score += 10
+            card_obj = _resolve_card_obj(name)
+            if card_obj and deck_objs:
+                score = _organic_upgrade_value(
+                    card_obj, deck_objs, floor, hp, max_hp, relics=owned_relics)
+                # Powers are high-priority upgrades (permanent effects).
+                card_type = (card.get("type") or "").lower()
+                if card_type == "power":
+                    score += 0.15
+            else:
+                # Fallback: powers > everything else.
+                card_type = (card.get("type") or "").lower()
+                score = 0.5 if card_type == "power" else 0.2
 
             if score > best_score:
                 best_idx = idx
@@ -1230,19 +1340,27 @@ def decide_deck_select(state: dict) -> Decision:
 
         if best_idx is not None:
             return Decision("select_deck_card", best_idx,
-                            f"Upgrade {best_name}")
+                            f"Upgrade {best_name} (value={best_score:.2f})")
 
-    # Generic selection: pick highest-tier card
-    best_idx, best_score, best_name = None, -1, ""
+    # Generic selection: highest organic value in the current deck.
+    best_idx, best_score, best_name = None, -999.0, ""
     for card in cards:
         name = card.get("name", card.get("card_id", "?"))
         idx = card.get("index", 0)
-        tier = _card_tier(name.rstrip("+"), character, card)
-        score = {"S": 100, "A": 70, "B": 30, "avoid": 0}.get(tier, 15)
+        card_obj = _resolve_card_obj(name)
+        if card_obj and deck_objs:
+            try:
+                from .card_picker import score_card
+                score = score_card(card_obj, deck_objs, floor, hp, max_hp,
+                                   relics=owned_relics)
+            except Exception:
+                score = 0.0
+        else:
+            score = 0.0
         if score > best_score:
             best_idx = idx
             best_score = score
             best_name = name
 
     return Decision("select_deck_card", best_idx or 0,
-                    f"Selected {best_name}")
+                    f"Selected {best_name} (value={best_score:.2f})")

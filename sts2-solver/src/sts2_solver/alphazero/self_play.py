@@ -638,106 +638,6 @@ def _read_progress(path: Path) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# XGBoost card picker refresh
-# ---------------------------------------------------------------------------
-
-def _refresh_xgboost(card_db, games: int = 200) -> None:
-    """Collect fresh card pick data and retrain the XGBoost model.
-
-    Runs in a subprocess so a crash in the combat simulator doesn't
-    kill the entire training process.  Falls back to the existing model
-    (if any) on failure.
-    """
-    try:
-        from ..card_picker_xgb import MODEL_DIR
-    except ImportError as e:
-        print(f"[XGBoost] Skipping refresh — missing dependency: {e}", flush=True)
-        return
-
-    import subprocess
-    import sys
-
-    print(f"[XGBoost] Refreshing card picker model ({games} games in subprocess)...", flush=True)
-    t0 = time.time()
-
-    # Run data collection + training in a subprocess so segfaults
-    # in the combat solver don't take down AlphaZero training.
-    script = f"""
-import random, time, sys
-from src.sts2_solver.card_picker_xgb import (
-    CardPickCollector, CardPickerXGB, MODEL_DIR, records_to_training_data,
-)
-from src.sts2_solver.collect_card_picks import collect_one_run
-from src.sts2_solver.data_loader import load_cards
-
-card_db = load_cards()
-collector = CardPickCollector()
-wins = 0
-crashes = 0
-for i in range({games}):
-    try:
-        seed = random.randint(0, 2**31)
-        result = collect_one_run(run_id=i, collector=collector,
-                                 character="SILENT", seed=seed)
-        if result.outcome == "win":
-            wins += 1
-    except Exception as e:
-        crashes += 1
-        if crashes > 20:
-            print(f"[XGBoost] Too many crashes ({{crashes}}), stopping collection")
-            break
-
-n = len(collector.records)
-print(f"[XGBoost] Collected {{n}} records ({{wins}}/{games} wins, {{crashes}} crashes)")
-
-if n < 50:
-    print("[XGBoost] Too few records, skipping training")
-    sys.exit(0)
-
-data_path = str(MODEL_DIR.parent / "card_pick_data_latest.json")
-collector.save(data_path)
-
-X, y = records_to_training_data(data_path, card_db)
-print(f"[XGBoost] Training on {{len(X)}} samples (mean={{y.mean():.3f}})")
-
-model_path = MODEL_DIR / "card_picker.json"
-MODEL_DIR.mkdir(parents=True, exist_ok=True)
-picker = CardPickerXGB()
-picker.train(X, y, save_path=str(model_path))
-print("[XGBoost] Done")
-"""
-    # Run from the sts2-solver directory (same as training)
-    solver_dir = Path(__file__).resolve().parents[3]
-    result = subprocess.run(
-        [sys.executable, "-c", script],
-        cwd=str(solver_dir),
-        capture_output=True, text=True, timeout=600,
-    )
-
-    elapsed = time.time() - t0
-    if result.stdout:
-        for line in result.stdout.strip().split("\n"):
-            print(f"  {line}", flush=True)
-    if result.returncode != 0:
-        print(f"[XGBoost] Subprocess exited with code {result.returncode} "
-              f"({elapsed:.1f}s)", flush=True)
-        if result.stderr:
-            # Print last few lines of stderr for debugging
-            err_lines = result.stderr.strip().split("\n")
-            for line in err_lines[-5:]:
-                print(f"  stderr: {line}", flush=True)
-        print("[XGBoost] Will use existing model if available", flush=True)
-    else:
-        print(f"[XGBoost] Refresh completed ({elapsed:.1f}s)", flush=True)
-
-    # NOTE: Do NOT load the XGBoost model into this process.
-    # The training process uses the neural network option head for card
-    # decisions, not the card_picker.  Importing xgboost alongside PyTorch
-    # causes an OpenMP segfault on macOS.  The refreshed model will be
-    # picked up by the simulator and live advisor in their own processes.
-
-
-# ---------------------------------------------------------------------------
 # Worker: headless training loop
 # ---------------------------------------------------------------------------
 
@@ -815,9 +715,6 @@ def train_worker(
     recent_games: list[dict] = []
 
     from .full_run import play_full_run
-
-    # --- Refresh XGBoost card picker model before training ---
-    _refresh_xgboost(card_db, games=200)
 
     # --- Boss-fight detail log (appended JSONL) ---
     # Each line: one run that reached the boss, with per-turn detail.

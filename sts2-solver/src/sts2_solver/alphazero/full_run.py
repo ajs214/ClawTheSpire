@@ -443,6 +443,7 @@ def _network_pick_card(
     vocabs: Vocabs,
     config: EncoderConfig,
     card_db: CardDB,
+    relics: frozenset[str] | set[str] | None = None,
 ) -> tuple[Card | None, OptionSample | None]:
     """Pick a card reward using the organic card picker.
 
@@ -459,7 +460,7 @@ def _network_pick_card(
 
     # --- Organic picker makes the decision ---
     from ..card_picker import pick_card as organic_pick
-    pick = organic_pick(offered, deck, floor, hp, max_hp)
+    pick = organic_pick(offered, deck, floor, hp, max_hp, relics=relics)
 
     # --- Build a training sample for the option head (learns from the pick) ---
     sample = None
@@ -717,6 +718,7 @@ def play_full_run(
                 pick, deck_sample = _network_pick_card(
                     offered, deck, hp, max_hp, floor_num,
                     mcts, vocabs, config, card_db,
+                    relics=frozenset(relics),
                 )
                 if pick:
                     deck.append(pick)
@@ -902,13 +904,17 @@ def play_full_run(
 
             except Exception:
                 # Fallback to heuristic
-                shop_result = _simulate_shop(deck, gold, card_db, pools, rng)
+                shop_result = _simulate_shop(
+                    deck, gold, card_db, pools, rng,
+                    relics=frozenset(relics))
                 gold += shop_result["gold_delta"]
                 for idx in sorted(shop_result.get("cards_removed", []), reverse=True):
                     if idx < len(deck):
                         deck.pop(idx)
                 for card in shop_result.get("cards_added", []):
                     deck.append(card)
+                for relic_name in shop_result.get("relics_bought", []):
+                    relics.add(relic_name)
 
     # Completed all floors without boss (shouldn't happen normally)
     _assign_run_values(combat_samples_by_floor, floor_reached,

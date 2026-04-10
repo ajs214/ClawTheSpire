@@ -802,31 +802,20 @@ def _score_card_for_pick(card: Card, deck: list[Card]) -> float:
     return score
 
 
-_SIM_ML_LOADED: bool = False
-
-
 def _smart_pick_or_fallback(
     offered: list[Card], deck: list[Card],
     floor: int = 1, hp: int = 50, max_hp: int = 80,
+    relics: frozenset[str] | set[str] | None = None,
 ) -> Card | None:
-    """Use the organic card picker (rule-based + alpha-blended ML).
+    """Use the organic card picker (rule-based, relic-aware).
 
     Falls back to the old tier-list picker if the new system fails.
-    Lazily loads the XGBoost model on first call (not at data-load time,
-    to avoid xgboost/torch conflicts in the training process).
+    ``relics`` (when supplied) is threaded into score_card so relic
+    synergies influence the pick.
     """
-    global _SIM_ML_LOADED
-    if not _SIM_ML_LOADED:
-        _SIM_ML_LOADED = True
-        try:
-            from .card_picker import load_ml_model
-            if load_ml_model():
-                print("[Simulator] XGBoost card picker model loaded", flush=True)
-        except Exception:
-            pass
     try:
         from .card_picker import pick_card
-        return pick_card(offered, deck, floor, hp, max_hp)
+        return pick_card(offered, deck, floor, hp, max_hp, relics=relics)
     except Exception:
         pass
     return _pick_card_reward(offered, deck)
@@ -1519,7 +1508,10 @@ def _rest_site_decision(
         heal = int(max_hp * 0.3)
         return {"action": "rest", "hp_delta": heal, "upgrade_card_idx": None}
 
-    # Score upgradeable cards using the organic picker's power scoring
+    # Score upgradeable cards using the organic scorer applied to the
+    # *upgraded* version so archetype fit and in-deck value drive the
+    # choice — the rest site agrees with card_picker.score_card on what
+    # 'best upgrade' means.
     upgradeable = []
     for i, card in enumerate(deck):
         if card.upgraded:
@@ -1532,26 +1524,28 @@ def _rest_site_decision(
 
         score = 0.0
         try:
-            from .card_picker import extract_properties, _card_power_score
+            from .card_picker import extract_properties, _card_power_score, score_card
             props = extract_properties(card)
-            score = _card_power_score(card, props) * 100
-
-            # Bonus for upgrading cards with large stat deltas
             upgraded = card_db.get_upgraded(card.id)
-            if upgraded:
+
+            if upgraded is not None:
+                # Primary signal: how valuable the upgraded version is in
+                # this deck, multiplied up so the stat-delta kicker below
+                # still registers meaningfully.
+                score = score_card(upgraded, deck, floor, hp, max_hp) * 100
                 uprops = extract_properties(upgraded)
-                # Damage improvement
+                # Stat-delta kicker (helps break ties with clearer upgrades)
                 if uprops.deals_damage > props.deals_damage:
                     score += (uprops.deals_damage - props.deals_damage) * 2
-                # Block improvement
                 if uprops.grants_block > props.grants_block:
                     score += (uprops.grants_block - props.grants_block) * 2
-                # Draw improvement
                 if uprops.draws_cards > props.draws_cards:
                     score += (uprops.draws_cards - props.draws_cards) * 10
-                # Poison improvement
                 if uprops.applies_poison > props.applies_poison:
                     score += (uprops.applies_poison - props.applies_poison) * 3
+            else:
+                # No upgraded variant — fall back to base power.
+                score = _card_power_score(card, props) * 100
 
             # Powers are high-priority upgrades (permanent effects)
             if props.is_power:
@@ -1644,49 +1638,15 @@ def _score_card_for_removal(card: Card, deck: list[Card], floor: int,
 
 def _score_relic_for_purchase(relic_name: str, deck: list[Card],
                               character: str) -> float:
-    """Score a relic for purchase based on archetype fit.
+    """Score a relic for purchase based on the *actual* current deck.
 
-    Returns 0.0–2.0.  Uses the RELIC_GUIDE from config if available.
+    Thin wrapper over :func:`relic_synergy.score_relic_for_deck` so the
+    shop shares the same deck-aware scoring the deterministic advisor
+    uses.  Returns roughly [-1.0, 2.0].
     """
     try:
-        from .config_a import RELIC_GUIDE
-        from .card_picker import build_signature
-
-        sig = build_signature(deck)
-        archetype = sig.dominant_archetype
-
-        guide = RELIC_GUIDE.get(character, {})
-
-        # Check avoid list first
-        avoid = guide.get("avoid", {}).get("relics", [])
-        if relic_name in avoid:
-            return -1.0
-
-        # Top picks are always good
-        top = guide.get("top_picks", {}).get("relics", [])
-        if relic_name in top:
-            return 2.0
-
-        # Archetype-specific match
-        archetype_to_category = {
-            "poison": "poison_synergy",
-            "shiv": "shiv_synergy",
-            "sly": "sly_synergy",
-        }
-        if archetype in archetype_to_category:
-            cat_key = archetype_to_category[archetype]
-            cat_relics = guide.get(cat_key, {}).get("relics", [])
-            if relic_name in cat_relics:
-                return 1.5
-
-        # Partial match — in some category but not our archetype
-        for key, info in guide.items():
-            if key in ("top_picks", "avoid"):
-                continue
-            if relic_name in info.get("relics", []):
-                return 0.5
-
-        return 0.0
+        from .relic_synergy import score_relic_for_deck
+        return score_relic_for_deck(relic_name, deck)
     except Exception:
         return 0.0
 
@@ -1702,6 +1662,7 @@ def _simulate_shop(
     max_hp: int = 80,
     character: str = "SILENT",
     potions: list[dict] | None = None,
+    relics: frozenset[str] | set[str] | None = None,
 ) -> dict:
     """Simulate a shop visit with archetype-aware multi-step purchasing.
 
@@ -1770,7 +1731,8 @@ def _simulate_shop(
         # Shop offers more cards than combat rewards (typically 6-7 in STS2)
         offered = _offer_card_rewards(pools, deck, 6)
         # Use the organic picker for scoring
-        pick = _smart_pick_or_fallback(offered, deck, floor, hp, max_hp)
+        pick = _smart_pick_or_fallback(offered, deck, floor, hp, max_hp,
+                                       relics=relics)
         if pick:
             # Determine cost by rarity
             cost = 75  # Default (Uncommon)
@@ -1919,6 +1881,16 @@ def simulate_act1(
     # Potions
     potions: list[dict] = []  # Start with no potions (acquired from combat)
 
+    # Relics — starts with the character's starter relic (if any), then
+    # grows from shop purchases and boss rewards.  Used by the organic
+    # card picker so relics bias card selection the same way as in game.
+    relics: set[str] = set()
+    starter_relic = char_data.get("starting_relic")
+    if isinstance(starter_relic, str) and starter_relic:
+        relics.add(starter_relic)
+    elif isinstance(starter_relic, dict):
+        relics.add(starter_relic.get("name", starter_relic.get("id", "")))
+
     # Run state
     result = RunResult(run_id=run_id, outcome="lose", floor_reached=0,
                        final_hp=hp, max_hp=max_hp, gold=gold,
@@ -2005,8 +1977,10 @@ def simulate_act1(
             # Card reward (not for boss — boss gives relic)
             if room_type != "boss":
                 offered = _offer_card_rewards(pools, deck)
-                # Use organic picker (rule-based + alpha-blended ML)
-                pick = _smart_pick_or_fallback(offered, deck, floor_num, hp, max_hp)
+                # Use organic picker — relics influence card value
+                pick = _smart_pick_or_fallback(
+                    offered, deck, floor_num, hp, max_hp,
+                    relics=frozenset(relics))
                 if pick:
                     deck.append(pick)
                     result.cards_picked.append(pick.name)
@@ -2070,6 +2044,7 @@ def simulate_act1(
                 deck, gold, card_db, pools, rng,
                 floor=floor_num, hp=hp, max_hp=max_hp,
                 character=character, potions=potions,
+                relics=frozenset(relics),
             )
             gold += shop_result["gold_delta"]
 
@@ -2088,6 +2063,7 @@ def simulate_act1(
                     print(f"    Shop bought card: {card.name}")
 
             for relic_name in shop_result.get("relics_bought", []):
+                relics.add(relic_name)
                 if verbose:
                     print(f"    Shop bought relic: {relic_name}")
 

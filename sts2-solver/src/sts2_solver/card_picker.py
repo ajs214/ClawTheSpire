@@ -14,10 +14,8 @@ Architecture:
   - CardSignature: same vector for a single card
   - Alignment score: how well a card extends the deck's direction
   - Rule-based scorer: implements the maxims
-  - Alpha-blended interface: rule score * (1-alpha) + ml score * alpha
-    where alpha ramps up as wins accumulate
-
-The ML layer (XGBoost residual) is pluggable and starts at zero weight.
+  - pick_card(): public entry point used by simulator, AlphaZero self-play,
+    and the live in-game advisor
 """
 
 from __future__ import annotations
@@ -25,7 +23,6 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 from .models import Card
@@ -524,19 +521,34 @@ def _balance_need_score(
 def _deck_size_penalty(sig: DeckSignature) -> float:
     """Penalty for adding cards to an already large deck.
 
-    Every card added dilutes draw probability. The nth card needs to be
-    increasingly good to justify the slot. A normal Silent deck is 15-17
-    cards by end of Act 1 — penalty should be gentle until 18+.
+    Every card added dilutes draw probability, but STS decks win by
+    accumulating win conditions, so the early/mid run should feel no
+    pressure at all.  The curve only starts to bite at 18+ cards and
+    only gets punishing at 22+ (rare in Act 1, possible mid-Act 2).
+
+    Previous curve (too aggressive):
+      ≤15: 0  | 16–17: -0.05 | 18–19: -0.12 | 20+: -0.22
+    New curve (deck growth encouraged):
+      ≤17: 0  | 18–19: -0.04 | 20–21: -0.10 | 22–23: -0.16 | 24+: -0.22
     """
     size = sig.size
-    if size <= 15:
+    if size <= 17:
         return 0.0
-    elif size <= 17:
-        return 0.05
     elif size <= 19:
-        return 0.12
+        return 0.04
+    elif size <= 21:
+        return 0.10
+    elif size <= 23:
+        return 0.16
     else:
-        return 0.22  # Hard to justify adding to a 20+ card deck
+        return 0.22
+
+
+#: Power threshold above which a non-Power card is considered "strong"
+#: and exempt from duplicate diversity pressure.  Calibrated so Backflip,
+#: Bouncing Flask, Dagger Spray, Leg Sweep, Catalyst, and similar
+#: archetype payoffs clear the bar, while starter-tier filler doesn't.
+_STRONG_CARD_THRESHOLD: float = 0.35
 
 
 def _duplicate_penalty(
@@ -547,29 +559,32 @@ def _duplicate_penalty(
 ) -> float:
     """Penalty for having too many copies of the same card.
 
-    Scaled by card power: strong cards barely eat a penalty (2 Anticipates
-    or 2 Backflips is genuinely good), while weak cards keep most of it.
-    Powers are an exception — stacking effects of the same Power rarely
-    adds value, so they keep the full penalty regardless of their score.
-
-    Rationale: the previous flat penalty was actively suppressing doubling
-    up on the deck's best cards, which runs counter to how strong STS
-    decks are built (you want multiples of your win conditions).
+    Design:
+      * Powers keep the full penalty — stacking duplicate Power effects
+        rarely adds value (Noxious Fumes 2x, Accuracy 2x don't combine).
+      * Strong non-Power cards: **zero penalty**.  Multiples of a good
+        archetype payoff are how you build winning STS decks.  The card
+        still has to earn its slot on its own power + alignment score,
+        but duplication is no longer penalised at all.
+      * Weak / mid cards: smoothly scaling diversity pressure — a pure
+        Strike duplicate still eats most of the penalty, a mid card
+        gets reduced pressure.
     """
     copies = sum(1 for c in deck if c.id == card.id or c.name == card.name)
     if copies == 0:
         return 0.0
 
-    base = 0.25 if copies >= 2 else 0.08
-
-    # Powers don't stack — keep the full penalty for duplicate powers.
+    # Powers: stacking duplicate Powers rarely adds value.
     if props.is_power:
-        return base
+        return 0.25 if copies >= 2 else 0.08
 
-    # Scale inversely with card power, but never drop below 25% of base
-    # so very strong cards still feel *some* diversity pressure above
-    # ~3 copies (the copies>=2 tier absorbs that).
-    scale = max(0.25, 1.0 - power_score)
+    # Strong non-Power cards: no penalty at all.
+    if power_score >= _STRONG_CARD_THRESHOLD:
+        return 0.0
+
+    # Weak / mid cards: smooth diversity pressure
+    base = 0.25 if copies >= 2 else 0.08
+    scale = max(0.10, 1.0 - power_score)
     return base * scale
 
 
@@ -579,6 +594,7 @@ def score_card(
     floor: int,
     hp: int = 50,
     max_hp: int = 80,
+    relics: frozenset[str] | set[str] | None = None,
 ) -> float:
     """Score a card for the pick decision. Higher = better to pick.
 
@@ -587,7 +603,10 @@ def score_card(
       - Alignment with deck direction (synergy / off-archetype penalty)
       - Balance gap filling (late-game only)
       - Deck size penalty (dilution cost)
-      - Duplicate penalty
+      - Duplicate penalty (non-Power strong cards are exempt)
+      - Relic synergy bonus (Shuriken likes cheap attacks, Paper Krane
+        likes Weak, Snecko Skull likes poison, etc.) when ``relics`` is
+        supplied
     """
     props = extract_properties(card)
     sig = build_signature(deck)
@@ -607,122 +626,51 @@ def score_card(
     if hp_ratio < 0.6 and props.grants_block > 0:
         hp_defense_bonus = 0.10 * (1.0 - hp_ratio)
 
-    score = power + alignment + balance + hp_defense_bonus - size_pen - dup_pen
+    # Relic bonus: amplify cards whose mechanical effects match owned
+    # relics.  Caps at ±0.25 inside relic_card_bonus so it nudges rather
+    # than dominates.  Imported lazily to avoid a circular import during
+    # module load.
+    relic_bonus = 0.0
+    if relics:
+        from .relic_synergy import relic_card_bonus
+        relic_bonus = relic_card_bonus(props, relics)
+
+    score = (
+        power + alignment + balance + hp_defense_bonus + relic_bonus
+        - size_pen - dup_pen
+    )
     return max(0.0, min(1.0, score))
 
 
 def score_skip(deck: list[Card], floor: int) -> float:
     """Score for skipping the card reward.
 
-    Skipping should be rare early (deck needs to grow from 10 starters to
-    ~15-17 cards) and increasingly common once the deck has an identity.
-    A 14-card deck is normal and healthy — skip pressure should only kick
-    in hard above 17-18 cards.
+    Skipping should be rare until the deck is genuinely bloated.  STS decks
+    win by stacking win conditions, so we stay hungry for new cards until
+    well past 'normal' size.  Curve is aligned with _deck_size_penalty
+    (both start biting at 18+).
     """
     sig = build_signature(deck)
     size = sig.size
 
-    # Skipping is better when deck is large and focused
-    base = 0.0
-    if size >= 20:
+    # Baseline skip score grows with deck size
+    if size >= 24:
         base = 0.45
-    elif size >= 18:
+    elif size >= 22:
         base = 0.35
-    elif size >= 16:
+    elif size >= 20:
         base = 0.25
-    elif size >= 14:
-        base = 0.12
+    elif size >= 18:
+        base = 0.15
+    elif size >= 16:
+        base = 0.08
     else:
-        base = 0.05  # Almost never skip with < 14 cards
+        base = 0.03  # Almost never skip below 16 cards
 
     # High commitment = skip off-archetype offers more readily
     base += sig.archetype_commitment * 0.08
 
     return min(0.55, base)
-
-
-# ---------------------------------------------------------------------------
-# Alpha-blended picker (rule + ML)
-# ---------------------------------------------------------------------------
-
-_ML_MODEL = None
-_TOTAL_WINS: int = 0
-_WIN_THRESHOLD: int = 500  # wins needed for full ML handoff
-
-
-def set_win_count(wins: int) -> None:
-    """Update the global win count for alpha calculation."""
-    global _TOTAL_WINS
-    _TOTAL_WINS = wins
-
-
-def get_alpha() -> float:
-    """Current blend weight: 0.0 = pure rules, 1.0 = pure ML."""
-    return min(1.0, _TOTAL_WINS / _WIN_THRESHOLD)
-
-
-def load_ml_model(path: str | Path | None = None) -> bool:
-    """Load the XGBoost residual model if available."""
-    global _ML_MODEL
-    if path is None:
-        path = Path(__file__).resolve().parents[3] / "card_picker_model" / "card_picker.json"
-    path = Path(path)
-    if not path.exists():
-        return False
-    try:
-        from .card_picker_xgb import CardPickerXGB
-        _ML_MODEL = CardPickerXGB(path)
-        return True
-    except Exception:
-        return False
-
-
-def _ml_score(
-    card: Card | None,
-    deck: list[Card],
-    floor: int,
-    hp: int,
-    max_hp: int,
-) -> float:
-    """Get ML model score for a card (or skip if card is None)."""
-    if _ML_MODEL is None:
-        return 0.0
-    try:
-        from .card_picker_xgb import build_feature_row, build_skip_features, feats_to_array
-        import numpy as np
-        if card is not None:
-            feats = build_feature_row(card, deck, floor, hp, max_hp)
-        else:
-            feats = build_skip_features(deck, floor, hp, max_hp)
-        x = feats_to_array(feats).reshape(1, -1)
-        return float(_ML_MODEL.model.predict(x)[0])
-    except Exception:
-        return 0.0
-
-
-def blended_score(
-    card: Card | None,
-    deck: list[Card],
-    floor: int,
-    hp: int = 50,
-    max_hp: int = 80,
-) -> float:
-    """Score a card using alpha-blended rules + ML.
-
-    card=None scores the skip option.
-    """
-    alpha = get_alpha()
-
-    if card is not None:
-        rule = score_card(card, deck, floor, hp, max_hp)
-    else:
-        rule = score_skip(deck, floor)
-
-    if alpha == 0.0 or _ML_MODEL is None:
-        return rule
-
-    ml = _ml_score(card, deck, floor, hp, max_hp)
-    return (1.0 - alpha) * rule + alpha * ml
 
 
 # ---------------------------------------------------------------------------
@@ -735,26 +683,28 @@ def pick_card(
     floor: int = 1,
     hp: int = 50,
     max_hp: int = 80,
+    relics: frozenset[str] | set[str] | None = None,
 ) -> Card | None:
     """Pick the best card from offered rewards, or None to skip.
 
-    This is the main entry point — drop-in replacement for
-    simulator._pick_card_reward and the XGBoost picker.
+    Pure rule-based organic scoring: score_card() for each offered card
+    versus score_skip() as the baseline.  When ``relics`` is supplied,
+    the relic synergy bonus is applied inside score_card — relic-aware
+    callers should pass the player's current relic set so that, e.g.,
+    a Paper Krane deck preferentially takes Weak-applying cards.
     """
     if not offered:
         return None
 
     # Score all options + skip
-    scores = []
-    for card in offered:
-        s = blended_score(card, deck, floor, hp, max_hp)
-        scores.append((card, s))
-
-    skip_score = blended_score(None, deck, floor, hp, max_hp)
-    scores.append((None, skip_score))
+    scores: list[tuple[Card | None, float]] = [
+        (card, score_card(card, deck, floor, hp, max_hp, relics=relics))
+        for card in offered
+    ]
+    scores.append((None, score_skip(deck, floor)))
 
     # Pick the highest
     scores.sort(key=lambda x: x[1], reverse=True)
-    best_card, best_score = scores[0]
+    best_card, _ = scores[0]
 
     return best_card  # None = skip
