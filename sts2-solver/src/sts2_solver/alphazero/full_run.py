@@ -76,13 +76,78 @@ from .self_play import (
 from ..effects import discard_card_from_hand
 from .state_tensor import encode_state, encode_actions
 
-# Relics that can drop from elites (effects implemented in combat_engine.py)
-ELITE_RELIC_POOL = [
+# Relics whose effects are actually simulated in combat_engine.py.  All
+# relic grants in the training loop (elite / treasure / event / boss)
+# draw from this set — anything outside it would be a cosmetic no-op in
+# training and would teach the agent to expect benefits that don't
+# materialise in combat.  When combat_engine gains new relic effects,
+# add the IDs here.
+IMPLEMENTED_RELIC_POOL = [
     "ANCHOR", "BLOOD_VIAL", "BAG_OF_PREPARATION", "BRONZE_SCALES",
     "BAG_OF_MARBLES", "FESTIVE_POPPER", "LANTERN", "ODDLY_SMOOTH_STONE",
     "STRIKE_DUMMY", "CLOAK_CLASP", "ART_OF_WAR", "MEAT_ON_THE_BONE",
     "KUNAI", "ORNAMENTAL_FAN", "NUNCHAKU", "LETTER_OPENER", "SHURIKEN",
 ]
+# Alias for backwards compatibility with any external callers.
+ELITE_RELIC_POOL = IMPLEMENTED_RELIC_POOL
+
+# STS relic ID → display name, used to bridge combat_engine's ID-keyed
+# relics set to relic_synergy.score_relic_for_deck's name-keyed scorer.
+_RELIC_ID_TO_NAME: dict[str, str] = {
+    "ANCHOR":             "Anchor",
+    "ART_OF_WAR":         "Art of War",
+    "BAG_OF_MARBLES":     "Bag of Marbles",
+    "BAG_OF_PREPARATION": "Bag of Preparation",
+    "BLOOD_VIAL":         "Blood Vial",
+    "BRONZE_SCALES":      "Bronze Scales",
+    "CLOAK_CLASP":        "Cloak Clasp",
+    "FESTIVE_POPPER":     "Festive Popper",
+    "KUNAI":              "Kunai",
+    "LANTERN":            "Lantern",
+    "LETTER_OPENER":      "Letter Opener",
+    "MEAT_ON_THE_BONE":   "Meat on the Bone",
+    "NUNCHAKU":           "Nunchaku",
+    "ODDLY_SMOOTH_STONE": "Oddly Smooth Stone",
+    "ORNAMENTAL_FAN":     "Ornamental Fan",
+    "SHURIKEN":           "Shuriken",
+    "STRIKE_DUMMY":       "Strike Dummy",
+}
+
+
+def _pick_best_relic(
+    pool: list[str],
+    deck: list[Card],
+    owned: set[str],
+    rng: random.Random,
+    sample_size: int = 3,
+) -> str | None:
+    """Draw up to ``sample_size`` relics from ``pool`` and return the
+    one that scores highest against the current deck.
+
+    Mirrors the in-game 1-of-3 drop choice the player would see, and
+    uses :func:`relic_synergy.score_relic_for_deck` so the pick is
+    deck-aware (prefers Kunai for shiv decks, Art of War for heavy
+    skill decks, etc).  Returns ``None`` if the pool is empty or the
+    player already owns everything.
+    """
+    eligible = [r for r in pool if r not in owned]
+    if not eligible:
+        return None
+    sample = rng.sample(eligible, min(sample_size, len(eligible)))
+    try:
+        from ..relic_synergy import score_relic_for_deck
+        best_id, best_score = sample[0], float("-inf")
+        for rid in sample:
+            display = _RELIC_ID_TO_NAME.get(rid, rid)
+            score = score_relic_for_deck(display, deck)
+            if score > best_score:
+                best_id, best_score = rid, score
+        return best_id
+    except Exception:
+        # If scoring blows up for any reason, fall back to a random
+        # pick so we never silently drop a relic grant.
+        return rng.choice(sample)
+
 
 # Character starter relics
 STARTER_RELICS = {
@@ -707,11 +772,15 @@ def play_full_run(
                 pot = rng.choice(POTION_TYPES)
                 potions.append(dict(pot))
 
-            # Elite relic drop
+            # Elite relic drop — V7: deck-aware 1-of-3 pick from the
+            # implemented-effects pool.  Previously this was a uniform
+            # rng.choice over the same pool which ignored deck shape.
             if room_type == "elite":
-                available = [r for r in ELITE_RELIC_POOL if r not in relics]
-                if available:
-                    relics.add(rng.choice(available))
+                granted = _pick_best_relic(
+                    IMPLEMENTED_RELIC_POOL, deck, relics, rng,
+                )
+                if granted is not None:
+                    relics.add(granted)
 
             if room_type != "boss":
                 offered = _offer_card_rewards(pools, deck)
@@ -726,6 +795,18 @@ def play_full_run(
                     deck_change_samples.append(deck_sample)
 
             if room_type == "boss":
+                # V7: boss kill grants a relic.  Prior to V7 the full
+                # run ended here without granting anything, so the
+                # win-value target didn't reflect the compounding
+                # benefit of the boss drop.  We still draw from the
+                # implemented-effects pool because real STS boss (Ancient)
+                # relics don't have simulated effects in combat_engine
+                # yet.
+                granted = _pick_best_relic(
+                    IMPLEMENTED_RELIC_POOL, deck, relics, rng,
+                )
+                if granted is not None:
+                    relics.add(granted)
                 _assign_run_values(combat_samples_by_floor, floor_reached,
                                    len(room_sequence), hp, max_hp,
                                    deck_change_samples, option_samples,
@@ -814,6 +895,23 @@ def play_full_run(
                         deck.pop(idx)
                 for card in changes["cards_added"]:
                     deck.append(card)
+                # V7: relic reward if event option grants a relic.
+                if changes.get("grants_relic"):
+                    granted = _pick_best_relic(
+                        IMPLEMENTED_RELIC_POOL, deck, relics, rng,
+                    )
+                    if granted is not None:
+                        relics.add(granted)
+
+        elif room_type == "treasure":
+            # V7: treasure chest grants a relic.  Pool is restricted to
+            # relics whose effects are simulated in combat_engine, so the
+            # agent learns real synergies rather than cosmetic no-ops.
+            granted = _pick_best_relic(
+                IMPLEMENTED_RELIC_POOL, deck, relics, rng,
+            )
+            if granted is not None:
+                relics.add(granted)
 
         elif room_type == "shop":
             # Network-driven multi-step shop
