@@ -193,12 +193,18 @@ class DeckSignature:
 
     @property
     def archetype_commitment(self) -> float:
-        """0.0 = no direction, 1.0 = fully committed."""
+        """0.0 = no direction, 1.0 = fully committed.
+
+        Denominator has a floor of 3: a single archetype pick is only 33%
+        commitment, two is 67%, three is 100%. This prevents the picker
+        from fully committing after a single pick and then refusing every
+        non-matching card.
+        """
         scores = [self.poison_card_count, self.shiv_card_count, self.sly_card_count]
         best = max(scores)
         if best == 0 or self.picked_count == 0:
             return 0.0
-        return min(1.0, best / max(1, self.picked_count))
+        return min(1.0, best / max(3, self.picked_count))
 
     @property
     def defense_ratio(self) -> float:
@@ -386,18 +392,30 @@ def _alignment_score(
 ) -> float:
     """How well does this card align with the deck's emerging direction?
 
-    Returns -0.3 (off-archetype) to +0.4 (perfect fit).
+    Returns -0.18 (off-archetype) to +0.5 (perfect fit).
     Magnitude scales with deck commitment — early on, everything is ~0.
+
+    Tuned against 306-boss-fight data (April 2026):
+      * Off-archetype penalty softened (-0.35 -> -0.18) because committed
+        decks were dying at the boss for lack of block/draw.
+      * Block added to universal support and its magnitude raised
+        (0.10 -> 0.20) because block+draw cards drive wins in the data.
+      * Threshold raised (0.1 -> 0.2) so the first non-starter pick
+        never triggers archetype logic.
+      * Cross-synergies expanded to include debuff/scaling pairings
+        (e.g. poison decks benefit from Weak because it buys time to
+        scale; shiv decks benefit from Vulnerable because it amplifies
+        each shiv tick).
     """
     commitment = sig.archetype_commitment
-    if commitment < 0.1:
+    if commitment < 0.20:
         return 0.0  # No direction yet — all cards equally valid
 
     archetype = sig.dominant_archetype
     if archetype == "undecided" or archetype == "mixed":
         return 0.0
 
-    # Check if card fits the dominant archetype (by properties, not names)
+    # --- Core in-archetype fit (by mechanical properties) ---
     is_in_archetype = False
     if archetype == "poison" and props.applies_poison > 0:
         is_in_archetype = True
@@ -406,58 +424,97 @@ def _alignment_score(
     elif archetype == "sly" and props.has_sly:
         is_in_archetype = True
 
-    # Cross-synergies: Sly supports both poison and shiv
+    # --- Cross-archetype synergies (secondary fit) ---
+    # These are cards that aren't the core payoff but meaningfully
+    # enable or amplify the archetype's plan.
     is_cross_synergy = False
-    if archetype in ("poison", "shiv") and props.has_sly:
-        is_cross_synergy = True
-    # Shiv generators synergise with Sly (more cards to play)
-    if archetype == "sly" and props.spawns_shivs:
-        is_cross_synergy = True
+    if archetype == "poison":
+        # Debuffs buy time for poison damage to scale
+        if props.applies_weak or props.applies_vulnerable:
+            is_cross_synergy = True
+        # Sly lets us rip through setup cards to get poison online
+        if props.has_sly:
+            is_cross_synergy = True
+    elif archetype == "shiv":
+        # Strength/Dex scale every shiv
+        if props.grants_dexterity or props.grants_strength:
+            is_cross_synergy = True
+        # Vulnerable amplifies every shiv hit
+        if props.applies_vulnerable:
+            is_cross_synergy = True
+        # Sly = free shiv plays
+        if props.has_sly:
+            is_cross_synergy = True
+    elif archetype == "sly":
+        # Shiv generators feed Sly with cheap plays
+        if props.spawns_shivs:
+            is_cross_synergy = True
+        # Debuffs extend the runway when we're drawing thin
+        if props.applies_weak or props.applies_vulnerable:
+            is_cross_synergy = True
 
-    # Draw and energy cards support every archetype
-    is_universal_support = props.draws_cards > 0 or props.grants_energy > 0
+    # --- Universal support (helps any archetype) ---
+    # Block added: the data shows block cards are the #1 win driver,
+    # and they were previously eating the off-archetype penalty in
+    # committed decks.
+    is_universal_support = (
+        props.draws_cards > 0
+        or props.grants_energy > 0
+        or props.grants_block >= 8  # real block, not incidental riders
+    )
 
     if is_in_archetype:
-        return 0.5 * commitment   # Max +0.5 at full commitment
+        return 0.5 * commitment    # Max +0.5 at full commitment
     elif is_cross_synergy:
-        return 0.25 * commitment  # Cross-synergy still valuable
+        return 0.30 * commitment   # Cross-synergy meaningfully lifted
     elif is_universal_support:
-        return 0.1 * commitment   # Draw/energy always helps
+        return 0.20 * commitment   # Draw/energy/block always helps
     else:
-        # Off-archetype penalty scales with commitment
-        return -0.35 * commitment  # Max -0.35 at full commitment
+        return -0.18 * commitment  # Softened off-archetype penalty
 
 
 def _balance_need_score(
     card: Card,
     props: CardProperties,
     sig: DeckSignature,
+    deck: list[Card],
     floor: int,
 ) -> float:
     """Bonus for filling critical gaps in the deck.
 
-    Per maxim #3, this is small early and grows as the deck matures.
-    It should never override a strong synergy pick, but should break ties
-    and prevent critical deficiencies.
+    Kicks in earlier than before (floor 4 instead of 6), fires on a
+    deeper definition of "block gap" that excludes starter Defends (since
+    5 Defends aren't enough to survive Act 1 bosses), and carries bigger
+    magnitudes so it can meaningfully sway picks.
+
+    The 306-boss-fight data showed turn-4 and turn-8/10/11 as the top
+    loss spikes — exactly the pattern you'd expect from decks arriving
+    at the boss with no real block beyond starter Defends.
     """
-    # Only start caring about balance after floor 6 and a few picks
-    if floor < 6 or sig.picked_count < 3:
+    if floor < 4 or sig.picked_count < 2:
         return 0.0
 
-    # Scale with how late we are
-    late_factor = min(1.0, (floor - 5) / 10.0)  # 0.0 at floor 5, 1.0 at floor 15
+    # Scale with how late we are; 0 at floor 3, 1.0 at floor 13
+    late_factor = min(1.0, (floor - 3) / 10.0)
 
     bonus = 0.0
 
-    # Critical: no block cards at all
-    if sig.block_card_count <= 1 and props.grants_block > 0:
-        bonus += 0.15 * late_factor
+    # Block gap: count only NON-starter block cards. Starter Defends
+    # always exist, so the original sig.block_card_count check never
+    # fired for Silent decks.
+    non_starter_block = sum(
+        1 for c in deck
+        if c.name.lower() not in _STARTER_NAMES
+        and extract_properties(c).grants_block > 0
+    )
+    if non_starter_block == 0 and props.grants_block >= 8:
+        bonus += 0.25 * late_factor
 
-    # Important: no draw cards
+    # Draw gap: important for any deck that wants to see its good cards
     if sig.draw_card_count <= 1 and props.draws_cards > 0:
-        bonus += 0.10 * late_factor
+        bonus += 0.20 * late_factor
 
-    # AoE needed for multi-enemy fights
+    # AoE gap: still important for multi-enemy fights
     if sig.aoe_count == 0 and props.is_aoe:
         bonus += 0.08 * late_factor
 
@@ -482,14 +539,38 @@ def _deck_size_penalty(sig: DeckSignature) -> float:
         return 0.22  # Hard to justify adding to a 20+ card deck
 
 
-def _duplicate_penalty(card: Card, deck: list[Card]) -> float:
-    """Penalty for having too many copies of the same card."""
+def _duplicate_penalty(
+    card: Card,
+    deck: list[Card],
+    props: CardProperties,
+    power_score: float,
+) -> float:
+    """Penalty for having too many copies of the same card.
+
+    Scaled by card power: strong cards barely eat a penalty (2 Anticipates
+    or 2 Backflips is genuinely good), while weak cards keep most of it.
+    Powers are an exception — stacking effects of the same Power rarely
+    adds value, so they keep the full penalty regardless of their score.
+
+    Rationale: the previous flat penalty was actively suppressing doubling
+    up on the deck's best cards, which runs counter to how strong STS
+    decks are built (you want multiples of your win conditions).
+    """
     copies = sum(1 for c in deck if c.id == card.id or c.name == card.name)
-    if copies >= 2:
-        return 0.25
-    elif copies >= 1:
-        return 0.08
-    return 0.0
+    if copies == 0:
+        return 0.0
+
+    base = 0.25 if copies >= 2 else 0.08
+
+    # Powers don't stack — keep the full penalty for duplicate powers.
+    if props.is_power:
+        return base
+
+    # Scale inversely with card power, but never drop below 25% of base
+    # so very strong cards still feel *some* diversity pressure above
+    # ~3 copies (the copies>=2 tier absorbs that).
+    scale = max(0.25, 1.0 - power_score)
+    return base * scale
 
 
 def score_card(
@@ -513,15 +594,18 @@ def score_card(
 
     power = _card_power_score(card, props)
     alignment = _alignment_score(card, props, sig)
-    balance = _balance_need_score(card, props, sig, floor)
+    balance = _balance_need_score(card, props, sig, deck, floor)
     size_pen = _deck_size_penalty(sig)
-    dup_pen = _duplicate_penalty(card, deck)
+    dup_pen = _duplicate_penalty(card, deck, props, power)
 
-    # HP factor: when low on HP, value defensive cards more
+    # HP factor: when low on HP, value defensive cards more.
+    # Triggers at 60% HP (was 40%) and the bonus is doubled — the
+    # boss-fight data showed turn-4 deaths as the #1 loss mode, which
+    # means decks are arriving at bosses without enough block.
     hp_ratio = hp / max(1, max_hp)
     hp_defense_bonus = 0.0
-    if hp_ratio < 0.4 and props.grants_block > 0:
-        hp_defense_bonus = 0.05 * (1.0 - hp_ratio)
+    if hp_ratio < 0.6 and props.grants_block > 0:
+        hp_defense_bonus = 0.10 * (1.0 - hp_ratio)
 
     score = power + alignment + balance + hp_defense_bonus - size_pen - dup_pen
     return max(0.0, min(1.0, score))

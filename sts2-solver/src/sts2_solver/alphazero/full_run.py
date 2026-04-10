@@ -974,13 +974,19 @@ def _assign_run_values(
         is_boss = floor in boss_floors
 
         if is_boss:
-            # Boss fights: only winning matters, HP conservation is irrelevant
-            # (HP resets in the next act). Reward winning and potion conservation.
+            # Boss fights: winning matters most, but the loss penalty is
+            # scaled by entering HP — arriving at the boss crippled (say
+            # 15/80 HP) means the loss was mostly baked in by prior Act 1
+            # combats, not by boss play. Teaching the network "you lost
+            # with -1.0 regardless of how you got there" adds noise.
+            #
+            # Formula: full-HP loss = -1.0, zero-HP loss = -0.3.
+            # A floor of -0.3 keeps some loss signal even when broken.
             if floor in combat_hp_data:
                 hp_before, hp_after, potions_used = combat_hp_data[floor]
                 if hp_after <= 0:
-                    # Lost the boss fight — strong negative signal
-                    combat_value = -1.0
+                    entry_ratio = max(0.0, min(1.0, hp_before / max(1, max_hp)))
+                    combat_value = -(0.3 + 0.7 * entry_ratio)
                 else:
                     # Won the boss fight — strong positive signal.
                     # No potion penalty: using potions at the boss is the
