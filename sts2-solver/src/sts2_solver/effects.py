@@ -23,6 +23,8 @@ CardEffect = Callable[[CombatState, int | None], None]
 
 def calculate_attack_damage(base: int, state: CombatState, target: EnemyState) -> int:
     """Calculate per-hit damage for an attack card."""
+    from . import relic_effects  # local to avoid import cycles
+
     player = state.player
     raw = base + player.powers.get("Strength", 0)
     if raw < 0:
@@ -37,15 +39,25 @@ def calculate_attack_damage(base: int, state: CombatState, target: EnemyState) -
     # Double Damage: player deals double damage (e.g. from Twig Slime buff)
     if player.powers.get("Double Damage", 0) > 0:
         raw *= 2
+    # Relic proxy multiplier (upgrade-on-pickup, card transforms, etc.)
+    dmg_mult = relic_effects.get_damage_multiplier(state.relics)
+    if dmg_mult != 1.0 and raw > 0:
+        raw = math.floor(raw * dmg_mult)
     return max(0, raw)
 
 
 def calculate_block_gain(base: int, state: CombatState) -> int:
     """Calculate block gained from a card."""
+    from . import relic_effects  # local to avoid import cycles
+
     player = state.player
     effective = base + player.powers.get("Dexterity", 0)
     if player.powers.get("Frail", 0) > 0:
         effective = math.floor(effective * 0.75)
+    # Relic proxy multiplier (Sturdy Clamp, Paper Krane, etc.)
+    blk_mult = relic_effects.get_block_multiplier(state.relics)
+    if blk_mult != 1.0 and effective > 0:
+        effective = math.floor(effective * blk_mult)
     return max(0, effective)
 
 
