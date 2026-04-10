@@ -74,20 +74,35 @@ from .self_play import (
     _affordable_play_actions,
 )
 from ..effects import discard_card_from_hand
+from .. import relic_effects
 from .state_tensor import encode_state, encode_actions
 
-# Relics whose effects are actually simulated in combat_engine.py.  All
-# relic grants in the training loop (elite / treasure / event / boss)
-# draw from this set — anything outside it would be a cosmetic no-op in
-# training and would teach the agent to expect benefits that don't
-# materialise in combat.  When combat_engine gains new relic effects,
-# add the IDs here.
-IMPLEMENTED_RELIC_POOL = [
-    "ANCHOR", "BLOOD_VIAL", "BAG_OF_PREPARATION", "BRONZE_SCALES",
-    "BAG_OF_MARBLES", "FESTIVE_POPPER", "LANTERN", "ODDLY_SMOOTH_STONE",
-    "STRIKE_DUMMY", "CLOAK_CLASP", "ART_OF_WAR", "MEAT_ON_THE_BONE",
-    "KUNAI", "ORNAMENTAL_FAN", "NUNCHAKU", "LETTER_OPENER", "SHURIKEN",
-]
+# Relic IDs that are class-locked to non-Silent characters and must never
+# be offered to the Silent training pool.  Burning Blood / Black Blood
+# are Ironclad starter/upgrade, the others are defect/regent/necrobinder
+# starters or upgrades.
+_NON_SILENT_RELIC_IDS: set[str] = {
+    "BURNING_BLOOD", "BLACK_BLOOD",            # Ironclad
+    "CRACKED_CORE", "FROZEN_CORE",             # Defect
+    "PURE_WATER", "GLASS_MARBLE",              # Watcher / Defect variants
+    "NECRONOMICURSE",                          # Necrobinder flavour
+}
+
+# Build the full Silent-relevant relic pool from the relic_effects
+# registry.  Any relic with a behavioural entry anywhere in
+# relic_effects.py is eligible to drop except the class-locked ones
+# above.  The full run and mcts_combat never award the starter Ring of
+# the Snake (granted in setup) so we strip it from the drop pool too.
+def _build_silent_relic_pool() -> list[str]:
+    pool = sorted(
+        rid for rid in relic_effects.simulated_relic_ids()
+        if rid not in _NON_SILENT_RELIC_IDS
+        and rid != "RING_OF_THE_SNAKE"
+    )
+    return pool
+
+
+IMPLEMENTED_RELIC_POOL = _build_silent_relic_pool()
 # Alias for backwards compatibility with any external callers.
 ELITE_RELIC_POOL = IMPLEMENTED_RELIC_POOL
 
@@ -156,6 +171,67 @@ STARTER_RELICS = {
 }
 
 
+def _apply_relic_pickup(
+    relic_id: str,
+    *,
+    hp: int,
+    max_hp: int,
+    gold: int,
+    potions: list[dict],
+    potion_slots: int,
+) -> tuple[int, int, int, int]:
+    """Apply out-of-combat relic pickup effects (max HP / gold / potions / slots).
+
+    Returns updated ``(hp, max_hp, gold, potion_slots)``.  ``potions`` is
+    mutated in place when the relic adds free potions or slots.  Starter
+    relics (Ring of the Snake / Burning Blood) also flow through here
+    and are harmless because they aren't in any pickup table.
+    """
+    # Max HP bonuses are applied additively and also top up current HP
+    # so the player can't lose effective HP on pickup.
+    mhp_bonus = relic_effects.MAX_HP_ON_PICKUP.get(relic_id)
+    if mhp_bonus:
+        max_hp += mhp_bonus
+        hp = min(hp + mhp_bonus, max_hp)
+
+    # One-off gold bonuses.
+    gold_bonus = relic_effects.GOLD_ON_PICKUP.get(relic_id)
+    if gold_bonus:
+        gold += gold_bonus
+
+    # Potion slots.
+    slot_bonus = relic_effects.POTION_SLOTS_ON_PICKUP.get(relic_id)
+    if slot_bonus:
+        potion_slots += slot_bonus
+
+    return hp, max_hp, gold, potion_slots
+
+
+def _grant_relic(
+    relics: set[str],
+    relic_id: str,
+    *,
+    hp: int,
+    max_hp: int,
+    gold: int,
+    potions: list[dict],
+    potion_slots: int,
+) -> tuple[int, int, int, int]:
+    """Add a relic to the owned set and apply its pickup effects.
+
+    Returns the updated ``(hp, max_hp, gold, potion_slots)`` tuple so
+    callers can rebind their own locals.
+    """
+    if relic_id in relics:
+        return hp, max_hp, gold, potion_slots
+    relics.add(relic_id)
+    return _apply_relic_pickup(
+        relic_id,
+        hp=hp, max_hp=max_hp, gold=gold,
+        potions=potions, potion_slots=potion_slots,
+    )
+
+
 # ---------------------------------------------------------------------------
 # MCTS-based combat within a full run
 # ---------------------------------------------------------------------------
@@ -177,6 +253,7 @@ def mcts_combat(
     potions: list[dict] | None = None,
     relics: frozenset[str] | None = None,
     is_boss: bool = False,
+    is_elite: bool = False,
     detail_log: bool = False,
 ) -> tuple[list[TrainingSample], str, int, int, list[dict], dict | None]:
     """Run one combat using MCTS.
@@ -209,7 +286,7 @@ def mcts_combat(
         potions=[dict(p) for p in (potions or [])],
     )
     state = CombatState(player=player, enemies=enemies, relics=relics or frozenset())
-    start_combat(state)
+    start_combat(state, is_elite=is_elite, is_boss=is_boss)
 
     # --- Initialise detail log (boss fights use this) ---
     detail: dict | None = None
@@ -643,11 +720,17 @@ def play_full_run(
     act_data = _ACTS_BY_ID.get("OVERGROWTH", {})
     room_sequence = _generate_act1_map_with_choices(rng)
 
-    # Starter relic
+    # Starter relic + dynamic potion slot cap (lifted by Potion Belt etc.)
     relics: set[str] = set()
+    potion_slots_cap: int = POTION_SLOTS
     starter_relic = STARTER_RELICS.get(character)
     if starter_relic:
         relics.add(starter_relic)
+        hp, max_hp, gold, potion_slots_cap = _apply_relic_pickup(
+            starter_relic,
+            hp=hp, max_hp=max_hp, gold=gold,
+            potions=[], potion_slots=potion_slots_cap,
+        )
 
     # Run state
     all_samples: list[TrainingSample] = []
@@ -705,6 +788,7 @@ def play_full_run(
                 continue
 
             _is_boss = (room_type == "boss")
+            _is_elite = (room_type == "elite")
             potions_before = len([p for p in potions if p])
             samples, outcome, turns, hp_after, potions, combat_detail = mcts_combat(
                 deck=deck, player_hp=hp, player_max_hp=max_hp,
@@ -714,6 +798,7 @@ def play_full_run(
                 temperature=temperature, potions=potions,
                 relics=frozenset(relics),
                 is_boss=_is_boss,
+                is_elite=_is_elite,
                 detail_log=_is_boss,  # only log boss combats (overhead)
             )
             if _is_boss and combat_detail is not None:
@@ -768,7 +853,7 @@ def play_full_run(
             gold_range = GOLD_REWARDS.get(room_type, (10, 20))
             gold += rng.randint(*gold_range)
 
-            if rng.random() < POTION_DROP_CHANCE and len(potions) < POTION_SLOTS:
+            if rng.random() < POTION_DROP_CHANCE and len(potions) < potion_slots_cap:
                 pot = rng.choice(POTION_TYPES)
                 potions.append(dict(pot))
 
@@ -780,7 +865,11 @@ def play_full_run(
                     IMPLEMENTED_RELIC_POOL, deck, relics, rng,
                 )
                 if granted is not None:
-                    relics.add(granted)
+                    hp, max_hp, gold, potion_slots_cap = _grant_relic(
+                        relics, granted,
+                        hp=hp, max_hp=max_hp, gold=gold,
+                        potions=potions, potion_slots=potion_slots_cap,
+                    )
 
             if room_type != "boss":
                 offered = _offer_card_rewards(pools, deck)
@@ -806,7 +895,11 @@ def play_full_run(
                     IMPLEMENTED_RELIC_POOL, deck, relics, rng,
                 )
                 if granted is not None:
-                    relics.add(granted)
+                    hp, max_hp, gold, potion_slots_cap = _grant_relic(
+                        relics, granted,
+                        hp=hp, max_hp=max_hp, gold=gold,
+                        potions=potions, potion_slots=potion_slots_cap,
+                    )
                 _assign_run_values(combat_samples_by_floor, floor_reached,
                                    len(room_sequence), hp, max_hp,
                                    deck_change_samples, option_samples,
@@ -901,7 +994,11 @@ def play_full_run(
                         IMPLEMENTED_RELIC_POOL, deck, relics, rng,
                     )
                     if granted is not None:
-                        relics.add(granted)
+                        hp, max_hp, gold, potion_slots_cap = _grant_relic(
+                            relics, granted,
+                            hp=hp, max_hp=max_hp, gold=gold,
+                            potions=potions, potion_slots=potion_slots_cap,
+                        )
 
         elif room_type == "treasure":
             # V7: treasure chest grants a relic.  Pool is restricted to
@@ -911,7 +1008,11 @@ def play_full_run(
                 IMPLEMENTED_RELIC_POOL, deck, relics, rng,
             )
             if granted is not None:
-                relics.add(granted)
+                hp, max_hp, gold, potion_slots_cap = _grant_relic(
+                    relics, granted,
+                    hp=hp, max_hp=max_hp, gold=gold,
+                    potions=potions, potion_slots=potion_slots_cap,
+                )
 
         elif room_type == "shop":
             # Network-driven multi-step shop
@@ -1012,7 +1113,11 @@ def play_full_run(
                 for card in shop_result.get("cards_added", []):
                     deck.append(card)
                 for relic_name in shop_result.get("relics_bought", []):
-                    relics.add(relic_name)
+                    hp, max_hp, gold, potion_slots_cap = _grant_relic(
+                        relics, relic_name,
+                        hp=hp, max_hp=max_hp, gold=gold,
+                        potions=potions, potion_slots=potion_slots_cap,
+                    )
 
     # Completed all floors without boss (shouldn't happen normally)
     _assign_run_values(combat_samples_by_floor, floor_reached,

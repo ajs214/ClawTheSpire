@@ -27,10 +27,12 @@ from typing import Any
 
 from .combat_engine import (
     can_play_card,
+    end_combat_relics,
     end_turn,
     is_combat_over,
     play_card,
     resolve_enemy_intents,
+    start_combat,
     start_turn,
     tick_enemy_powers,
 )
@@ -1115,6 +1117,8 @@ def simulate_combat(
     potions: list[dict] | None = None,
     solver_time_limit_ms: float = 500.0,
     is_boss: bool = False,
+    is_elite: bool = False,
+    relics: frozenset[str] | None = None,
 ) -> tuple[CombatResult, list[dict]]:
     """Run a full combat from start to finish using the solver.
 
@@ -1149,7 +1153,9 @@ def simulate_combat(
         draw_pile=draw_pile,
     )
 
-    state = CombatState(player=player, enemies=enemies)
+    state = CombatState(player=player, enemies=enemies,
+                        relics=relics or frozenset())
+    start_combat(state, is_elite=is_elite, is_boss=is_boss)
 
     hp_before = player_hp
 
@@ -1172,6 +1178,8 @@ def simulate_combat(
         # Check combat over (enemy might have died from start-of-turn effects)
         result = is_combat_over(state)
         if result:
+            if result == "win":
+                end_combat_relics(state)
             return CombatResult(
                 result, turn_num, hp_before,
                 max(0, state.player.hp), encounter_id,
@@ -1203,6 +1211,8 @@ def simulate_combat(
 
             result = is_combat_over(state)
             if result:
+                if result == "win":
+                    end_combat_relics(state)
                 return CombatResult(
                     result, turn_num, hp_before,
                     max(0, state.player.hp), encounter_id,
@@ -1220,6 +1230,8 @@ def simulate_combat(
 
         result = is_combat_over(state)
         if result:
+            if result == "win":
+                end_combat_relics(state)
             return CombatResult(
                 result, turn_num, hp_before,
                 max(0, state.player.hp), encounter_id,
