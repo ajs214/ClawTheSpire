@@ -819,6 +819,12 @@ def train_worker(
     # --- Refresh XGBoost card picker model before training ---
     _refresh_xgboost(card_db, games=200)
 
+    # --- Boss-fight detail log (appended JSONL) ---
+    # Each line: one run that reached the boss, with per-turn detail.
+    # Lets us analyse play patterns, card usage, and loss modes.
+    boss_log_path = Path(__file__).resolve().parents[4] / "boss_fights.jsonl"
+    print(f"Boss-fight log: {boss_log_path}", flush=True)
+
     print(f"AlphaZero training (full runs): {num_generations} generations, {games_per_generation} runs/gen, {mcts_simulations} sims", flush=True)
     print(f"Checkpoints: {save_path}", flush=True)
     print(f"Progress: {progress_path}", flush=True)
@@ -861,6 +867,28 @@ def train_worker(
             if result.outcome == "win":
                 gen_wins += 1
                 total_wins += 1
+
+            # Persist boss-fight detail if the run reached the boss.
+            # Written as one JSON object per line (JSONL) so we can stream-parse.
+            _boss = getattr(result, "boss_detail", None)
+            if _boss is not None:
+                try:
+                    _entry = {
+                        "gen": gen,
+                        "game_num": total_games,
+                        "run_outcome": result.outcome,
+                        "floor_reached": result.floor_reached,
+                        "final_deck": getattr(result, "final_deck", None),
+                        "archetype": getattr(result, "archetype", "unknown"),
+                        "archetype_commitment": round(
+                            getattr(result, "archetype_commitment", 0.0), 3),
+                        "boss": _boss,
+                    }
+                    with open(boss_log_path, "a", encoding="utf-8") as _bl:
+                        _bl.write(json.dumps(_entry, default=str) + "\n")
+                except Exception as _e:
+                    # Never crash training because of a log write.
+                    print(f"[boss-log] write failed: {_e}", flush=True)
 
             recent_games.append({
                 "num": total_games,

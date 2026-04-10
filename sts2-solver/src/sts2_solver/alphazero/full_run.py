@@ -112,8 +112,15 @@ def mcts_combat(
     potions: list[dict] | None = None,
     relics: frozenset[str] | None = None,
     is_boss: bool = False,
-) -> tuple[list[TrainingSample], str, int, int, list[dict]]:
-    """Run one combat using MCTS. Returns (samples, outcome, turns, hp_after, remaining_potions)."""
+    detail_log: bool = False,
+) -> tuple[list[TrainingSample], str, int, int, list[dict], dict | None]:
+    """Run one combat using MCTS.
+
+    Returns (samples, outcome, turns, hp_after, remaining_potions, detail).
+    `detail` is a rich per-turn log populated when `detail_log=True`
+    (currently used for boss fights so we can analyse play patterns).
+    It is None otherwise to keep overhead zero for normal combats.
+    """
     _ensure_data_loaded()
 
     enc = _ENCOUNTERS_BY_ID.get(encounter_id, {})
@@ -126,7 +133,7 @@ def mcts_combat(
         enemy_ais.append(_create_enemy_ai(mid))
 
     if not enemies:
-        return [], "win", 0, player_hp, potions or []
+        return [], "win", 0, player_hp, potions or [], None
 
     draw_pile = list(deck)
     rng.shuffle(draw_pile)
@@ -139,17 +146,49 @@ def mcts_combat(
     state = CombatState(player=player, enemies=enemies, relics=relics or frozenset())
     start_combat(state)
 
+    # --- Initialise detail log (boss fights use this) ---
+    detail: dict | None = None
+    if detail_log:
+        from collections import Counter as _Counter
+        _deck_counts = _Counter(c.id for c in deck)
+        detail = {
+            "encounter_id": encounter_id,
+            "is_boss": is_boss,
+            "monster_ids": [m.get("id") for m in monster_list],
+            "monster_start_hp": [e.hp for e in enemies],
+            "monster_max_hp": [e.max_hp for e in enemies],
+            "player_start_hp": player_hp,
+            "player_max_hp": player_max_hp,
+            "player_max_energy": player_max_energy,
+            "deck_size": len(deck),
+            "deck_counts": dict(_deck_counts),
+            "relics": sorted(list(relics)) if relics else [],
+            "potions_at_start": [p.get("id") if isinstance(p, dict) else None
+                                 for p in (potions or [])],
+            "turns": [],
+            "outcome": None,
+            "final_player_hp": None,
+            "total_turns": 0,
+            "potions_used": [],
+        }
+
     # Boss fights: dump all offensive potions pre-combat and heal if low.
     # This front-loads burst damage/buffs when it matters most.
     # Non-boss fights: MCTS decides potion usage organically (save for boss).
     if is_boss and state.player.potions:
         from ..simulator import _use_precombat_potions, _use_emergency_potion
         pre_potions = [p for p in state.player.potions if p]
+        _potions_before_dump = [p.get("id") for p in pre_potions if p]
         remaining = _use_precombat_potions(state, pre_potions)
         if state.player.hp < state.player.max_hp * 0.40:
             remaining = _use_emergency_potion(state, remaining)
         # Update the player's potion list (keep slots, clear used ones)
         state.player.potions = remaining
+        if detail is not None:
+            _after_ids = [p.get("id") for p in remaining if p]
+            _used = [pid for pid in _potions_before_dump if pid not in _after_ids]
+            detail["precombat_potions_used"] = _used
+            detail["potions_used"].extend(_used)
 
     samples: list[TrainingSample] = []
     turn_sample_ranges: list[tuple[int, int]] = []  # (start_idx, end_idx) per turn
@@ -158,6 +197,28 @@ def mcts_combat(
     for turn_num in range(1, max_turns + 1):
         start_turn(state)
         _set_enemy_intents(state, enemy_ais)
+
+        # --- Per-turn detail snapshot ---
+        turn_record: dict | None = None
+        if detail is not None:
+            turn_record = {
+                "turn": turn_num,
+                "energy_start": state.player.energy,
+                "hand_start": [c.id for c in state.player.hand],
+                "draw_pile_size": len(state.player.draw_pile),
+                "discard_pile_size": len(state.player.discard_pile),
+                "hp_start": state.player.hp,
+                "enemy_hp_start": [e.hp for e in state.enemies],
+                "enemy_intents": [
+                    {"type": e.intent_type, "dmg": e.intent_damage, "hits": e.intent_hits}
+                    for e in state.enemies
+                ],
+                "cards_played": [],
+                "targets": [],
+                "potions_used": [],
+                "wasted_end_turn": False,
+                "forced_overrides": 0,
+            }
 
         turn_start_sample = len(samples)
         cards_this_turn = 0
@@ -187,8 +248,12 @@ def mcts_combat(
                 affordable = _affordable_play_actions(actions, state)
                 if affordable:
                     wasted = True
+                    if turn_record is not None:
+                        turn_record["wasted_end_turn"] = True
                     if rng.random() < 0.80:
                         action = rng.choice(affordable)
+                        if turn_record is not None:
+                            turn_record["forced_overrides"] += 1
 
             samples.append(TrainingSample(
                 state_tensors=state_tensors,
@@ -217,9 +282,25 @@ def mcts_combat(
             elif action.action_type == "use_potion":
                 from ..combat_engine import use_potion as _use_potion
                 if action.potion_idx is not None:
+                    if turn_record is not None:
+                        # Capture the potion id before it's consumed
+                        try:
+                            _pot = state.player.potions[action.potion_idx]
+                            if _pot:
+                                turn_record["potions_used"].append(_pot.get("id"))
+                                detail["potions_used"].append(_pot.get("id"))
+                        except Exception:
+                            pass
                     _use_potion(state, action.potion_idx)
                 cards_this_turn += 1  # count toward safety cap
             elif action.card_idx is not None and can_play_card(state, action.card_idx):
+                if turn_record is not None:
+                    try:
+                        _card = state.player.hand[action.card_idx]
+                        turn_record["cards_played"].append(_card.id)
+                        turn_record["targets"].append(action.target_idx)
+                    except Exception:
+                        pass
                 play_card(state, action.card_idx, action.target_idx, card_db)
                 cards_this_turn += 1
 
@@ -229,6 +310,26 @@ def mcts_combat(
 
         turn_end_sample = len(samples)
         turn_sample_ranges.append((turn_start_sample, turn_end_sample))
+
+        # Snapshot post-player-phase (before enemy phase resolves)
+        if turn_record is not None:
+            turn_record["enemy_hp_after_player"] = [e.hp for e in state.enemies]
+            turn_record["damage_dealt"] = sum(
+                max(0, before - after)
+                for before, after in zip(
+                    turn_record["enemy_hp_start"],
+                    turn_record["enemy_hp_after_player"],
+                )
+            )
+            turn_record["block_played"] = state.player.block
+            # If combat ended during player phase, log and append.
+            if outcome:
+                turn_record["hp_end"] = state.player.hp
+                turn_record["damage_taken"] = 0
+                turn_record["enemy_hp_end"] = [e.hp for e in state.enemies]
+                turn_record["ended_combat"] = True
+                detail["turns"].append(turn_record)
+                turn_record = None
 
         if outcome:
             break
@@ -280,6 +381,15 @@ def mcts_combat(
         hp_after_enemy = state.player.hp
         damage_taken = max(0, hp_before_enemy - hp_after_enemy)
 
+        # Finalise this turn's detail record
+        if turn_record is not None:
+            turn_record["hp_end"] = state.player.hp
+            turn_record["damage_taken"] = damage_taken
+            turn_record["incoming_damage"] = incoming_damage
+            turn_record["enemy_hp_end"] = [e.hp for e in state.enemies]
+            detail["turns"].append(turn_record)
+            turn_record = None
+
         # Signal 3: Intent-weighted blocking — penalise based on how
         # far actual block was from optimal (matching incoming damage).
         # Under-blocking penalises harder than over-blocking.
@@ -308,7 +418,15 @@ def mcts_combat(
 
     hp_after = max(0, state.player.hp) if outcome == "win" else 0
     remaining_potions = [p for p in state.player.potions if p]
-    return samples, outcome, turn_num, hp_after, remaining_potions
+
+    # Finalise detail log
+    if detail is not None:
+        detail["outcome"] = outcome
+        detail["final_player_hp"] = hp_after
+        detail["total_turns"] = turn_num
+        detail["final_enemy_hp"] = [e.hp for e in state.enemies]
+
+    return samples, outcome, turn_num, hp_after, remaining_potions, detail
 
 
 # ---------------------------------------------------------------------------
@@ -404,6 +522,8 @@ class FullRunResult:
     combat_log: list[dict]
     archetype: str = "undecided"     # emergent archetype of final deck
     archetype_commitment: float = 0.0  # 0.0–1.0
+    boss_detail: dict | None = None  # Rich per-turn log of the boss combat
+    final_deck: list[str] | None = None  # Card IDs in deck at boss-fight time
 
 
 def play_full_run(
@@ -473,6 +593,7 @@ def play_full_run(
     combat_log: list[dict] = []
     combats_won = 0
     combats_fought = 0
+    boss_detail_holder: dict | None = None
     potions: list[dict] = []
     seen_encounters: set[str] = set()
     events_list = list(act_data.get("events", []))
@@ -519,7 +640,7 @@ def play_full_run(
 
             _is_boss = (room_type == "boss")
             potions_before = len([p for p in potions if p])
-            samples, outcome, turns, hp_after, potions = mcts_combat(
+            samples, outcome, turns, hp_after, potions, combat_detail = mcts_combat(
                 deck=deck, player_hp=hp, player_max_hp=max_hp,
                 player_max_energy=max_energy, encounter_id=enc_id,
                 card_db=card_db, mcts=mcts, vocabs=vocabs, config=config,
@@ -527,7 +648,10 @@ def play_full_run(
                 temperature=temperature, potions=potions,
                 relics=frozenset(relics),
                 is_boss=_is_boss,
+                detail_log=_is_boss,  # only log boss combats (overhead)
             )
+            if _is_boss and combat_detail is not None:
+                boss_detail_holder = combat_detail  # captured into FullRunResult below
             potions_after = len([p for p in potions if p])
             potions_used = max(0, potions_before - potions_after)
 
@@ -561,6 +685,8 @@ def play_full_run(
                     option_samples=option_samples, combat_log=combat_log,
                     archetype=_arch.archetype,
                     archetype_commitment=_arch.commitment,
+                    boss_detail=boss_detail_holder,
+                    final_deck=[c.id for c in deck],
                 )
 
             combats_won += 1
@@ -613,6 +739,8 @@ def play_full_run(
                     option_samples=option_samples, combat_log=combat_log,
                     archetype=_arch.archetype,
                     archetype_commitment=_arch.commitment,
+                    boss_detail=boss_detail_holder,
+                    final_deck=[c.id for c in deck],
                 )
 
         elif room_type == "rest":
@@ -798,6 +926,8 @@ def play_full_run(
         option_samples=option_samples, combat_log=combat_log,
         archetype=_arch.archetype,
         archetype_commitment=_arch.commitment,
+        boss_detail=boss_detail_holder,
+        final_deck=[c.id for c in deck],
     )
 
 
