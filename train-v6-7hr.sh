@@ -39,16 +39,6 @@ if [ -z "$(ls -A "$SAVE_DIR" 2>/dev/null)" ] && [ -d "$V5_SAVE_DIR" ]; then
     fi
 fi
 
-# Pick the right timeout binary (Linux: timeout, macOS: gtimeout)
-if command -v timeout >/dev/null 2>&1; then
-    TIMEOUT_CMD="timeout"
-elif command -v gtimeout >/dev/null 2>&1; then
-    TIMEOUT_CMD="gtimeout"
-else
-    echo "!! No 'timeout' or 'gtimeout' on PATH; install coreutils (brew install coreutils)."
-    exit 1
-fi
-
 echo "=== STS2 AlphaZero Training V6 — 7 Hour Run ==="
 echo "  Duration cap:  7 hours (hard timeout)"
 echo "  Gen budget:    900 (stop condition is the timeout, not the gen count)"
@@ -65,7 +55,11 @@ echo "Starting at $(date)"
 echo "Expected end:  $(date -v+7H 2>/dev/null || date -d '+7 hours' 2>/dev/null || echo '(7 hours from now)')"
 echo "-----------------------------------"
 
-$TIMEOUT_CMD --preserve-status 7h \
+# Pure-bash 7-hour watchdog — works without coreutils on macOS.
+# Launch the worker in the background, then a sleep+kill guard alongside
+# it.  Whichever finishes first wins; we clean up the loser.
+TIMEOUT_SECS=$((7 * 3600))
+
 python3 -m src.sts2_solver.alphazero.self_play train \
     --generations 900 \
     --games-per-gen 12 \
@@ -76,13 +70,47 @@ python3 -m src.sts2_solver.alphazero.self_play train \
     --temperature 1.0 \
     --save-dir "$SAVE_DIR" \
     --progress-file "$PROGRESS_FILE" \
-    --boss-log-file "$BOSS_LOG_FILE"
+    --boss-log-file "$BOSS_LOG_FILE" &
+TRAIN_PID=$!
 
+(
+    sleep "$TIMEOUT_SECS"
+    # If training is still alive, send SIGTERM so the worker can flush
+    # progress + boss log before exiting.
+    if kill -0 "$TRAIN_PID" 2>/dev/null; then
+        echo ""
+        echo "!! 7-hour cap hit — sending SIGTERM to training pid $TRAIN_PID"
+        kill -TERM "$TRAIN_PID" 2>/dev/null || true
+        # Give it 30s to shut down cleanly, then hard-kill.
+        for _ in $(seq 1 30); do
+            kill -0 "$TRAIN_PID" 2>/dev/null || exit 0
+            sleep 1
+        done
+        echo "!! Training didn't exit after 30s — sending SIGKILL"
+        kill -KILL "$TRAIN_PID" 2>/dev/null || true
+    fi
+) &
+WATCHDOG_PID=$!
+
+# Forward SIGINT / SIGTERM from whoever is running this script down to
+# both children so Ctrl-C (or a parent kill) tears everything down.
+cleanup() {
+    kill -TERM "$TRAIN_PID" 2>/dev/null || true
+    kill -TERM "$WATCHDOG_PID" 2>/dev/null || true
+}
+trap cleanup INT TERM
+
+wait "$TRAIN_PID"
 RC=$?
 
+# Training finished (either on its own or because the watchdog killed
+# it) — kill the watchdog if it's still sleeping.
+kill -TERM "$WATCHDOG_PID" 2>/dev/null || true
+wait "$WATCHDOG_PID" 2>/dev/null || true
+
 echo ""
-if [ "$RC" -eq 124 ] || [ "$RC" -eq 143 ]; then
-    echo "=== V6 7-hour cap reached at $(date) ==="
+if [ "$RC" -eq 143 ] || [ "$RC" -eq 137 ]; then
+    echo "=== V6 7-hour cap reached at $(date) (exit $RC) ==="
 elif [ "$RC" -eq 0 ]; then
     echo "=== V6 gen budget exhausted before 7-hour cap at $(date) ==="
 else

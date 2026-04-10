@@ -30,12 +30,13 @@ VERSION_FILES = {
     "v4": "training_v4_progress.json",
     "v5": "training_v5_progress.json",
     "v6": "training_v6_progress.json",
+    "v7": "training_v7_progress.json",
 }
 
 # --- Shared state ---
 lock = threading.Lock()
 all_history: dict[str, list[dict]] = {
-    "v1": [], "v2": [], "v3": [], "v4": [], "v5": [], "v6": [],
+    "v1": [], "v2": [], "v3": [], "v4": [], "v5": [], "v6": [], "v7": [],
 }
 snapshots: dict[str, dict] = {}
 active_version: str = ""  # whichever is currently training
@@ -214,6 +215,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .v4c { color: #3fb950; }
   .v5c { color: #bc8cff; }
   .v6c { color: #ff7b72; }
+  .v7c { color: #ffa657; }
   .recent { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; }
   .recent h2 { color: #8b949e; font-size: 0.85em; text-transform: uppercase; margin-bottom: 10px; }
   .recent table { width: 100%; border-collapse: collapse; }
@@ -287,9 +289,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <div class="updated" id="updated"></div>
 
 <script>
-const COLORS = { v1: '#8b949e', v2: '#d29922', v3: '#58a6ff', v4: '#3fb950', v5: '#bc8cff', v6: '#ff7b72' };
-const LABELS = { v1: 'V1', v2: 'V2', v3: 'V3', v4: 'V4', v5: 'V5', v6: 'V6' };
-const VERSIONS = ['v1','v2','v3','v4','v5','v6'];
+const COLORS = { v1: '#8b949e', v2: '#d29922', v3: '#58a6ff', v4: '#3fb950', v5: '#bc8cff', v6: '#ff7b72', v7: '#ffa657' };
+const LABELS = { v1: 'V1', v2: 'V2', v3: 'V3', v4: 'V4', v5: 'V5', v6: 'V6', v7: 'V7' };
+const VERSIONS = ['v1','v2','v3','v4','v5','v6','v7'];
 
 const baseOpts = {
   responsive: true,
@@ -307,7 +309,7 @@ pctOpts.scales.y.ticks = { ...pctOpts.scales.y.ticks, callback: function(v) { re
 function makeVersionDatasets(field) {
   return VERSIONS.map(v => ({
     label: LABELS[v], data: [], borderColor: COLORS[v],
-    borderWidth: (v==='v6') ? 2.5 : (v==='v5') ? 2 : 1.5,
+    borderWidth: (v==='v7') ? 2.8 : (v==='v6') ? 2 : (v==='v5') ? 1.8 : 1.5,
     pointRadius: 0, tension: 0.3, borderDash: v==='v1' ? [4,4] : [],
   }));
 }
@@ -576,8 +578,8 @@ async function poll() {
   try {
     const res = await fetch('/api/data');
     const d = await res.json();
-    const activeVer = d.active_version || 'v6';
-    const snap = d.snapshots[activeVer] || d.snapshots.v6 || d.snapshots.v5 || {};
+    const activeVer = d.active_version || 'v7';
+    const snap = d.snapshots[activeVer] || d.snapshots.v7 || d.snapshots.v6 || d.snapshots.v5 || {};
 
     updateStats(snap, activeVer);
     updateVersionTable(d.snapshots, d.history);
