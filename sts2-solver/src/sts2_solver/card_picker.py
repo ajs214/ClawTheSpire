@@ -171,7 +171,18 @@ class DeckSignature:
 
     @property
     def dominant_archetype(self) -> str:
-        """The emergent archetype, or 'undecided' if none dominates."""
+        """The emergent archetype, or 'undecided' if none dominates.
+
+        V7 tuning (from V6 boss-log analysis): "undecided" had the HIGHEST
+        win rate of any archetype (10.2% vs shiv 8.8%, sly 4.9%, poison
+        4.1%, mixed 3.7%), and commitment was *inversely* correlated with
+        winning.  Pool simulation showed only 15-22% of Act 1 runs even
+        *see* 5+ archetype cards, so committing on 2 actively hurts.
+
+        New gate: require 3+ archetype cards AND separation of 2 from the
+        second-best count.  This keeps the picker in "best card available"
+        mode through the entire Act 1 unless the run happens to be lucky.
+        """
         scores = {
             "poison": self.poison_card_count,
             "shiv": self.shiv_card_count,
@@ -179,12 +190,12 @@ class DeckSignature:
         }
         best = max(scores, key=scores.get)
         best_count = scores[best]
-        # Need at least 2 cards for a direction to emerge
-        if best_count < 2:
+        # V7: require 3+ cards (not 2) before leaving undecided
+        if best_count < 3:
             return "undecided"
-        # Need some separation from second-best
+        # V7: require separation of 2 (not 1) — a 3/2/0 split is still mixed
         second = sorted(scores.values(), reverse=True)[1]
-        if best_count <= second:
+        if best_count - second < 2:
             return "mixed"
         return best
 
@@ -192,16 +203,18 @@ class DeckSignature:
     def archetype_commitment(self) -> float:
         """0.0 = no direction, 1.0 = fully committed.
 
-        Denominator has a floor of 3: a single archetype pick is only 33%
-        commitment, two is 67%, three is 100%. This prevents the picker
-        from fully committing after a single pick and then refusing every
-        non-matching card.
+        V7 tuning: denominator floor raised from 3 to 5.  The V6 boss-log
+        data showed decks with fewer than 5 archetype payoffs couldn't
+        actually execute their game plan and lost more than undecided
+        starter-heavy decks.  "Full commitment" now means 5+ archetype
+        cards, matching the empirical threshold where an archetype deck
+        starts to function as intended.
         """
         scores = [self.poison_card_count, self.shiv_card_count, self.sly_card_count]
         best = max(scores)
         if best == 0 or self.picked_count == 0:
             return 0.0
-        return min(1.0, best / max(3, self.picked_count))
+        return min(1.0, best / max(5, self.picked_count))
 
     @property
     def defense_ratio(self) -> float:
@@ -215,6 +228,46 @@ class DeckSignature:
 
 
 _STARTER_NAMES = frozenset({"strike", "defend", "survivor", "neutralize"})
+
+
+# V7: Empirical Act-1 premium neutrals, derived from the V6 boss-log.
+# These are the cards with the highest win-lift (ratio of freq-in-wins to
+# freq-in-losses) in the 3,651-fight V6 dataset, filtered to cards that
+# appeared in >=5 wins so the sample is meaningful.  All of these are
+# *neutral* generalists — no archetype commitment — and they're the
+# cards the previous picker was systematically rejecting when it
+# committed to shiv/poison/sly too early.
+#
+# Bonus is additive to score_card and only applies in Act 1 (floor < 17)
+# where the picker has the least information and the data is cleanest.
+# Kept modest (+0.10) so it nudges rather than dominates.
+_ACT1_PREMIUM_NEUTRALS = frozenset({
+    # Massive lifts (>2x in wins)
+    "grand finale",         # 23.4x lift
+    "anticipate",           # 2.27x lift, 64% of wins vs 28% of losses
+    "piercing wail",        # 3.25x lift
+    "restlessness",         # 2.58x lift
+    "jackpot",              # 3.91x lift
+    # Strong lifts (1.4-2x)
+    "footwork",             # 1.46x lift
+    "dramatic entrance",    # 1.45x lift
+    "sucker punch",         # 1.30x lift
+    "slice",                # 1.38x lift
+    "leading strike",       # 1.22x lift
+    "well laid plans",      # 1.67x lift
+    "expertise",            # 1.61x lift
+    "seeker strike",        # 1.64x lift
+    "hidden daggers",       # 1.91x lift
+    "volley",               # 1.85x lift
+    "adrenaline",           # 2.39x lift
+    "snakebite",            # 1.22x lift
+    "finesse",              # 1.21x lift
+})
+
+
+def _is_premium_neutral(card: Card) -> bool:
+    """Is this card in the empirically-derived Act 1 premium neutral set?"""
+    return card.name.strip().lower() in _ACT1_PREMIUM_NEUTRALS
 
 
 def build_signature(deck: list[Card]) -> DeckSignature:
@@ -389,23 +442,30 @@ def _alignment_score(
 ) -> float:
     """How well does this card align with the deck's emerging direction?
 
-    Returns -0.18 (off-archetype) to +0.5 (perfect fit).
+    Returns -0.10 (off-archetype) to +0.5 (perfect fit).
     Magnitude scales with deck commitment — early on, everything is ~0.
 
+    V7 retuning (against 3,651 boss fights from V6):
+      * Commitment gate raised 0.20 -> 0.35 so the alignment logic only
+        fires when the deck is *genuinely* committed under the new
+        5-card denominator floor.  Most Act 1 runs never trip it.
+      * Off-archetype penalty softened -0.18 -> -0.10 because the V6
+        data showed undecided decks had the best WR and the penalty was
+        rejecting neutral premium cards (Anticipate, Piercing Wail,
+        Footwork) that were the *actual* top win-lift cards.
+      * HIGH-POWER NEUTRAL EXEMPTION: if the card's intrinsic power
+        score is >= 0.35 (the same "strong card" threshold used for the
+        duplicate penalty), the off-archetype penalty is suppressed
+        entirely.  A premium generalist always beats a weak archetype
+        pick regardless of direction.
+
     Tuned against 306-boss-fight data (April 2026):
-      * Off-archetype penalty softened (-0.35 -> -0.18) because committed
-        decks were dying at the boss for lack of block/draw.
       * Block added to universal support and its magnitude raised
         (0.10 -> 0.20) because block+draw cards drive wins in the data.
-      * Threshold raised (0.1 -> 0.2) so the first non-starter pick
-        never triggers archetype logic.
-      * Cross-synergies expanded to include debuff/scaling pairings
-        (e.g. poison decks benefit from Weak because it buys time to
-        scale; shiv decks benefit from Vulnerable because it amplifies
-        each shiv tick).
+      * Cross-synergies expanded to include debuff/scaling pairings.
     """
     commitment = sig.archetype_commitment
-    if commitment < 0.20:
+    if commitment < 0.35:
         return 0.0  # No direction yet — all cards equally valid
 
     archetype = sig.dominant_archetype
@@ -466,8 +526,16 @@ def _alignment_score(
         return 0.30 * commitment   # Cross-synergy meaningfully lifted
     elif is_universal_support:
         return 0.20 * commitment   # Draw/energy/block always helps
-    else:
-        return -0.18 * commitment  # Softened off-archetype penalty
+
+    # V7: high-power neutral exemption — a strong generalist always
+    # beats a weak archetype pick regardless of direction.  The V6 data
+    # showed the top-lift cards (Anticipate, Piercing Wail, Footwork,
+    # Restlessness, Jackpot) were ALL neutral.  Don't penalise them.
+    power = _card_power_score(card, props)
+    if power >= _STRONG_CARD_THRESHOLD:
+        return 0.0
+
+    return -0.10 * commitment  # V7: softened further (-0.18 -> -0.10)
 
 
 def _balance_need_score(
@@ -635,9 +703,16 @@ def score_card(
         from .relic_synergy import relic_card_bonus
         relic_bonus = relic_card_bonus(props, relics)
 
+    # V7: Act-1 premium-neutral bonus.  Empirically-derived from the V6
+    # boss-log: these cards have the highest win-lift in Act 1 and are
+    # all neutral generalists.  Small +0.10 nudge, Act 1 only.
+    premium_bonus = 0.0
+    if floor < 17 and _is_premium_neutral(card):
+        premium_bonus = 0.10
+
     score = (
         power + alignment + balance + hp_defense_bonus + relic_bonus
-        - size_pen - dup_pen
+        + premium_bonus - size_pen - dup_pen
     )
     return max(0.0, min(1.0, score))
 
@@ -645,30 +720,40 @@ def score_card(
 def score_skip(deck: list[Card], floor: int) -> float:
     """Score for skipping the card reward.
 
-    Skipping should be rare until the deck is genuinely bloated.  STS decks
-    win by stacking win conditions, so we stay hungry for new cards until
-    well past 'normal' size.  Curve is aligned with _deck_size_penalty
-    (both start biting at 18+).
+    V7 curve (retuned against V6 boss-log data showing winning decks
+    average 16.8 cards vs losing 16.2): stay hungry below 17, ramp up
+    fast above 18.  The previous curve was too flat at 18-20, letting
+    decks bloat to 19-20 and then dilute the starter core.
+
+    Also aligned with _deck_size_penalty so they both start biting in
+    the same range.
     """
     sig = build_signature(deck)
     size = sig.size
 
-    # Baseline skip score grows with deck size
+    # V7: steeper ramp above 18, unchanged below 17
     if size >= 24:
-        base = 0.45
+        base = 0.50
     elif size >= 22:
-        base = 0.35
+        base = 0.42
     elif size >= 20:
-        base = 0.25
+        base = 0.33
+    elif size >= 19:
+        base = 0.24
     elif size >= 18:
-        base = 0.15
+        base = 0.17
+    elif size >= 17:
+        base = 0.10
     elif size >= 16:
-        base = 0.08
+        base = 0.05
     else:
-        base = 0.03  # Almost never skip below 16 cards
+        base = 0.02  # Almost never skip below 16 cards
 
-    # High commitment = skip off-archetype offers more readily
-    base += sig.archetype_commitment * 0.08
+    # V7: commitment boost dropped 0.08 -> 0.04 because the new
+    # commitment threshold is much higher and firing this at full
+    # commitment (5+ archetype cards) would push skip too aggressively
+    # right when the deck is finally working.
+    base += sig.archetype_commitment * 0.04
 
     return min(0.55, base)
 

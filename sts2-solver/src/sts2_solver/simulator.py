@@ -864,7 +864,7 @@ def _pick_card_reward(offered: list[Card], deck: list[Card]) -> Card | None:
 # - Floor 16: rest site (pre-boss)
 # - Floor 17: boss
 
-ROOM_TYPE = str  # "weak", "normal", "elite", "rest", "event", "boss", "shop"
+ROOM_TYPE = str  # "weak", "normal", "elite", "rest", "event", "boss", "shop", "treasure"
 
 
 def _generate_act1_map(rng: random.Random) -> list[ROOM_TYPE]:
@@ -873,6 +873,9 @@ def _generate_act1_map(rng: random.Random) -> list[ROOM_TYPE]:
     Based on real game logs: 17 rooms total, boss on floor 17.
     Simulates path choice by varying encounter types — the real game has
     branching paths where players can dodge hard encounters.
+
+    Real STS guarantees one treasure chest mid-act; we force one in the
+    mid-section so training runs see a deterministic relic faucet.
     """
     rooms: list[ROOM_TYPE] = []
 
@@ -881,15 +884,19 @@ def _generate_act1_map(rng: random.Random) -> list[ROOM_TYPE]:
     rooms.append("weak")
     rooms.append("weak")
 
-    # Floor 4-9: mix of normal, event, shop (mid-act)
-    mid_rooms = ["normal", "normal", "normal", "event", "event", "shop"]
+    # Floor 4-8: mix of normal, event, shop (mid-act, now 5 rooms so the
+    # forced treasure at floor 9 doesn't push the total beyond 17)
+    mid_rooms = ["normal", "normal", "normal", "event", "shop"]
     rng.shuffle(mid_rooms)
     rooms.extend(mid_rooms)
+
+    # Floor 9: forced treasure chest (mid-act relic faucet)
+    rooms.append("treasure")
 
     # Floor 10: rest site
     rooms.append("rest")
 
-    # Floor 11-14: normal + elite (tougher section, +1 room vs old map)
+    # Floor 11-14: normal + elite (tougher section)
     late_rooms = ["normal", "elite", rng.choice(["normal", "event"]),
                   rng.choice(["event", "shop"])]
     rng.shuffle(late_rooms)
@@ -919,16 +926,21 @@ def _generate_act1_map_with_choices(rng: random.Random) -> list:
     # Floor 1-3: forced weak
     rooms.extend(["weak", "weak", "weak"])
 
-    # Floor 4-9: each offers 2-3 choices from the mid-act pool
+    # Floor 4-8: each offers 2-3 choices from the mid-act pool (5 rooms
+    # to leave room for a forced treasure on floor 9).
     mid_pool = ["normal", "event", "shop", "elite"]
-    for _ in range(6):
+    for _ in range(5):
         k = rng.choice([2, 3])
         rooms.append(rng.sample(mid_pool, k=k))
+
+    # Floor 9: forced treasure chest — guarantees one mid-act relic
+    # drop per run, matching real STS map structure.
+    rooms.append("treasure")
 
     # Floor 10: forced rest
     rooms.append("rest")
 
-    # Floor 11-14: harder choices (+1 room vs old map)
+    # Floor 11-14: harder choices
     late_pool = ["normal", "elite", "event", "rest"]
     for _ in range(4):
         rooms.append(rng.sample(late_pool, k=2))
@@ -1350,6 +1362,26 @@ def _resolve_sim_intents(state: CombatState, ais: list[EnemyAI]) -> None:
 # Event simulation
 # ---------------------------------------------------------------------------
 
+def _empty_event_changes() -> dict:
+    return {"hp_delta": 0, "max_hp_delta": 0, "gold_delta": 0,
+            "cards_added": [], "cards_removed": [], "grants_relic": False}
+
+
+def _clean_event_desc(desc: str | None) -> str:
+    """Strip bbcode colour tags from an event description.
+
+    Event descriptions in the data file wrap keywords in bbcode like
+    ``Obtain a random [gold]Relic[/gold]`` — the markup prevents plain
+    regex matches against the underlying words.  This helper removes
+    any ``[tag]``/``[/tag]`` pair and normalises whitespace.
+    """
+    import re
+    if not desc:
+        return ""
+    cleaned = re.sub(r'\[/?[a-zA-Z][a-zA-Z0-9_]*\]', '', desc)
+    return re.sub(r'\s+', ' ', cleaned).strip().lower()
+
+
 def _simulate_event(
     event_id: str,
     deck: list[Card],
@@ -1362,18 +1394,16 @@ def _simulate_event(
     """Simulate an event and return state changes.
 
     Returns dict with keys: hp_delta, max_hp_delta, gold_delta,
-    cards_added, cards_removed.
+    cards_added, cards_removed, grants_relic.
     """
     _ensure_data_loaded()
     event = _EVENTS_BY_ID.get(event_id)
     if not event:
-        return {"hp_delta": 0, "max_hp_delta": 0, "gold_delta": 0,
-                "cards_added": [], "cards_removed": []}
+        return _empty_event_changes()
 
     options = event.get("options", [])
     if not options:
-        return {"hp_delta": 0, "max_hp_delta": 0, "gold_delta": 0,
-                "cards_added": [], "cards_removed": []}
+        return _empty_event_changes()
 
     # Simple heuristic: parse option descriptions for effects
     best_option = _evaluate_event_options(options, hp, max_hp, gold, deck)
@@ -1392,7 +1422,7 @@ def _evaluate_event_options(
     best_option = options[0] if options else {}
 
     for opt in options:
-        desc = (opt.get("description") or "").lower()
+        desc = _clean_event_desc(opt.get("description"))
         score = 0.0
 
         # Positive effects
@@ -1408,8 +1438,12 @@ def _evaluate_event_options(
             score += 15  # Card removal is very valuable
         if "gold" in desc and "gain" in desc:
             score += 5
-        if "relic" in desc:
-            score += 20
+        if "relic" in desc and "trade" not in desc:
+            # Relic rewards are very valuable — V6 boss-log data shows
+            # relic count is the single biggest correlate with winning.
+            # Offset HP-loss penalty explicitly so a "-8 HP, gain relic"
+            # option still beats "gain 100 gold" at healthy HP.
+            score += 35
 
         # Negative effects
         if "damage" in desc or "lose" in desc:
@@ -1440,9 +1474,8 @@ def _apply_event_option(
     common patterns.
     """
     import re
-    desc = (option.get("description") or "").lower()
-    result = {"hp_delta": 0, "max_hp_delta": 0, "gold_delta": 0,
-              "cards_added": [], "cards_removed": []}
+    desc = _clean_event_desc(option.get("description"))
+    result = _empty_event_changes()
 
     # Heal N HP
     heal_match = re.search(r'heal\s*(\d+)', desc)
@@ -1468,6 +1501,30 @@ def _apply_event_option(
     gold_lose_match = re.search(r'lose\s*(\d+)\s*gold', desc)
     if gold_lose_match:
         result["gold_delta"] -= int(gold_lose_match.group(1))
+
+    # Gain a relic.  Covers phrasings like "gain a relic", "obtain a
+    # random relic", "choose 1 of 3 doll relics", "receive a relic",
+    # "find a relic".  The description is pre-cleaned of bbcode tags
+    # by _clean_event_desc.  We look for any positive verb in the same
+    # description as the word "relic", and filter out phrasings that
+    # explicitly destroy or trade a relic (so RELIC_TRADER doesn't
+    # grant one).  Note: "lose 11 HP. obtain a relic" is POSITIVE —
+    # the HP loss is unrelated to the relic grant.
+    has_relic_word = "relic" in desc
+    positive_verb = re.search(
+        r'\b(gain|obtain|receive|choose|find|win|reward|pick|get|procure)\b',
+        desc,
+    )
+    # Only match "lose/destroy/transform/curse" when they apply DIRECTLY
+    # to a relic (e.g. "lose a relic", "destroy your relic", "trade your
+    # relic").  The intervening words can only be short qualifiers.
+    negative_phrase = re.search(
+        r'\b(lose|destroy|transform|curse|trade)\b'
+        r'(?:\s+(?:a|an|the|your|one|1|random|of|your))*\s+relic',
+        desc,
+    )
+    if has_relic_word and positive_verb and not negative_phrase:
+        result["grants_relic"] = True
 
     return result
 
@@ -1651,6 +1708,148 @@ def _score_relic_for_purchase(relic_name: str, deck: list[Card],
         return 0.0
 
 
+# ---------------------------------------------------------------------------
+# Relic reward pools
+# ---------------------------------------------------------------------------
+#
+# Real STS has distinct drop pools by source:
+#
+#   * Shops:   Common / Uncommon / Rare / Shop relics (no boss, no event,
+#              no starter).
+#   * Elites:  Common / Uncommon / Rare relics.
+#   * Bosses:  Ancient (boss-only) relics.
+#   * Treasure: Common / Uncommon / Rare relics (same pool as elite).
+#   * Events:  Event-tagged relics, with occasional cross-pool picks.
+#
+# The data file stores rarity as "Common Relic", "Uncommon Relic",
+# "Rare Relic", "Shop Relic", "Ancient Relic", "Event Relic",
+# "Starter Relic" (note the "Relic" suffix — the old filter was
+# matching bare "Starter"/"Boss" and silently excluding nothing).  The
+# pool builders below use the actual rarity strings.
+
+_STARTER_RARITY = "Starter Relic"
+_COMMON_RARITY  = "Common Relic"
+_UNCOMMON_RARITY = "Uncommon Relic"
+_RARE_RARITY    = "Rare Relic"
+_SHOP_RARITY    = "Shop Relic"
+_ANCIENT_RARITY = "Ancient Relic"   # boss drops
+_EVENT_RARITY   = "Event Relic"
+
+_STANDARD_DROP_RARITIES = frozenset({
+    _COMMON_RARITY, _UNCOMMON_RARITY, _RARE_RARITY,
+})
+_SHOP_RARITIES = frozenset({
+    _COMMON_RARITY, _UNCOMMON_RARITY, _RARE_RARITY, _SHOP_RARITY,
+})
+
+# Explicit starter-relic IDs we never want to re-grant even if they
+# somehow leak into a pool (the rarity filter should already block
+# them, but this is a belt-and-braces check).
+_STARTER_RELIC_IDS = frozenset({
+    "RING_OF_THE_SNAKE",          # Silent
+    "BURNING_BLOOD",              # Ironclad
+    "CRACKED_CORE",               # Defect
+    "PURE_WATER",                 # Watcher
+    "SOUL_FURNACE",               # Necrobinder/etc.
+})
+
+
+def _build_relic_pool(rarity_set: frozenset[str]) -> list[str]:
+    """Return all relic names whose rarity is in ``rarity_set``."""
+    _ensure_data_loaded()
+    pool: list[str] = []
+    for rid, rdata in _RELICS_BY_ID.items():
+        if rid in _STARTER_RELIC_IDS:
+            continue
+        rarity = rdata.get("rarity", "") or rdata.get("tier", "")
+        if rarity not in rarity_set:
+            continue
+        if rdata.get("event_only") or rdata.get("boss_only"):
+            continue
+        pool.append(rdata.get("name", rid))
+    return pool
+
+
+_SHOP_RELIC_POOL_CACHE: list[str] | None = None
+_STANDARD_RELIC_POOL_CACHE: list[str] | None = None
+_BOSS_RELIC_POOL_CACHE: list[str] | None = None
+_EVENT_RELIC_POOL_CACHE: list[str] | None = None
+
+
+def _get_shop_relic_pool() -> list[str]:
+    """Relic names eligible to appear in a shop."""
+    global _SHOP_RELIC_POOL_CACHE
+    if _SHOP_RELIC_POOL_CACHE is None:
+        _SHOP_RELIC_POOL_CACHE = _build_relic_pool(_SHOP_RARITIES)
+    return _SHOP_RELIC_POOL_CACHE
+
+
+def _get_standard_relic_pool() -> list[str]:
+    """Relic names eligible as elite or treasure drops."""
+    global _STANDARD_RELIC_POOL_CACHE
+    if _STANDARD_RELIC_POOL_CACHE is None:
+        _STANDARD_RELIC_POOL_CACHE = _build_relic_pool(_STANDARD_DROP_RARITIES)
+    return _STANDARD_RELIC_POOL_CACHE
+
+
+def _get_boss_relic_pool() -> list[str]:
+    """Relic names eligible as boss drops (Ancient tier)."""
+    global _BOSS_RELIC_POOL_CACHE
+    if _BOSS_RELIC_POOL_CACHE is None:
+        _BOSS_RELIC_POOL_CACHE = _build_relic_pool(frozenset({_ANCIENT_RARITY}))
+    return _BOSS_RELIC_POOL_CACHE
+
+
+def _get_event_relic_pool() -> list[str]:
+    """Relic names that can be granted by events.
+
+    Events hand out their tagged Event Relics most of the time, but the
+    real game will occasionally drop a standard-pool relic as well.  We
+    just union the two pools — the scorer picks the best fit.
+    """
+    global _EVENT_RELIC_POOL_CACHE
+    if _EVENT_RELIC_POOL_CACHE is None:
+        _EVENT_RELIC_POOL_CACHE = _build_relic_pool(frozenset({
+            _EVENT_RARITY, _COMMON_RARITY, _UNCOMMON_RARITY, _RARE_RARITY,
+        }))
+    return _EVENT_RELIC_POOL_CACHE
+
+
+def _grant_relic_from_pool(
+    pool: list[str],
+    deck: list[Card],
+    owned: set[str] | frozenset[str],
+    rng: random.Random,
+    sample_size: int = 3,
+) -> str | None:
+    """Pick the best relic from a random sample of ``pool``.
+
+    STS relic drops typically show a 1-of-3 choice; we emulate that by
+    sampling ``sample_size`` relics and scoring each against the current
+    deck, returning the highest-scoring non-owned option.  Returns None
+    only if the pool has no eligible relics at all.
+    """
+    if not pool:
+        return None
+    eligible = [r for r in pool if r not in owned]
+    if not eligible:
+        return None
+    sample = rng.sample(eligible, min(sample_size, len(eligible)))
+    try:
+        from .relic_synergy import score_relic_for_deck
+    except Exception:
+        return sample[0]
+    best, best_score = sample[0], float("-inf")
+    for name in sample:
+        try:
+            s = score_relic_for_deck(name, deck)
+        except Exception:
+            s = 0.0
+        if s > best_score:
+            best, best_score = name, s
+    return best
+
+
 def _simulate_shop(
     deck: list[Card],
     gold: int,
@@ -1664,13 +1863,21 @@ def _simulate_shop(
     potions: list[dict] | None = None,
     relics: frozenset[str] | set[str] | None = None,
 ) -> dict:
-    """Simulate a shop visit with archetype-aware multi-step purchasing.
+    """Simulate a shop visit with relic-first purchasing.
 
-    Priority order:
-      1. Remove the weakest card (by organic scorer, not just Strike/Defend)
-      2. Buy a relic that fits the archetype (if score >= 1.0)
-      3. Buy an archetype-fitting card (using score_card)
-      4. Buy a potion if HP is low and we have room
+    V7 priority order (reshuffled from V6 based on win-rate data showing
+    elite-drop relics are the single biggest correlate of winning):
+
+      1. Buy a relic — relics compound across the whole run, so they
+         get first claim on the gold budget.  Gate relaxed to score
+         >= 0.5 (was 1.0) so generally-useful relics aren't skipped
+         just because they lack a strong archetype hook.
+      2. Buy a potion if HP is low and we have room — emergency heals
+         directly preserve the path to the boss.
+      3. Remove the weakest card — still valuable, but lowest priority
+         because it's the cheapest action at 75g and can wait until we've
+         secured the big-impact purchases.
+      4. Buy a card reward if budget remains.
 
     Returns: {gold_delta, cards_added, cards_removed, card_upgraded,
               relics_bought, potions_bought}
@@ -1687,65 +1894,42 @@ def _simulate_shop(
         "potions_bought": [],
     }
 
-    # --- Step 1: Remove the weakest card in the deck ---
-    if gold >= SHOP_CARD_REMOVE_COST and len(deck) >= 8:
-        # Score every card; find the worst contributor
-        scored = [
-            (i, c, _score_card_for_removal(c, deck, floor, hp, max_hp))
-            for i, c in enumerate(deck)
-        ]
-        scored.sort(key=lambda x: x[2])  # Lowest score = worst card
-
-        worst_idx, worst_card, worst_score = scored[0]
-        # Only remove if the card is genuinely weak (below 0.25 contribution)
-        # or is an unupgraded basic (Strike/Defend always worth removing)
-        is_basic = worst_card.name in ("Strike", "Defend") and not worst_card.upgraded
-        if worst_score < 0.25 or is_basic:
-            result["cards_removed"].append(worst_idx)
-            result["gold_delta"] -= SHOP_CARD_REMOVE_COST
-            gold -= SHOP_CARD_REMOVE_COST
-
-    # --- Step 2: Buy a relic (if affordable and good fit) ---
+    # --- Step 1: Buy a relic (HIGHEST PRIORITY) ---
+    # Relics give permanent compounding value, so they claim gold first.
+    # Uses a filtered pool (no starter/boss/event relics) and a relaxed
+    # score gate (>=0.5, was >=1.0).
     if gold >= SHOP_RELIC_COST:
-        # Simulate shop relic offering: pick 3 from available relics
-        _ensure_data_loaded()
-        all_relic_names = [r.get("name", r["id"]) for r in _RELICS_BY_ID.values()]
-        if all_relic_names:
-            shop_relics = rng.sample(all_relic_names,
-                                     min(3, len(all_relic_names)))
-            best_relic, best_relic_score = None, 0.0
+        shop_relic_pool = _get_shop_relic_pool()
+        if shop_relic_pool:
+            shop_relics = rng.sample(shop_relic_pool,
+                                     min(3, len(shop_relic_pool)))
+            # Filter out relics the player already owns
+            owned = set(relics) if relics else set()
+            shop_relics = [r for r in shop_relics if r not in owned]
+
+            best_relic, best_relic_score = None, float("-inf")
             for rname in shop_relics:
                 score = _score_relic_for_purchase(rname, deck, character)
                 if score > best_relic_score:
                     best_relic = rname
                     best_relic_score = score
 
-            # Only buy relics that are top picks or strong archetype matches
-            if best_relic_score >= 1.0 and best_relic is not None:
+            # V7: relaxed gate — buy any relic scoring >= 0.4.  Most
+            # relics without a strong archetype hook fall back to ~0.45
+            # (see relic_synergy._GENERALLY_GOOD_RELICS and the default
+            # branch) and were being rejected under the old 1.0 gate;
+            # the boss-log data says elite-drop relics are the single
+            # biggest win-correlate, so we want to be eager here.  The
+            # only way a relic lands below 0.4 is if it's in the
+            # explicit anti-synergy list (Ectoplasm, Sozu, Velvet Choker
+            # in a 0-cost deck, etc.), which we legitimately want to
+            # skip.
+            if best_relic_score >= 0.4 and best_relic is not None:
                 result["relics_bought"].append(best_relic)
                 result["gold_delta"] -= SHOP_RELIC_COST
                 gold -= SHOP_RELIC_COST
 
-    # --- Step 3: Buy a card (archetype-aware, using organic scorer) ---
-    if gold >= 50:
-        # Shop offers more cards than combat rewards (typically 6-7 in STS2)
-        offered = _offer_card_rewards(pools, deck, 6)
-        # Use the organic picker for scoring
-        pick = _smart_pick_or_fallback(offered, deck, floor, hp, max_hp,
-                                       relics=relics)
-        if pick:
-            # Determine cost by rarity
-            cost = 75  # Default (Uncommon)
-            for rarity, cards in pools.items():
-                if any(c.id == pick.id for c in cards):
-                    cost = SHOP_CARD_COSTS.get(rarity, 75)
-                    break
-            if gold >= cost:
-                result["cards_added"].append(pick)
-                result["gold_delta"] -= cost
-                gold -= cost
-
-    # --- Step 4: Buy a potion if HP is low and we have room ---
+    # --- Step 2: Buy a potion if HP is low and we have room ---
     hp_ratio = hp / max(1, max_hp)
     potion_count = len(potions) + len(result["potions_bought"])
     if (gold >= SHOP_POTION_COST
@@ -1759,6 +1943,41 @@ def _simulate_shop(
         result["potions_bought"].append(pot)
         result["gold_delta"] -= SHOP_POTION_COST
         gold -= SHOP_POTION_COST
+
+    # --- Step 3: Remove the weakest card in the deck ---
+    # Demoted from step 1 (V6): still valuable for pruning the starter
+    # strikes/defends, but it's the cheapest action (75g) and can wait
+    # until the bigger-impact purchases are locked in.
+    if gold >= SHOP_CARD_REMOVE_COST and len(deck) >= 8:
+        scored = [
+            (i, c, _score_card_for_removal(c, deck, floor, hp, max_hp))
+            for i, c in enumerate(deck)
+        ]
+        scored.sort(key=lambda x: x[2])  # Lowest score = worst card
+
+        worst_idx, worst_card, worst_score = scored[0]
+        is_basic = worst_card.name in ("Strike", "Defend") and not worst_card.upgraded
+        if worst_score < 0.25 or is_basic:
+            result["cards_removed"].append(worst_idx)
+            result["gold_delta"] -= SHOP_CARD_REMOVE_COST
+            gold -= SHOP_CARD_REMOVE_COST
+
+    # --- Step 4: Buy a card (archetype-aware, using organic scorer) ---
+    if gold >= 50:
+        # Shop offers more cards than combat rewards (typically 6-7 in STS2)
+        offered = _offer_card_rewards(pools, deck, 6)
+        pick = _smart_pick_or_fallback(offered, deck, floor, hp, max_hp,
+                                       relics=relics)
+        if pick:
+            cost = 75  # Default (Uncommon)
+            for rarity, cards in pools.items():
+                if any(c.id == pick.id for c in cards):
+                    cost = SHOP_CARD_COSTS.get(rarity, 75)
+                    break
+            if gold >= cost:
+                result["cards_added"].append(pick)
+                result["gold_delta"] -= cost
+                gold -= cost
 
     return result
 
@@ -1974,7 +2193,7 @@ def simulate_act1(
                 pot = rng.choice(POTION_TYPES)
                 potions.append(dict(pot))
 
-            # Card reward (not for boss — boss gives relic)
+            # Card reward (not for boss — boss gives relic only)
             if room_type != "boss":
                 offered = _offer_card_rewards(pools, deck)
                 # Use organic picker — relics influence card value
@@ -1989,8 +2208,28 @@ def simulate_act1(
                 else:
                     result.cards_skipped += 1
 
+            # Relic drops: elites always drop a Common/Uncommon/Rare relic,
+            # bosses always drop an Ancient (boss-pool) relic.  Normal and
+            # weak combats never drop relics — those only come from
+            # treasure rooms, shops, and events.
+            if room_type == "elite":
+                granted = _grant_relic_from_pool(
+                    _get_standard_relic_pool(), deck, relics, rng,
+                )
+                if granted is not None:
+                    relics.add(granted)
+                    if verbose:
+                        print(f"    Elite drop: {granted}")
+
             if room_type == "boss":
                 result.outcome = "win"
+                granted = _grant_relic_from_pool(
+                    _get_boss_relic_pool(), deck, relics, rng,
+                )
+                if granted is not None:
+                    relics.add(granted)
+                    if verbose:
+                        print(f"    Boss drop: {granted}")
 
         elif room_type == "rest":
             decision = _rest_site_decision(hp, max_hp, deck, card_db, rng,
@@ -2035,9 +2274,34 @@ def simulate_act1(
                 for card in changes["cards_added"]:
                     deck.append(card)
 
+                # Relic reward (only fires when the chosen option's
+                # description explicitly mentions gaining a relic).
+                if changes.get("grants_relic"):
+                    granted = _grant_relic_from_pool(
+                        _get_event_relic_pool(), deck, relics, rng,
+                    )
+                    if granted is not None:
+                        relics.add(granted)
+                        if verbose:
+                            print(f"    Event relic: {granted}")
+
                 result.events_visited += 1
                 if verbose:
                     print(f"    Event: {eid} (HP: {hp}/{max_hp})")
+
+        elif room_type == "treasure":
+            # Treasure chest: single guaranteed relic drop from the
+            # standard pool (Common / Uncommon / Rare).  Real STS sometimes
+            # also gives gold or a potion; we keep it relic-only so the
+            # room's whole purpose is mechanically captured as "adds a
+            # relic to the set".
+            granted = _grant_relic_from_pool(
+                _get_standard_relic_pool(), deck, relics, rng,
+            )
+            if granted is not None:
+                relics.add(granted)
+                if verbose:
+                    print(f"    Treasure: {granted}")
 
         elif room_type == "shop":
             shop_result = _simulate_shop(

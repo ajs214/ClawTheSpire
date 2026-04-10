@@ -388,5 +388,263 @@ def score_relic_for_deck(
     if name == "Sozu":
         return -0.3  # can't gain potions — loses a core safety net
 
-    # Unknown relic — neutral.
-    return 0.0
+    # --- Universally valuable relics (deck-agnostic) --------------------
+    # Hand-crafted S / A tiers for the relics we've specifically verified.
+    # These override the heuristic scorer below so curated values always
+    # win over keyword-based estimates.
+    if name in _UNIVERSALLY_STRONG_RELICS:
+        return 1.0
+    if name in _GENERALLY_GOOD_RELICS:
+        return 0.7
+
+    # --- Heuristic scorer for every other relic ------------------------
+    # Pull the relic's metadata (rarity + description) and compute a
+    # perceived value from two signals:
+    #   1. Rarity prior — rarer relics pack more impact per drop.
+    #   2. Keyword scan of the description — positive triggers (per-turn,
+    #      per-combat, gain strength/energy/gold/hp/draw) bump the score;
+    #      negative phrasings (cannot, lose, curse, take damage) drop it.
+    # The result is clamped into a sensible range so a truly weird relic
+    # can't reach S-tier or plunge into anti-synergy territory just from
+    # a text match.  This replaces the old flat 0.45 fallback — now
+    # "gain 8 Vigor every combat" scores noticeably higher than "on rest,
+    # gain 1 Mantra".
+    return _perceived_relic_value(name)
+
+
+# ---------------------------------------------------------------------------
+# Baseline relic strength tables (deck-agnostic)
+# ---------------------------------------------------------------------------
+#
+# These sets capture the "how good is this relic in a vacuum" signal.
+# ``score_relic_for_deck`` consults them as a fallback after the
+# deck-specific branches have all missed, so shop purchases land on
+# reasonable defaults instead of 0.0 whenever the relic doesn't have a
+# hand-crafted synergy rule.  Keep names in the exact title-case they
+# use in ``relics.json`` — string matching is literal.
+
+# S-tier: almost always buy at any price.
+_UNIVERSALLY_STRONG_RELICS: frozenset[str] = frozenset({
+    # Gold compounders
+    "Maw Bank", "Old Coin",
+    # HP / sustain compounders
+    "Strawberry", "Pear", "Mango", "Meat on the Bone",
+    "Black Blood", "Lizard Tail", "Self-Forming Clay",
+    # Deck quality shaping
+    "Bellows", "Peace Pipe", "War Paint", "Whetstone",
+    # Start-of-combat strength
+    "Red Mask", "Akabeko", "Vajra",
+    # Potion economy
+    "White Beast Statue", "Potion Belt",
+    # Combat mitigation
+    "Calipers", "Oddly Smooth Stone",
+    # Elite / boss prep
+    "Preserved Insect", "Sling of Courage",
+    # Draft quality
+    "Singing Bowl",
+})
+
+# A-tier: usually worth buying unless there's something better available.
+_GENERALLY_GOOD_RELICS: frozenset[str] = frozenset({
+    "Bronze Scales", "Ginger", "Turnip", "Shovel",
+    "Bag of Marbles", "Art of War", "Pantograph", "Matryoshka",
+    "Orange Pellets", "Du-Vu Doll", "Bloody Idol",
+    "Strange Spoon", "Question Card",
+    "Ceramic Fish", "Smiling Mask", "Toy Ornithopter",
+    "Ancient Tea Set", "Bird-Faced Urn", "Centennial Puzzle",
+    "Champion Belt", "Dream Catcher", "Girya", "Happy Flower",
+    "Inserter", "Membership Card",
+    "Omamori", "Pandora's Box",
+    "Prayer Wheel", "Sundial",
+    "The Boot", "Torii", "Unceasing Top",
+    "Yang", "Lantern", "Chemical X",
+    "Juzu Bracelet", "Odd Mushroom", "Magic Flower",
+    "Clockwork Souvenir", "Anchor", "Horn Cleat",
+})
+
+
+# ---------------------------------------------------------------------------
+# Perceived-value heuristic for unmodelled relics
+# ---------------------------------------------------------------------------
+#
+# For every relic that doesn't land in an explicit branch or tier set we
+# still need *some* estimate of how much the shop should value it.  This
+# scorer reads the relic's rarity and description from ``relics.json``
+# and computes a rough perceived value in [0.15, 0.95] using:
+#
+#   * A rarity prior  (Common < Uncommon < Rare < Shop < Ancient).
+#   * Positive keywords — effects that compound across the run or fire
+#     every turn / every combat (gain strength, draw cards, heal, gold,
+#     start-of-combat bonuses).
+#   * Negative keywords — restrictions (cannot gain, lose, curse, take
+#     damage, end of combat penalties).
+#
+# Compared to a flat 0.45 fallback, this distinguishes "gain 8 Vigor at
+# the start of each combat" from "on rest, gain 1 Mantra" without us
+# having to hand-maintain a table of 286 relics.
+
+_RELIC_METADATA_CACHE: dict[str, dict] | None = None
+
+# Rarity priors.  The Ancient (boss) tier gets the highest floor because
+# those slots are precious and the game intentionally packs power there.
+_RARITY_BASELINE: dict[str, float] = {
+    "Common Relic":   0.38,
+    "Shop Relic":     0.45,
+    "Uncommon Relic": 0.52,
+    "Rare Relic":     0.68,
+    "Ancient Relic":  0.78,   # boss drops
+    "Event Relic":    0.50,
+}
+_DEFAULT_RARITY_BASELINE = 0.45
+
+
+def _load_relic_metadata() -> dict[str, dict]:
+    """Lazily load relics.json into a name-keyed dict.
+
+    Imported inline to avoid a hard dependency on ``data_loader`` during
+    module import (which would create a circular import through the
+    simulator).  The result is cached on first call.
+    """
+    global _RELIC_METADATA_CACHE
+    if _RELIC_METADATA_CACHE is not None:
+        return _RELIC_METADATA_CACHE
+    try:
+        import json
+        from .data_loader import DEFAULT_DATA_DIR
+        path = DEFAULT_DATA_DIR / "relics.json"
+        with open(path, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        cache: dict[str, dict] = {}
+        for entry in raw:
+            cache[entry.get("name", entry.get("id", ""))] = entry
+        _RELIC_METADATA_CACHE = cache
+    except Exception:
+        _RELIC_METADATA_CACHE = {}
+    return _RELIC_METADATA_CACHE
+
+
+# Positive keyword weights.  Phrases are checked against a cleaned,
+# lowercased version of the description (bbcode tags stripped).
+_POSITIVE_PHRASES: tuple[tuple[str, float], ...] = (
+    # Triggered effects — these compound over the run
+    ("at the start of each combat",  0.18),
+    ("at the start of combat",       0.18),
+    ("at the start of your turn",    0.18),
+    ("at the end of your turn",      0.10),
+    ("the first time each combat",   0.10),
+    ("every turn",                   0.15),
+    ("each turn",                    0.12),
+    ("whenever you",                 0.10),
+    ("every combat",                 0.15),
+    ("when you enter a combat",      0.15),
+    # Raw stat compounders
+    ("gain 1 energy",                0.25),
+    ("gain energy",                  0.20),
+    ("gain strength",                0.18),
+    ("gain dexterity",               0.18),
+    ("gain vigor",                   0.15),
+    ("gain intangible",              0.22),
+    ("gain artifact",                0.15),
+    ("gain plated armor",            0.12),
+    ("gain metallicize",             0.12),
+    ("gain thorns",                  0.08),
+    # Draw / card quality
+    ("draw 2",                       0.12),
+    ("draw 1",                       0.08),
+    ("draw an extra",                0.12),
+    ("upgrade",                      0.08),
+    # Gold / economy
+    ("gain gold",                    0.10),
+    ("gain 1 gold",                  0.05),
+    ("more gold",                    0.08),
+    # HP / sustain
+    ("heal",                         0.10),
+    ("gain max hp",                  0.12),
+    ("max hp",                       0.06),   # weaker — could be loss
+    # Damage / kill power
+    ("deal double damage",           0.20),
+    ("deal extra damage",            0.10),
+    ("deals double damage",          0.20),
+    ("lethal",                       0.08),
+    # Defence
+    ("gain block",                   0.10),
+    ("retain",                       0.06),
+    # Potion / reward economy
+    ("potion",                       0.05),
+    ("start each combat with",       0.12),
+    ("start of each combat",         0.12),
+)
+
+# Negative keyword weights.  Penalties stack but are also clamped.
+_NEGATIVE_PHRASES: tuple[tuple[str, float], ...] = (
+    ("cannot gain gold",    -0.35),
+    ("can no longer heal",  -0.30),
+    ("cannot heal",         -0.25),
+    ("cannot become",       -0.10),
+    ("lose max hp",         -0.20),
+    ("lose all gold",       -0.25),
+    ("lose gold",           -0.10),
+    ("lose 1 hp",           -0.04),
+    ("take damage",         -0.06),
+    ("add a curse",         -0.20),
+    ("add 2 curses",        -0.30),
+    ("becomes a curse",     -0.15),
+    ("gain a curse",        -0.20),
+    ("at the end of combat, lose", -0.15),
+    ("at the start of each combat, lose", -0.15),
+    ("enemies gain",        -0.12),
+    ("enemies start with",  -0.10),
+    ("reduces your max hp", -0.20),
+    ("die",                 -0.10),
+    ("once per run",        -0.05),
+    ("one-time",            -0.05),
+    ("the first time per run", -0.05),
+)
+
+_HEURISTIC_MIN = 0.15
+_HEURISTIC_MAX = 0.95
+
+
+def _clean_relic_text(text: str | None) -> str:
+    """Strip bbcode colour tags from a relic description."""
+    import re
+    if not text:
+        return ""
+    cleaned = re.sub(r'\[/?[a-zA-Z][a-zA-Z0-9_]*\]', '', text)
+    return re.sub(r'\s+', ' ', cleaned).strip().lower()
+
+
+def _perceived_relic_value(name: str) -> float:
+    """Estimate a relic's standalone value from its metadata.
+
+    Starts with a rarity-based prior, then scans the description for
+    positive and negative keyword phrases.  Returns a value in the
+    ``[_HEURISTIC_MIN, _HEURISTIC_MAX]`` band.  If the relic has no
+    metadata at all we fall back to the default rarity baseline so the
+    shop still has a reasonable value to work with.
+    """
+    meta = _load_relic_metadata().get(name)
+    if not meta:
+        return _DEFAULT_RARITY_BASELINE
+
+    rarity = meta.get("rarity", "") or meta.get("tier", "")
+    score = _RARITY_BASELINE.get(rarity, _DEFAULT_RARITY_BASELINE)
+
+    desc = _clean_relic_text(meta.get("description"))
+    if not desc:
+        # No description to parse — just return the rarity prior.
+        return score
+
+    for phrase, delta in _POSITIVE_PHRASES:
+        if phrase in desc:
+            score += delta
+
+    for phrase, delta in _NEGATIVE_PHRASES:
+        if phrase in desc:
+            score += delta
+
+    if score < _HEURISTIC_MIN:
+        return _HEURISTIC_MIN
+    if score > _HEURISTIC_MAX:
+        return _HEURISTIC_MAX
+    return score
