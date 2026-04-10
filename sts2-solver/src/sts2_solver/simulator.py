@@ -76,14 +76,6 @@ def _ensure_data_loaded():
     for c in _load_json("characters.json"):
         _CHARACTERS_BY_ID[c["id"]] = c
 
-    # Load XGBoost card picker model if available (for blended scoring)
-    try:
-        from .card_picker import load_ml_model
-        if load_ml_model():
-            print("[Simulator] XGBoost card picker model loaded", flush=True)
-    except Exception:
-        pass
-
 
 # ---------------------------------------------------------------------------
 # Card ID normalization: characters.json uses "StrikeIronclad" but
@@ -810,6 +802,9 @@ def _score_card_for_pick(card: Card, deck: list[Card]) -> float:
     return score
 
 
+_SIM_ML_LOADED: bool = False
+
+
 def _smart_pick_or_fallback(
     offered: list[Card], deck: list[Card],
     floor: int = 1, hp: int = 50, max_hp: int = 80,
@@ -817,7 +812,18 @@ def _smart_pick_or_fallback(
     """Use the organic card picker (rule-based + alpha-blended ML).
 
     Falls back to the old tier-list picker if the new system fails.
+    Lazily loads the XGBoost model on first call (not at data-load time,
+    to avoid xgboost/torch conflicts in the training process).
     """
+    global _SIM_ML_LOADED
+    if not _SIM_ML_LOADED:
+        _SIM_ML_LOADED = True
+        try:
+            from .card_picker import load_ml_model
+            if load_ml_model():
+                print("[Simulator] XGBoost card picker model loaded", flush=True)
+        except Exception:
+            pass
     try:
         from .card_picker import pick_card
         return pick_card(offered, deck, floor, hp, max_hp)
