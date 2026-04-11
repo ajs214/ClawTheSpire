@@ -79,6 +79,17 @@ class Decision:
     reasoning: str
     network_value: float | None = None
     head_scores: dict | None = None
+    # Decision-source telemetry (IMPROVEMENTS.md #11). Canonical values:
+    #   - "advisor_tierlist":     rule-based decision from this module (default)
+    #   - "organic_picker":       decide_card_reward's card_picker branch
+    #   - "network_option_head":  runner._az_decide_* via pick_best_option
+    #   - "mcts":                 combat turns driven by AlphaZeroMCTS
+    #   - "fallback_first_action": _execute_deterministic's safe-default branch
+    #   - "auto":                 collect_rewards_and_proceed / auto-action path
+    # Read-only telemetry. Not used for dispatch — dispatch still uses
+    # action/option_index/reasoning. Surfaces in run-log JSONL as the
+    # `source` field on each `decision` event for later analysis.
+    source: str = "advisor_tierlist"
 
 
 # ---------------------------------------------------------------------------
@@ -441,15 +452,25 @@ def decide_rest(state: dict) -> Decision:
         elif "upgrade" in name or "smith" in name:
             upgrade_idx = idx
 
-    # Thresholds (Silent has lower HP pool)
-    rest_threshold = 0.50 if character == "silent" else 0.40
-    upgrade_threshold = 0.70 if character == "silent" else 0.60
+    # Thresholds — read from the active config profile so A/B can actually
+    # differ on rest strategy. Historically these were hardcoded constants,
+    # which meant the STRATEGY values were dead code (see IMPROVEMENTS.md #1).
+    # Silent is still the only character we actively tune, so non-Silent
+    # characters fall back to slightly lower thresholds.
+    if character == "silent":
+        rest_threshold = STRATEGY.get("rest_heal_threshold", 0.50)
+        upgrade_threshold = STRATEGY.get("rest_upgrade_threshold", 0.70)
+        boss_rest_threshold = STRATEGY.get("boss_rest_threshold", 0.70)
+    else:
+        rest_threshold = STRATEGY.get("rest_heal_threshold", 0.40)
+        upgrade_threshold = STRATEGY.get("rest_upgrade_threshold", 0.60)
+        boss_rest_threshold = STRATEGY.get("boss_rest_threshold", 0.70)
     pre_boss = floor in STRATEGY.get("boss_floors", set())
 
     # Decision logic
-    if pre_boss and hp_pct < 0.70 and rest_idx is not None:
+    if pre_boss and hp_pct < boss_rest_threshold and rest_idx is not None:
         return Decision("choose_rest_option", rest_idx,
-                        f"Pre-boss heal (HP {hp_pct:.0%})")
+                        f"Pre-boss heal (HP {hp_pct:.0%} < {boss_rest_threshold:.0%})")
 
     if hp_pct > 0.80 and upgrade_idx is not None:
         # Find best card to upgrade (done by the game UI, we just pick upgrade)
@@ -554,16 +575,19 @@ def decide_card_reward(state: dict, game_data: GameDataDB) -> Decision:
                     return Decision(
                         "choose_reward_card", best_idx,
                         f"Taking {best_name} (score={best_score:.2f}, "
-                        f"skip={skip_score:.2f})")
+                        f"skip={skip_score:.2f})",
+                        source="organic_picker")
 
             # Skip — no card worth taking
             if "skip_reward_cards" in actions:
                 reason = (f"Skipping (best: {best_name}={best_score:.2f}, "
                           f"skip={skip_score:.2f})")
-                return Decision("skip_reward_cards", None, reason)
+                return Decision("skip_reward_cards", None, reason,
+                                source="organic_picker")
 
             # Fallback if neither action available
-            return Decision("skip_reward_cards", None, "No valid action")
+            return Decision("skip_reward_cards", None, "No valid action",
+                            source="organic_picker")
 
         except Exception:
             pass  # Fall through to tier-list fallback
@@ -986,54 +1010,14 @@ def decide_shop(state: dict, game_data: GameDataDB) -> Decision:
 # Neow event (starting bonus)
 # ---------------------------------------------------------------------------
 
-# Keyword-based scoring for Neow options.  Each entry maps a substring
-# (matched case-insensitively against the option description) to a base
-# score.  Higher is better.  The scorer also applies penalties for any
-# option that costs HP or Max HP, so the bot avoids fragile starts.
-
-_NEOW_KEYWORD_SCORES: list[tuple[str, float, str]] = [
-    # --- Top tier: deck thinning / card removal ---
-    ("remove",              9.0, "deck_thin"),
-    ("transform",           7.5, "deck_thin"),
-
-    # --- High tier: direct power ---
-    ("obtain a random relic", 7.0, "relic"),
-    ("obtain a relic",       7.0, "relic"),
-    ("random rare card",     6.5, "rare_card"),
-    ("enchant",              6.0, "enchant"),
-
-    # --- Mid tier: card/deck quality ---
-    ("card rewards you see are upgraded", 5.5, "upgrade_rewards"),
-    ("upgraded",             5.0, "upgrade_misc"),
-    ("colorless card",       5.0, "colorless"),
-    ("packs of cards",       4.5, "card_pack"),
-
-    # --- Situational: relic-dependent on boss ---
-    ("boss drops",           3.0, "boss_dependent"),
-
-    # --- Low tier: stats / gold ---
-    ("rest at a rest site",  4.0, "rest_bonus"),
-    ("raise your max hp",    3.5, "max_hp_gain"),
-    ("gain 150 gold",        3.0, "gold"),
-    ("gain",                 2.0, "gain_generic"),
-    ("draw",                 4.5, "draw"),
-
-    # --- Fallback ---
-    ("gold",                 2.0, "gold_generic"),
-]
-
-# Penalty keywords: options that cost HP are penalised heavily.
-_NEOW_HP_PENALTIES: list[tuple[str, float]] = [
-    ("lose max hp",          -4.0),
-    ("lose 10 max hp",       -5.0),
-    ("lose 7 max hp",        -4.0),
-    ("lose 5 max hp",        -3.0),
-    ("lose hp",              -3.0),
-    ("lose 7 hp",            -2.5),
-    ("lose 10 hp",           -3.0),
-    ("lose all gold",        -1.5),
-    ("treasure chest you open is empty", -1.0),
-]
+# IMPROVEMENTS.md #7 follow-up: Neow scoring is now shared between live
+# play (this module) and training (``simulator.heuristic_neow_option_index``)
+# via ``simulator.score_neow_option`` + ``NEOW_TAG_PRIORITY``. The old
+# ``_NEOW_KEYWORD_SCORES`` table that used to live here has been replaced
+# by ``simulator._NEOW_TEXT_KEYWORDS`` (keyword → tag) and
+# ``simulator.NEOW_TAG_PRIORITY`` (tag → score). If you want to tweak how
+# Neow options are ranked, edit those two tables — both scorers will
+# pick it up.
 
 
 def decide_neow(state: dict) -> Decision | None:
@@ -1043,6 +1027,12 @@ def decide_neow(state: dict) -> Decision | None:
     if this isn't a Neow event (so the caller can fall through to the
     LLM for other events).
     """
+    from .simulator import (
+        classify_neow_option_text,
+        score_neow_option,
+        _NEOW_TEXT_KEYWORDS,
+    )
+
     event = state.get("event") or {}
     if not event:
         event = (state.get("agent_view") or {}).get("event") or {}
@@ -1064,7 +1054,7 @@ def decide_neow(state: dict) -> Decision | None:
         ((o.get("name") or "") + " " + (o.get("description") or "")).lower()
         for o in options
     )
-    _has_neow_signal = any(kw in _all_text for kw, _, _ in _NEOW_KEYWORD_SCORES)
+    _has_neow_signal = any(kw in _all_text for kw, _tag in _NEOW_TEXT_KEYWORDS)
     if not _has_neow_signal and "neow" not in event_name:
         # This is a Neow follow-up sub-screen (e.g. "Choose a Pack").
         # Auto-pick option 0 so we don't get stuck.
@@ -1077,6 +1067,12 @@ def decide_neow(state: dict) -> Decision | None:
     if not options:
         return None
 
+    # Current HP fraction gates conditional tags (full_heal, risky_trade).
+    run = state.get("run") or {}
+    hp = int(run.get("current_hp") or 0)
+    max_hp = int(run.get("max_hp") or 1)
+    hp_frac = hp / max_hp if max_hp > 0 else 1.0
+
     best_idx, best_score, best_reason = 0, -999.0, "fallback"
 
     for opt in options:
@@ -1084,21 +1080,12 @@ def decide_neow(state: dict) -> Decision | None:
         # Build a combined text from all available fields
         name = opt.get("name") or opt.get("title") or ""
         desc = opt.get("description") or opt.get("desc") or ""
-        text = f"{name} — {desc}".lower()
+        text = f"{name} — {desc}"
 
-        # Base score: find the first (highest-priority) keyword match
-        score = 1.0  # default for unrecognised options
-        tag = "unknown"
-        for keyword, kw_score, kw_tag in _NEOW_KEYWORD_SCORES:
-            if keyword in text:
-                score = kw_score
-                tag = kw_tag
-                break
-
-        # Apply HP / resource loss penalties
-        for penalty_kw, penalty_val in _NEOW_HP_PENALTIES:
-            if penalty_kw in text:
-                score += penalty_val
+        # Classify against the shared keyword table, then score via the
+        # shared tag priority + HP-penalty code path.
+        tag = classify_neow_option_text(text)
+        score = score_neow_option(tag=tag, text=text, hp_frac=hp_frac)
 
         if score > best_score:
             best_idx = idx
@@ -1107,6 +1094,78 @@ def decide_neow(state: dict) -> Decision | None:
 
     return Decision("choose_event_option", best_idx,
                      f"Neow: {best_reason}")
+
+
+# ---------------------------------------------------------------------------
+# Non-Neow event default
+# ---------------------------------------------------------------------------
+
+def decide_event_default(state: dict) -> Decision | None:
+    """Deterministic Floor 2+ event picker.
+
+    Reuses the simulator's ``_evaluate_event_options`` scorer so that live-play
+    event decisions match the canned outcomes the training loop assumed for
+    the same event. This is the key invariant: if the training simulator
+    decided a run's outcome assuming Wood Carvings picks Bird, live play must
+    also pick Bird or the value-head targets are wrong.
+
+    Returns a ``Decision`` to call ``choose_event_option``, or ``None`` if
+    the event screen state is unreadable (caller should fall back).
+    """
+    event = state.get("event") or {}
+    if not event:
+        event = (state.get("agent_view") or {}).get("event") or {}
+
+    # Keep only unlocked/available options but preserve the original game
+    # indices so we can hand the correct one back to the game client.
+    raw_options = event.get("options") or []
+    options = [o for o in raw_options if not o.get("locked")]
+    if not options:
+        return None
+
+    run = state.get("run") or {}
+    hp = int(run.get("current_hp") or 0)
+    max_hp = int(run.get("max_hp") or 1)
+    gold = int(run.get("gold") or 0)
+    deck = _get_deck(state)  # unused by the scorer today, but keeps the
+                             # signature aligned in case the sim grows
+                             # deck-aware event logic later.
+
+    try:
+        from .simulator import _evaluate_event_options
+    except Exception:
+        return None
+
+    best = _evaluate_event_options(options, hp, max_hp, gold, deck)
+    if not best:
+        return None
+
+    # Prefer the option's own ``index`` field (what the game client expects);
+    # fall back to its position in the live options list.
+    chosen_idx = best.get("index")
+    if chosen_idx is None:
+        try:
+            chosen_idx = raw_options.index(best)
+        except ValueError:
+            chosen_idx = 0
+
+    event_name = (
+        event.get("name")
+        or event.get("event_id")
+        or event.get("id")
+        or "event"
+    )
+    opt_name = (
+        best.get("name")
+        or best.get("title")
+        or best.get("description", "")[:40]
+        or f"option {chosen_idx}"
+    )
+    return Decision(
+        "choose_event_option",
+        int(chosen_idx),
+        f"{event_name}: {opt_name} (sim scorer)",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1241,7 +1300,10 @@ def decide_deck_select(state: dict) -> Decision:
         return Decision("select_deck_card", 0, "No cards to choose from")
 
     is_remove = "remove" in prompt
-    is_upgrade = "upgrade" in prompt
+    # "smith" is the STS2 rest-site upgrade prompt — treat it as an
+    # upgrade screen so the upgrade-value scorer fires instead of the
+    # generic fallback. See IMPROVEMENTS.md for the bug trail.
+    is_upgrade = "upgrade" in prompt or "smith" in prompt
     is_transform = "transform" in prompt
     is_discard = "discard" in prompt and "discard pile" not in prompt
 
@@ -1254,23 +1316,40 @@ def decide_deck_select(state: dict) -> Decision:
     deck_objs = _build_deck_card_objects(state)
 
     if is_discard:
-        # Discard: drop least valuable card.  Status/curse/unplayable first,
-        # then lowest-value real card by the organic removal scorer.
+        # Discard: drop least valuable card. Resolution order
+        # (lowest score wins):
+        #   1. Real junk (Card.is_junk) — Wound, Slimed, Clumsy, etc.
+        #   2. Carry cargo (Card.is_carry_cargo) — Spoils Map, Lantern
+        #      Key, Byrdonis Egg. Inert in combat, so discarding them
+        #      loses nothing — preferable to discarding any playable
+        #      real card.
+        #   3. Unplayable-this-turn (cost < 0 or unplayable_reason set).
+        #   4. Lowest-value real card via _organic_removal_score.
+        # Uses Card.is_junk/is_carry_cargo via DB lookup — needed because
+        # the live state dict has no 'type' field.
         best_idx, best_score, best_name = None, 999.0, ""
         for card in cards:
             name = card.get("name", card.get("card_id", "?"))
             idx = card.get("index", 0)
-            card_type = (card.get("type") or "").lower()
 
             if name in protect_cards or name in _LIVE_PROTECTED_CARDS:
                 score = 100.0  # never discard protected
-            elif card_type in ("status", "curse"):
-                score = -1.0   # always discard junk first
-            elif card.get("unplayable") or card.get("is_unplayable"):
-                score = -0.5
             else:
                 card_obj = _resolve_card_obj(name)
-                if card_obj and deck_objs:
+                cost = card.get("cost", card.get("energy_cost", 0))
+                if not isinstance(cost, (int, float)):
+                    cost = 0
+
+                if card_obj is not None and card_obj.is_junk:
+                    score = -2.0  # real junk — discard first
+                elif card_obj is not None and card_obj.is_carry_cargo:
+                    score = -1.0  # dead weight — beats any playable card
+                elif (card.get("unplayable_reason")
+                      or card.get("unplayable")
+                      or card.get("is_unplayable")
+                      or cost < 0):
+                    score = -0.5  # unplayable this turn (but not junk)
+                elif card_obj and deck_objs:
                     score = _organic_removal_score(card_obj, deck_objs)
                 else:
                     # No deck context — rough fallback on starter cards.
@@ -1287,7 +1366,11 @@ def decide_deck_select(state: dict) -> Decision:
 
     if is_remove or is_transform:
         # Remove/transform: organic removal scorer — lower score wins.
-        # Protected cards are never touched.
+        # Protected cards are never touched. Carry-cargo quest cards
+        # (Spoils Map, Lantern Key, Byrdonis Egg) are ALSO never removed
+        # — they're only "free to discard" in combat-hand prompts; on a
+        # permanent remove/transform surface, removing them loses the
+        # quest item forever, which is strictly bad.
         best_idx, best_score, best_name = None, 999.0, ""
         for card in cards:
             name = card.get("name", card.get("card_id", "?"))
@@ -1296,6 +1379,9 @@ def decide_deck_select(state: dict) -> Decision:
                 continue
 
             card_obj = _resolve_card_obj(name)
+            if card_obj is not None and card_obj.is_carry_cargo:
+                continue  # never permanently remove a quest carry card
+
             if card_obj and deck_objs:
                 score = _organic_removal_score(card_obj, deck_objs)
             else:

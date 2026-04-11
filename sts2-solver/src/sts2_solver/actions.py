@@ -99,6 +99,9 @@ def _enumerate_choice_actions(state: CombatState) -> list[Action]:
     seen: set[tuple[str, bool]] = set()
 
     if pc.choice_type == "discard_from_hand":
+        # First pass: collect all eligible (i, card) pairs after filtering
+        # out already-chosen and invalid indices. Dedup by (id, upgraded).
+        eligible: list[tuple[int, "Card"]] = []
         for i, card in enumerate(state.player.hand):
             if pc.valid_indices is not None and i not in pc.valid_indices:
                 continue
@@ -108,6 +111,30 @@ def _enumerate_choice_actions(state: CombatState) -> list[Action]:
             if dedup_key in seen:
                 continue
             seen.add(dedup_key)
+            eligible.append((i, card))
+
+        # "Obvious move" short-circuit: discarding any card in a lower
+        # tier is strictly better than discarding any card in a higher
+        # tier, so narrow the MCTS action list to the best tier present.
+        #
+        # Tiers (best → worst target for discard):
+        #   1. Real junk   (Wound, Clumsy, Slimed, ...) — actively bad
+        #   2. Carry cargo (Spoils Map, Lantern Key, ...) — dead weight
+        #   3. Real cards  (Strike, Sly, Deadly Poison, ...) — kept
+        #
+        # Without this narrowing, MCTS splits its visits across every
+        # hand card and often picks wrong on shallow rollouts — see
+        # 807BRWNQND Vantom loss where Survivor discarded a Strike while
+        # two Wounds sat in hand.
+        junk_choices = [(i, c) for (i, c) in eligible if c.is_junk]
+        if junk_choices:
+            eligible = junk_choices
+        else:
+            cargo_choices = [(i, c) for (i, c) in eligible if c.is_carry_cargo]
+            if cargo_choices:
+                eligible = cargo_choices
+
+        for i, _card in eligible:
             actions.append(Action("choose_card", choice_idx=i))
 
     elif pc.choice_type == "choose_from_discard":

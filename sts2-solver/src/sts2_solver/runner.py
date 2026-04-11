@@ -35,6 +35,7 @@ from .advisor_prompts import AUTO_ACTIONS, detect_screen_type
 from .deterministic_advisor import (
     decide_boss_relic,
     decide_neow,
+    decide_event_default,
     decide_card_reward,
     decide_deck_select,
     decide_map,
@@ -52,10 +53,7 @@ from .alphazero.encoding import build_vocabs_from_card_db, EncoderConfig
 from .alphazero.network import STS2Network
 from .alphazero.mcts import MCTS as AlphaZeroMCTS, scale_simulations
 from .alphazero.state_tensor import encode_state as az_encode_state
-from .alphazero.self_play import (
-    OPTION_REST, OPTION_SMITH, OPTION_SHOP_REMOVE, OPTION_SHOP_BUY,
-    OPTION_SHOP_LEAVE, ROOM_TYPE_TO_OPTION,
-)
+from .alphazero.self_play import OPTION_REST, OPTION_SMITH, OPTION_EVENT_CHOICE
 
 
 DEFAULT_CHARACTER = "Silent"
@@ -227,16 +225,35 @@ class Runner:
         self._mcts_config = EncoderConfig()
         import torch
         network = STS2Network(self._mcts_vocabs, self._mcts_config)
-        # Load latest checkpoint if available (prefer v3, fall back to v2)
+        # Load latest checkpoint — auto-discover the highest-numbered
+        # alphazero_checkpoints_v* directory that contains a gen_*.pt file.
+        # Previously this was hardcoded to prefer v3 with a v2 fallback, which
+        # meant every training run from v4 onward was silently ignored by live
+        # play even though the training loop was writing v4..v8..
         from pathlib import Path as _Path
+        import re as _re
         _base = _Path(__file__).resolve().parents[3]
-        ckpt_dir = _base / "alphazero_checkpoints_v3"
-        ckpts = sorted(ckpt_dir.glob("gen_*.pt"), key=lambda p: p.stat().st_mtime) if ckpt_dir.exists() else []
-        if not ckpts:
-            ckpt_dir = _base / "alphazero_checkpoints_v2"
-            ckpts = sorted(ckpt_dir.glob("gen_*.pt"), key=lambda p: p.stat().st_mtime) if ckpt_dir.exists() else []
+
+        def _version_num(p: _Path) -> int:
+            m = _re.search(r"_v(\d+)$", p.name)
+            return int(m.group(1)) if m else -1
+
+        version_dirs = sorted(
+            [d for d in _base.glob("alphazero_checkpoints_v*") if d.is_dir()],
+            key=_version_num,
+            reverse=True,
+        )
+        ckpt_dir = None
+        ckpts: list = []
+        for d in version_dirs:
+            found = sorted(d.glob("gen_*.pt"), key=lambda p: p.stat().st_mtime)
+            if found:
+                ckpt_dir = d
+                ckpts = found
+                break
+
         self._checkpoint_name = None
-        if ckpts:
+        if ckpts and ckpt_dir is not None:
             ckpt = torch.load(ckpts[-1], map_location="cpu", weights_only=True)
             saved = ckpt["model_state"]
             current = network.state_dict()
@@ -247,10 +264,12 @@ class Runner:
                 for k in [k for k in compatible if k.startswith("trunk.")]:
                     compatible.pop(k)
             network.load_state_dict(compatible, strict=False)
-            self._checkpoint_name = ckpts[-1].name
+            # Include the version directory in the logged name so run metadata
+            # unambiguously identifies which training generation was used.
+            self._checkpoint_name = f"{ckpt_dir.name}/{ckpts[-1].name}"
             self.console.print(f"[dim]Loaded checkpoint: {self._checkpoint_name} ({len(compatible)}/{len(saved)} params)[/dim]")
         else:
-            self.console.print("[dim]No checkpoint found — using random network[/dim]")
+            self.console.print("[dim]No checkpoint found in any alphazero_checkpoints_v* directory — using random network[/dim]")
         self._mcts = AlphaZeroMCTS(
             network, self._mcts_vocabs, self._mcts_config,
             card_db=self.card_db, device="cpu",
@@ -1074,14 +1093,22 @@ class Runner:
     # Mid-combat discard helper
     # ------------------------------------------------------------------
 
-    def _pick_card_to_discard(self, gs: dict, cards: list[dict]) -> int:
-        """Pick the best card to discard from hand.
+    def _score_discard_priority(self, gs: dict, card: dict) -> int:
+        """Return a discard-priority score for one card (lower = discard first).
 
         Priority (lowest score = discard first):
-          0  — Status / Curse cards (Slimed, Wound, Dazed, Burn, etc.)
-          1  — Unplayable: Ethereal cards about to exhaust, or
-               Unplayable flag set
-          2  — Too expensive: cost > remaining energy (can't play this turn)
+         -2  — Junk: Status/Curse cards (Wound, Slimed, Burn, Clumsy, etc.)
+               Resolved via Card.is_junk on the canonical card DB, so this
+               works even when the live game-state dict doesn't carry a
+               'type' field (which it generally doesn't — see 807BRWNQND).
+         -1  — Carry cargo: inert quest-status cards (Spoils Map, Lantern
+               Key, Byrdonis Egg). Not real junk (never remove from deck),
+               but in a discard-from-hand prompt they're the best target
+               after real junk — dumping them from hand costs nothing
+               while dumping a Strike or Sly card loses real DPS.
+          1  — Unplayable this turn (unplayable_reason set or cost < 0)
+               and not flagged as valuable by the tier list
+          2  — Too expensive: cost > remaining energy
           3  — avoid-tier cards
           5  — Strikes / Defends (basic filler)
           8  — B-tier
@@ -1090,70 +1117,98 @@ class Runner:
          16  — Protected / key cards
         """
         from .config import CHARACTER_CONFIG, detect_character
-        from .deterministic_advisor import _card_tier
+        from .deterministic_advisor import _card_tier, _resolve_card_obj
 
         character = detect_character(gs)
         cfg = CHARACTER_CONFIG.get(character, CHARACTER_CONFIG.get("ironclad", {}))
         protect_cards = set(cfg.get("protect_cards", [cfg.get("key_card", "Bash")]))
 
-        # Get remaining energy from combat state
         combat = gs.get("combat") or {}
         player = combat.get("player") or {}
         energy = player.get("energy", 3)
 
-        _STATUS_CURSE_TYPES = {"status", "curse"}
+        name = card.get("name", card.get("card_id", "?"))
+        cost = card.get("cost", card.get("energy_cost", 99))
+        if not isinstance(cost, (int, float)):
+            cost = 99
 
-        scored: list[tuple[int, int]] = []  # (score, index)
-        for card in cards:
-            name = card.get("name", card.get("card_id", "?"))
-            idx = card.get("index", card.get("i", 0))
-            card_type = (card.get("type") or "").lower()
-            cost = card.get("cost", card.get("energy_cost", 99))
-            # Handle X-cost and non-numeric costs
-            if not isinstance(cost, (int, float)):
-                cost = 99
+        # Protected / key card — never discard.
+        if name in protect_cards:
+            return 16
 
-            # Protected / key card — never discard
-            if name in protect_cards:
-                scored.append((16, idx))
-                continue
+        # Junk / carry-cargo check via the canonical Card DB. The live
+        # game-state dict doesn't carry a reliable 'type' field (see
+        # 807BRWNQND logs — Slimed shows up as
+        # {"name":"Slimed","card_id":"SLIMED","cost":1} with no 'type'),
+        # so the old in-dict card_type check never fired. Resolving
+        # against the DB gives us the authoritative card_type and lets
+        # Card.is_junk / Card.is_carry_cargo handle the tiering.
+        card_obj = _resolve_card_obj(name)
+        if card_obj is not None:
+            if card_obj.is_junk:
+                return -2
+            if card_obj.is_carry_cargo:
+                return -1
 
-            # Status / Curse — always discard first
-            if card_type in _STATUS_CURSE_TYPES:
-                scored.append((0, idx))
-                continue
+        # Fallback: if we couldn't resolve the card at all but the name
+        # matches a hard-coded junk list, still flag it. This is purely
+        # defensive for cases where the DB load has hiccupped; the
+        # primary path is card_obj.is_junk above.
+        _KNOWN_JUNK_NAMES = {
+            "Wound", "Slimed", "Dazed", "Burn", "Void", "Soot",
+            "Clumsy", "Doubt", "Injury", "Normality", "Regret",
+            "Shame", "Writhe", "Decay", "Ascender's Bane",
+            "Curse of the Bell", "Pride", "Parasite", "Necronomicurse",
+        }
+        if name.rstrip("+") in _KNOWN_JUNK_NAMES:
+            return -2
+        _KNOWN_CARRY_CARGO_NAMES = {"Spoils Map", "Lantern Key", "Byrdonis Egg"}
+        if name.rstrip("+") in _KNOWN_CARRY_CARGO_NAMES:
+            return -1
 
-            # Unplayable flag
-            if card.get("unplayable") or card.get("is_unplayable"):
-                scored.append((1, idx))
-                continue
+        # Unplayable flag. STS2's game API uses 'unplayable_reason'
+        # (a string or null), while the old code checked for
+        # 'unplayable' / 'is_unplayable' booleans that never exist.
+        # Check both for defensiveness, plus cost == -1 which is the
+        # STS2 marker for unplayable cards.
+        if (card.get("unplayable_reason")
+                or card.get("unplayable")
+                or card.get("is_unplayable")
+                or cost < 0):
+            # Not junk (we already handled that), but still nothing
+            # useful this turn — discard before real cards.
+            return 1
 
-            # Too expensive to play this turn
-            if cost > energy:
-                scored.append((2, idx))
-                continue
+        # Too expensive to play this turn.
+        if cost > energy:
+            return 2
 
-            # Tier-based scoring (reverse of play priority)
-            tier = _card_tier(name.rstrip("+"), character, card)
-            if tier == "avoid":
-                score = 3
-            elif "Strike" in name or "Defend" in name:
-                score = 5
-            elif tier == "B":
-                score = 8
-            elif tier == "A":
-                score = 12
-            elif tier == "S":
-                score = 15
-            else:
-                score = 6  # unknown tier — treat as low-B
+        # Tier-based scoring (reverse of play priority).
+        tier = _card_tier(name.rstrip("+"), character, card)
+        if tier == "avoid":
+            return 3
+        if "Strike" in name or "Defend" in name:
+            return 5
+        if tier == "B":
+            return 8
+        if tier == "A":
+            return 12
+        if tier == "S":
+            return 15
+        return 6  # unknown tier — treat as low-B
 
-            scored.append((score, idx))
+    def _pick_card_to_discard(self, gs: dict, cards: list[dict]) -> int:
+        """Pick the best single card to discard from hand.
 
-        if not scored:
+        Delegates per-card scoring to _score_discard_priority so the
+        multi-discard path can reuse the same ordering.
+        """
+        if not cards:
             return 0
-
-        # Pick the card with the lowest score (most expendable)
+        scored: list[tuple[int, int]] = []
+        for card in cards:
+            idx = card.get("index", card.get("i", 0))
+            scored.append((self._score_discard_priority(gs, card), idx))
         scored.sort(key=lambda x: x[0])
         return scored[0][1]
 
@@ -1368,6 +1423,19 @@ class Runner:
             sel = gs.get("selection") or {}
             prompt = strip_markup(sel.get("prompt") or "").lower()
 
+            # Diagnostic: log the prompt + card count the first time we see
+            # each new deck_select screen, so we can catch oddly-named
+            # prompts that slip past the keyword routing below. Keyed on
+            # (prompt, card_count) so repeated ticks on the same screen
+            # don't spam the log but a new screen will always print.
+            _card_count = len(sel.get("cards") or [])
+            _diag_key = (prompt, _card_count)
+            if getattr(self, "_last_deck_diag_key", None) != _diag_key:
+                self._last_deck_diag_key = _diag_key
+                self._log_action(
+                    f"  [dim]deck_select prompt={prompt!r} cards={_card_count}[/dim]"
+                )
+
             # "Confirm" screens (e.g. Armaments "Confirm Card to Upgrade"):
             # A card was already selected — just re-select index 0 to confirm.
             if "confirm" in prompt:
@@ -1412,9 +1480,13 @@ class Runner:
             )
             is_combat_select = any(kw in prompt for kw in _COMBAT_SELECT_KW)
 
-            # Decision keywords that need advisor input (non-combat only)
+            # Decision keywords that need advisor input (non-combat only).
+            # NB: "smith" is the rest-site upgrade prompt in STS2 — without
+            # it, rest-site upgrade pickers get misclassified as overlays
+            # and dismissed with select_deck_card(0) (see IMPROVEMENTS.md).
             is_decision = not is_combat_select and any(kw in prompt for kw in (
-                "choose", "remove", "upgrade", "transform", "add", "select",
+                "choose", "remove", "upgrade", "smith",
+                "transform", "add", "select",
             ))
 
             if is_combat_select:
@@ -1439,8 +1511,13 @@ class Runner:
             elif is_decision:
                 self._handle_deck_select(gs)
             else:
-                # Informational overlay — auto-select first card to dismiss
-                self._log_action(f"  [dim]auto: select_deck_card (overlay)[/dim]")
+                # Informational overlay — auto-select first card to dismiss.
+                # If you see this log on a screen that's NOT a Havoc-style
+                # overlay, the prompt needs a new keyword in is_decision
+                # above.
+                self._log_action(
+                    f"  [yellow]auto: select_deck_card (overlay) prompt={prompt!r}[/yellow]"
+                )
                 if not self.dry_run:
                     try:
                         self._execute_with_retry("select_deck_card", option_index=0)
@@ -1560,8 +1637,19 @@ class Runner:
             )
             return
 
-        # Neow event: use deterministic scorer instead of LLM (faster + smarter)
+        # Neow event: prefer the network's option head when it returns
+        # a confident match, otherwise fall back to the deterministic
+        # keyword scorer. _az_decide_neow returns None on any error or
+        # when no live option tag-matches a blessing, so the fall-through
+        # behavior is identical to pre-network runs.
         if screen_type == "event" and "choose_event_option" in actions:
+            az_neow = self._az_decide_neow(gs)
+            if az_neow is not None:
+                self._execute_deterministic(
+                    gs, az_neow, screen_type, actions, run,
+                )
+                return
+
             neow_decision = decide_neow(gs)
             if neow_decision is not None:
                 self._execute_deterministic(
@@ -1569,7 +1657,21 @@ class Runner:
                 )
                 return
 
-        # Events + generic: LLM-based decision (only remaining LLM usage)
+            # Non-Neow events: reuse the simulator's event scorer so that
+            # live play makes the same decision the training loop assumed
+            # when it simulated this event. This replaces the old LLM
+            # fallthrough — which was hanging indefinitely when Ollama
+            # wasn't reachable — with deterministic logic that's both fast
+            # and aligned with training-time value targets.
+            event_decision = decide_event_default(gs)
+            if event_decision is not None:
+                self._execute_deterministic(
+                    gs, event_decision, screen_type, actions, run,
+                )
+                return
+
+        # Generic / unknown screens: LLM-based decision (events no longer
+        # reach this path — see decide_event_default above).
         try:
             result_str = self.advisor.advise(gs, execute=not self.dry_run)
         except Exception as e:
@@ -1619,32 +1721,24 @@ class Runner:
     def _az_run_state_tensors(self, gs: dict) -> tuple:
         """Build encoded state tensors from live game state for non-combat decisions.
 
+        Uses the extended ``state_from_mcp`` (IMPROVEMENTS.md #8), which
+        auto-detects non-combat screens and returns a combat-less state
+        with deck loaded into ``draw_pile``. Replaces the old inline
+        deck-parsing loop.
+
         Returns (state_tensors, hidden, hp, max_hp, gold, floor, deck_cards).
         """
         import torch
-        from .deterministic_advisor import _get_deck, _gold, _floor
-        from .models import PlayerState, CombatState
+        from .bridge import state_from_mcp
 
-        run = gs.get("run") or {}
-        hp = run.get("current_hp", 70)
-        max_hp = run.get("max_hp", 70)
-        gold = _gold(gs)
-        floor = _floor(gs)
+        sim_state = state_from_mcp(gs, self.card_db)
+        hp = sim_state.player.hp
+        max_hp = sim_state.player.max_hp
+        gold = sim_state.gold
+        floor = sim_state.floor
+        deck_cards = list(sim_state.player.draw_pile)
 
-        # Build deck as Card objects
-        deck_cards = []
-        for raw in _get_deck(gs):
-            card_id = raw.get("card_id") or raw.get("id", "")
-            card = self.card_db.get(card_id)
-            if not card and raw.get("upgraded"):
-                card = self.card_db.get(card_id.rstrip("+") + "+")
-            if card:
-                deck_cards.append(card)
-
-        player = PlayerState(hp=hp, max_hp=max_hp, energy=3, max_energy=3,
-                             draw_pile=list(deck_cards))
-        dummy = CombatState(player=player, enemies=[], floor=floor, gold=gold)
-        st = az_encode_state(dummy, self._mcts_vocabs, self._mcts_config)
+        st = az_encode_state(sim_state, self._mcts_vocabs, self._mcts_config)
 
         with torch.no_grad():
             hidden = self._mcts.network.encode_state(**st)
@@ -1706,14 +1800,16 @@ class Runner:
                 return Decision("choose_rest_option",
                                 game_rest_idx if game_rest_idx is not None else 0,
                                 f"Network: rest (score={scores[0]:.2f})",
-                                network_value=nv, head_scores=hs)
+                                network_value=nv, head_scores=hs,
+                                source="network_option_head")
             else:
                 card_di = upgrade_deck_indices[best_idx - 1]
                 card_name = deck[card_di].name
                 return Decision("choose_rest_option",
                                 game_upgrade_idx if game_upgrade_idx is not None else 1,
                                 f"Network: upgrade {card_name} (score={scores[best_idx]:.2f})",
-                                network_value=nv, head_scores=hs)
+                                network_value=nv, head_scores=hs,
+                                source="network_option_head")
         except Exception as e:
             self._log_action(f"  [dim]Network rest failed ({e}), falling back[/dim]")
             return None
@@ -1721,43 +1817,17 @@ class Runner:
     def _az_decide_map(self, gs: dict) -> "Decision | None":
         """Use network to score map node types and pick the best."""
         import torch
+        from .bridge import map_options_from_mcp
         from .deterministic_advisor import Decision
 
         try:
             st, hidden, hp, max_hp, gold, floor, deck = self._az_run_state_tensors(gs)
             network = self._mcts.network
 
-            map_data = gs.get("map") or (gs.get("agent_view") or {}).get("map") or {}
-            nodes = map_data.get("available_nodes") or map_data.get("nodes") or []
-            if not nodes:
-                return None
-
-            opt_types = []
-            opt_cards = []
-            node_indices = []
-
-            for i, node in enumerate(nodes):
-                idx = node.get("index", i)
-                t = (node.get("node_type") or node.get("type") or
-                     node.get("icon") or node.get("symbol", "")).lower()
-
-                # Map game node type to our option type
-                if "elite" in t:
-                    rt = "elite"
-                elif "rest" in t:
-                    rt = "rest"
-                elif "shop" in t or "merchant" in t:
-                    rt = "shop"
-                elif "event" in t or "unknown" in t or "mystery" in t:
-                    rt = "event"
-                else:
-                    rt = "normal"  # monster, treasure, etc.
-
-                opt_type = ROOM_TYPE_TO_OPTION.get(rt)
-                if opt_type is not None:
-                    opt_types.append(opt_type)
-                    opt_cards.append(0)
-                    node_indices.append(idx)
+            parsed = map_options_from_mcp(gs)
+            opt_types = parsed["opt_types"]
+            opt_cards = parsed["opt_cards"]
+            actions_list = parsed["actions"]
 
             if not opt_types:
                 return None
@@ -1767,18 +1837,18 @@ class Runner:
                 nv = network.value_head(hidden).item()
 
             # Build labeled scores for telemetry
-            _OPT_NAMES = {v: k for k, v in ROOM_TYPE_TO_OPTION.items()}
-            option_labels = [f"{_OPT_NAMES.get(ot, '?')} (node {ni})" for ot, ni in zip(opt_types, node_indices)]
+            option_labels = [label for _, _, label in actions_list]
             hs = {
                 "head": "option_eval",
                 "chosen": best_idx,
                 "options": [{"label": lbl, "score": round(s, 4)} for lbl, s in zip(option_labels, scores)],
             }
 
-            chosen_node = node_indices[best_idx]
-            return Decision("choose_map_node", chosen_node,
+            action_name, chosen_node, _label = actions_list[best_idx]
+            return Decision(action_name, chosen_node,
                             f"Network: node {chosen_node} (score={scores[best_idx]:.2f})",
-                            network_value=nv, head_scores=hs)
+                            network_value=nv, head_scores=hs,
+                            source="network_option_head")
         except Exception as e:
             self._log_action(f"  [dim]Network map failed ({e}), falling back[/dim]")
             return None
@@ -1786,49 +1856,17 @@ class Runner:
     def _az_decide_shop(self, gs: dict) -> "Decision | None":
         """Use network for one shop action (remove/buy/leave)."""
         import torch
+        from .bridge import shop_options_from_mcp
         from .deterministic_advisor import Decision
 
         try:
             st, hidden, hp, max_hp, gold, floor, deck = self._az_run_state_tensors(gs)
             network = self._mcts.network
-            vocabs = self._mcts_vocabs
-            actions = gs.get("available_actions", [])
 
-            opt_types = []
-            opt_cards = []
-            shop_actions = []  # (action_name, option_index, reasoning)
-
-            shop = gs.get("shop") or (gs.get("agent_view") or {}).get("shop") or {}
-
-            # Remove card options
-            if "remove_card_at_shop" in actions:
-                remove_cost = shop.get("remove_cost", 75)
-                if isinstance(remove_cost, int) and remove_cost <= gold:
-                    for di, card in enumerate(deck):
-                        if card.name in ("Strike", "Defend") and not card.upgraded:
-                            opt_types.append(OPTION_SHOP_REMOVE)
-                            opt_cards.append(vocabs.cards.get(card.id.rstrip("+")))
-                            shop_actions.append(("remove_card_at_shop", None,
-                                                 f"Remove {card.name}"))
-
-            # Buy card options
-            if "buy_card" in actions:
-                cards = shop.get("cards", [])
-                for i, card_info in enumerate(cards):
-                    price = card_info.get("price", card_info.get("cost", 999))
-                    if not isinstance(price, int) or price > gold:
-                        continue
-                    card_id = card_info.get("card_id") or card_info.get("id", "")
-                    opt_types.append(OPTION_SHOP_BUY)
-                    opt_cards.append(vocabs.cards.get(card_id.rstrip("+").rstrip("+")))
-                    name = card_info.get("name", card_id)
-                    shop_actions.append(("buy_card", i, f"Buy {name} ({price}g)"))
-
-            # Leave option
-            if "close_shop_inventory" in actions:
-                opt_types.append(OPTION_SHOP_LEAVE)
-                opt_cards.append(0)
-                shop_actions.append(("close_shop_inventory", None, "Leave shop"))
+            parsed = shop_options_from_mcp(gs, deck, gold, self._mcts_vocabs)
+            opt_types = parsed["opt_types"]
+            opt_cards = parsed["opt_cards"]
+            shop_actions = parsed["actions"]
 
             if not opt_types:
                 return None
@@ -1848,7 +1886,8 @@ class Runner:
             action_name, opt_idx, reason = shop_actions[best_idx]
             return Decision(action_name, opt_idx,
                             f"Network: {reason} (score={scores[best_idx]:.2f})",
-                            network_value=nv, head_scores=hs)
+                            network_value=nv, head_scores=hs,
+                            source="network_option_head")
         except Exception as e:
             self._log_action(f"  [dim]Network shop failed ({e}), falling back[/dim]")
             return None
@@ -1918,9 +1957,131 @@ class Runner:
 
             return Decision("select_deck_card", chosen_idx,
                             f"Network: {action} {card_name} (score={scores_list[best]:.2f})",
-                            network_value=nv, head_scores=hs)
+                            network_value=nv, head_scores=hs,
+                            source="network_option_head")
         except Exception as e:
             self._log_action(f"  [dim]Network deck_select failed ({e}), falling back[/dim]")
+            return None
+
+    def _az_decide_neow(self, gs: dict) -> "Decision | None":
+        """Use network to pick a Neow blessing on floor 1.
+
+        Training path: ``play_full_run`` scores the canonical
+        ``NEOW_BLESSINGS`` list in its static order, with
+        ``opt_types == [OPTION_EVENT_CHOICE] * N`` and
+        ``opt_cards == [min(i+1, vocab_n-1)]``. We mirror that exactly
+        here so the network sees the same input it trained on.
+
+        The network returns an index into ``NEOW_BLESSINGS`` (training's
+        synthetic list). We then map that back to the live game's option
+        index by tag-matching: classify each live option's text with
+        ``classify_neow_option_text``, then pick the live option whose
+        tag matches the network's chosen blessing. If no live option
+        tag-matches (e.g. modded Neow or follow-up sub-screen), return
+        None so the caller falls through to ``decide_neow``.
+        """
+        import torch
+        from .deterministic_advisor import Decision
+        from .simulator import (
+            NEOW_BLESSINGS, _NEOW_KEY_TO_TAG,
+            classify_neow_option_text,
+        )
+
+        try:
+            # Detect that this really is Neow. Use the same signal as
+            # decide_neow: floor <= 1 AND either "neow" in event name or
+            # at least one option with a Neow-ish keyword. Bail otherwise.
+            event = gs.get("event") or (gs.get("agent_view") or {}).get("event") or {}
+            live_options = event.get("options") or []
+            if not live_options:
+                return None
+            event_name = (event.get("name") or event.get("event_id") or "").lower()
+            run = gs.get("run") or {}
+            floor = int(run.get("floor") or 0)
+            if "neow" not in event_name and floor > 1:
+                return None
+
+            # Classify every live option up front. Drop anything that
+            # doesn't classify as a Neow tag so follow-up sub-screens
+            # (e.g. "Scroll Boxes" pack picker) fall through.
+            live_tagged: list[tuple[int, str, str]] = []  # (game_idx, tag, label)
+            for i, opt in enumerate(live_options):
+                if opt.get("locked"):
+                    continue
+                name = opt.get("name") or opt.get("title") or ""
+                desc = opt.get("description") or opt.get("desc") or ""
+                text = f"{name} — {desc}"
+                tag = classify_neow_option_text(text)
+                if tag == "unknown":
+                    continue
+                game_idx = opt.get("index", i)
+                live_tagged.append((game_idx, tag, name or text.strip()))
+            if not live_tagged:
+                return None
+
+            # Build the network query against the static NEOW_BLESSINGS
+            # list — the same tensor shape the option head was trained on.
+            _, hidden, _hp, _max_hp, _gold, _floor, _deck = self._az_run_state_tensors(gs)
+            network = self._mcts.network
+            vocabs = self._mcts_vocabs
+
+            n_bless = len(NEOW_BLESSINGS)
+            opt_types = [OPTION_EVENT_CHOICE] * n_bless
+            vocab_n = len(vocabs.cards)
+            opt_cards = [min(i + 1, vocab_n - 1) for i in range(n_bless)]
+
+            with torch.no_grad():
+                best_idx, scores = network.pick_best_option(
+                    hidden, opt_types, opt_cards)
+                nv = network.value_head(hidden).item()
+
+            # Map network pick (index into NEOW_BLESSINGS) back to a
+            # live option. Walk blessings in descending network-score
+            # order and take the first live option whose tag matches.
+            order = sorted(range(n_bless), key=lambda i: scores[i], reverse=True)
+            best_bless = None
+            matched_live_idx = None
+            matched_live_label = None
+            for b_idx in order:
+                key = NEOW_BLESSINGS[b_idx][0]
+                tag = _NEOW_KEY_TO_TAG.get(key, "unknown")
+                for game_idx, live_tag, label in live_tagged:
+                    if live_tag == tag:
+                        best_bless = b_idx
+                        matched_live_idx = game_idx
+                        matched_live_label = label
+                        break
+                if matched_live_idx is not None:
+                    break
+
+            if matched_live_idx is None:
+                # No blessing tag matched any live option. Let
+                # decide_neow handle it — it runs the same scorer
+                # against the live option texts directly, which is more
+                # robust for modded/unusual Neow variants.
+                return None
+
+            # Telemetry labels (training blessings, not live options, so
+            # the report shows what the network actually scored).
+            option_labels = [f"{NEOW_BLESSINGS[i][0]} [{NEOW_BLESSINGS[i][1]}]"
+                             for i in range(n_bless)]
+            hs = {
+                "head": "option_eval",
+                "chosen": best_bless,
+                "options": [{"label": lbl, "score": round(s, 4)}
+                            for lbl, s in zip(option_labels, scores)],
+            }
+
+            return Decision(
+                "choose_event_option", matched_live_idx,
+                f"Network Neow: {matched_live_label} "
+                f"(blessing={NEOW_BLESSINGS[best_bless][0]}, "
+                f"score={scores[best_bless]:.2f})",
+                network_value=nv, head_scores=hs,
+                source="network_option_head",
+            )
+        except Exception as e:
+            self._log_action(f"  [dim]Network Neow failed ({e}), falling back[/dim]")
             return None
 
     # ------------------------------------------------------------------
@@ -1955,7 +2116,8 @@ class Runner:
             }
             fb = _FALLBACKS.get(screen_type)
             if fb and fb[0] in actions:
-                decision = Decision(fb[0], fb[1], "fallback")
+                decision = Decision(fb[0], fb[1], "fallback",
+                                    source="fallback_first_action")
             else:
                 return
 
@@ -1976,7 +2138,7 @@ class Runner:
                     "option_index": decision.option_index,
                     "reasoning": decision.reasoning,
                 },
-                source="network" if decision.network_value is not None else "deterministic",
+                source=decision.source,
                 network_value=decision.network_value,
                 head_scores=decision.head_scores,
             )
@@ -2089,9 +2251,32 @@ class Runner:
 
         is_remove = "remove" in prompt_text
         is_upgrade = "upgrade" in prompt_text
+        # Multi-discard surfaces: Gambling Chip ("Discard any number of
+        # cards"), multi-card Survivor variants, etc. The older
+        # _handle_multi_deck_select had no is_discard branch, so these
+        # prompts fell into the 'else' path below and picked cards in
+        # raw hand-index order — totally ignoring Wounds. Route them
+        # through the same priority scorer the single-discard path uses
+        # so junk gets queued first.
+        is_discard = (
+            "discard" in prompt_text
+            and "discard pile" not in prompt_text
+        )
 
         # Build priority order for indices
-        if is_remove:
+        if is_discard:
+            scored = []
+            for card in cards:
+                idx = card.get("index", 0)
+                score = self._score_discard_priority(gs, card)
+                scored.append((score, idx))
+            scored.sort(key=lambda x: x[0])  # lowest score = discard first
+            priority = [idx for _, idx in scored]
+            self._log_action(
+                f"  [cyan]Multi-discard: priority {priority[:num_to_pick]} "
+                f"(junk-first)[/cyan]"
+            )
+        elif is_remove:
             # Remove Strikes first, then Defends, then others, NEVER key card
             from .config import CHARACTER_CONFIG, detect_character
             _char = detect_character(gs)

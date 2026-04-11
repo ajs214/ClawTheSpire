@@ -5,6 +5,17 @@ from dataclasses import dataclass, field
 from .constants import CardType, TargetType
 
 
+# Quest / loot carry cards. Classified as Status by the game but they
+# sit inert in the deck with no combat effect. NOT junk (we never want
+# them *removed* from the deck), but in discard-from-hand prompts they
+# are the best target after real junk — discarding them loses nothing.
+CARRY_CARGO_STATUS_IDS = frozenset({
+    "SPOILS_MAP",
+    "LANTERN_KEY",
+    "BYRDONIS_EGG",
+})
+
+
 @dataclass
 class Card:
     """Immutable card template. Loaded from JSON at startup."""
@@ -59,6 +70,50 @@ class Card:
     @property
     def retain(self) -> bool:
         return "Retain" in self.keywords
+
+    @property
+    def is_junk(self) -> bool:
+        """Is this card worthless to keep in hand (should be discarded first)?
+
+        Rules:
+          - All Curses are junk (curses always punish you).
+          - Statuses are junk UNLESS they're an allowlisted "carry-cargo"
+            card that encodes quest / loot info (Spoils Map, Lantern Key,
+            Byrdonis Egg). Those are handled by is_carry_cargo — see the
+            note there for why they're a separate tier from real junk.
+          - All Attack / Skill / Power cards are NOT junk.
+
+        This covers every STS2 status/curse with a single small allowlist
+        instead of a sprawling known-junk blacklist, and has no false
+        positives on real player cards (Attack/Skill/Power never match).
+        """
+        if self.card_type == CardType.CURSE:
+            return True
+        if self.card_type != CardType.STATUS:
+            return False
+        return self.id not in CARRY_CARGO_STATUS_IDS
+
+    @property
+    def is_carry_cargo(self) -> bool:
+        """Is this an inert quest-status card (Spoils Map / Lantern Key /
+        Byrdonis Egg)?
+
+        These sit in the deck with no combat effect but carry quest or
+        loot info that shouldn't be removed from the deck. They occupy
+        a middle tier for discard-from-hand decisions:
+
+            real junk  (Wound, Clumsy, ...)   ← discard first
+            carry cargo (Spoils Map, ...)     ← discard next
+            real cards  (Strike, Sly, ...)    ← keep
+
+        Discarding a carry-cargo card from combat-hand is free — it goes
+        to the discard pile and comes back to the draw pile next shuffle,
+        losing nothing — while discarding a Strike or a Sly card loses
+        real DPS. So when there's no real junk in hand, carry cargo
+        should still be the preferred discard target over any playable
+        card.
+        """
+        return self.id in CARRY_CARGO_STATUS_IDS
 
 
 @dataclass
