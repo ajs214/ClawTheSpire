@@ -54,6 +54,9 @@ def calculate_block_gain(base: int, state: CombatState) -> int:
     effective = base + player.powers.get("Dexterity", 0)
     if player.powers.get("Frail", 0) > 0:
         effective = math.floor(effective * 0.75)
+    # Shadowmeld: double block gain this turn
+    if player.powers.get("Shadowmeld", 0) > 0:
+        effective *= 2
     # Relic proxy multiplier (Sturdy Clamp, Paper Krane, etc.)
     blk_mult = relic_effects.get_block_multiplier(state.relics)
     if blk_mult != 1.0 and effective > 0:

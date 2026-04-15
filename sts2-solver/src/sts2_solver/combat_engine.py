@@ -595,6 +595,33 @@ def _tick_start_of_turn_powers(state: CombatState) -> None:
             from .effects import discard_card_from_hand
             discard_card_from_hand(state, worst_idx)
 
+    # Well-Laid Plans: Retain 1 card at end of turn
+    # Implementation: simply track that retention is active (approximated as power)
+    # The actual retain logic would need to be more complex in a full implementation.
+    # For now, we just keep the power on the player.
+    if "Well-Laid Plans" in powers:
+        pass  # Engine will handle retention in discard phase if implemented
+
+    # Automation: Every 10 cards drawn, gain 1 energy
+    if "Automation" in powers:
+        cards_drawn_count = state.cards_drawn_this_turn
+        automation_stacks = powers.get("Automation", 0)
+        # For every 10 cards drawn per stack, gain 1 energy
+        if automation_stacks > 0 and cards_drawn_count >= 10:
+            from .effects import gain_energy
+            gain_energy(state, cards_drawn_count // 10 * automation_stacks)
+
+    # Shadowmeld: Double block gain this turn
+    # This is a turn-duration power, so just keep it on the player
+    if "Shadowmeld" in powers:
+        pass  # Engine will check this when calculating block gains
+
+    # Accelerant: Poison is triggered 1 additional time
+    # This is handled in tick_enemy_powers where poison ticks
+    # The power is just marked; the actual multiplier logic goes in tick_enemy_powers
+    if "Accelerant" in powers:
+        pass  # Handled in tick_enemy_powers
+
 
 def _tick_end_of_turn_powers(state: CombatState) -> None:
     """Tick down player duration-based powers at end of turn.
@@ -603,12 +630,16 @@ def _tick_end_of_turn_powers(state: CombatState) -> None:
     via tick_enemy_powers(). This matches the real game order:
     player end turn → enemy acts → enemy debuffs expire → poison ticks.
     """
-    # Player debuffs
+    # Player debuffs and turn-duration powers
     for debuff in ("Vulnerable", "Weak", "Frail", "Tangled"):
         if debuff in state.player.powers:
             state.player.powers[debuff] -= 1
             if state.player.powers[debuff] <= 0:
                 del state.player.powers[debuff]
+
+    # Shadowmeld: expires at end of turn (turn-duration)
+    if "Shadowmeld" in state.player.powers:
+        del state.player.powers["Shadowmeld"]
 
 
 def end_combat_relics(state: CombatState) -> None:
@@ -642,7 +673,10 @@ def tick_enemy_powers(state: CombatState) -> None:
         poison = enemy.powers.get("Poison", 0)
         if poison > 0:
             was_alive = enemy.is_alive
-            enemy.hp -= poison
+            # Accelerant: apply poison bonus (additional trigger)
+            accelerant_stacks = state.player.powers.get("Accelerant", 0)
+            total_poison_damage = poison * (1 + accelerant_stacks)
+            enemy.hp -= total_poison_damage
             enemy.powers["Poison"] = poison - 1
             if enemy.powers["Poison"] <= 0:
                 del enemy.powers["Poison"]

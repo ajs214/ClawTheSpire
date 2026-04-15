@@ -797,3 +797,130 @@ def _fan_of_knives(card: Card, card_db: CardDB | None) -> CardEffect:
         deal_damage_all(state, dmg)
         draw_cards(state, 1)
     return effect
+
+
+# ---------------------------------------------------------------------------
+# Custom Neutral card implementations
+# ---------------------------------------------------------------------------
+
+@register("MURDER")
+def _murder(card: Card, card_db: CardDB | None) -> CardEffect:
+    """Deal 2 damage base + 1 per card drawn this combat."""
+    base = 2
+
+    def effect(state: CombatState, target_idx: int | None = None) -> None:
+        if target_idx is not None:
+            total = base + state.cards_drawn_this_turn
+            deal_damage(state, target_idx, total)
+    return effect
+
+
+@register("EXPOSE")
+def _expose(card: Card, card_db: CardDB | None) -> CardEffect:
+    """Remove all Artifact and Block from the enemy. Apply 2 Vulnerable."""
+    vuln = 2
+
+    def effect(state: CombatState, target_idx: int | None = None) -> None:
+        if target_idx is not None:
+            enemy = state.enemies[target_idx]
+            # Remove artifact from enemy (modeled as Artifact power)
+            if "Artifact" in enemy.powers:
+                del enemy.powers["Artifact"]
+            # Remove block
+            enemy.block = 0
+            # Apply Vulnerable
+            apply_power_to_enemy(state, target_idx, "Vulnerable", vuln)
+    return effect
+
+
+@register("WELL_LAID_PLANS")
+def _well_laid_plans(card: Card, card_db: CardDB | None) -> CardEffect:
+    """At end of turn, Retain up to 1 card. Approximated as power that engine handles."""
+    def effect(state: CombatState, target_idx: int | None = None) -> None:
+        apply_power_to_player(state, "Well-Laid Plans", 1)
+    return effect
+
+
+@register("KNIFE_TRAP")
+def _knife_trap(card: Card, card_db: CardDB | None) -> CardEffect:
+    """Play every Shiv in Exhaust Pile on the enemy."""
+    def effect(state: CombatState, target_idx: int | None = None) -> None:
+        if target_idx is not None:
+            # Find all Shivs in exhaust pile
+            shivs = [c for c in state.player.exhaust_pile if c.id == "SHIV"]
+            # Play each Shiv against the target
+            for shiv in shivs:
+                accuracy = state.player.powers.get("Accuracy", 0)
+                dmg = 4 + accuracy
+                deal_damage(state, target_idx, dmg)
+    return effect
+
+
+@register("AUTOMATION")
+def _automation(card: Card, card_db: CardDB | None) -> CardEffect:
+    """Every 10 cards drawn, gain 1 energy. Apply the power, engine handles the trigger."""
+    def effect(state: CombatState, target_idx: int | None = None) -> None:
+        apply_power_to_player(state, "Automation", 1)
+    return effect
+
+
+@register("SHADOWMELD")
+def _shadowmeld(card: Card, card_db: CardDB | None) -> CardEffect:
+    """Double your Block gain this turn. If you have 0 block, gain 12 additional block."""
+    def effect(state: CombatState, target_idx: int | None = None) -> None:
+        apply_power_to_player(state, "Shadowmeld", 1)
+    return effect
+
+
+@register("ACCELERANT")
+def _accelerant(card: Card, card_db: CardDB | None) -> CardEffect:
+    """Poison is triggered 1 additional time. Apply power, engine handles trigger."""
+    def effect(state: CombatState, target_idx: int | None = None) -> None:
+        apply_power_to_player(state, "Accelerant", 1)
+    return effect
+
+
+@register("NIGHTMARE")
+def _nightmare(card: Card, card_db: CardDB | None) -> CardEffect:
+    """Choose a card. Next turn, add 3 copies of that card into your Hand.
+
+    Approximated: Add 3 copies of the cheapest card currently in hand to hand.
+    This is a simplification since actual card selection requires user input.
+    """
+    def effect(state: CombatState, target_idx: int | None = None) -> None:
+        if not state.player.hand:
+            return
+        # Find cheapest card in hand
+        cheapest = min(state.player.hand, key=lambda c: c.cost)
+        # Add 3 copies to hand
+        for _ in range(3):
+            # Create a copy of the card
+            copy_card = Card(
+                id=cheapest.id,
+                name=cheapest.name,
+                cost=cheapest.cost,
+                card_type=cheapest.card_type,
+                target=cheapest.target,
+                damage=cheapest.damage,
+                block=cheapest.block,
+                upgraded=cheapest.upgraded,
+            )
+            add_card_to_hand(state, copy_card)
+    return effect
+
+
+@register("STORM_OF_STEEL")
+def _storm_of_steel(card: Card, card_db: CardDB | None) -> CardEffect:
+    """Discard your Hand. Add 1 Shiv into your Hand for each card discarded."""
+    def effect(state: CombatState, target_idx: int | None = None) -> None:
+        # Count cards in hand (excluding the card being played)
+        hand_size = len(state.player.hand)
+        # Discard all cards from hand
+        for _ in range(hand_size):
+            if state.player.hand:
+                card_to_discard = state.player.hand.pop(0)
+                state.player.discard_pile.append(card_to_discard)
+        # Add Shiv for each card discarded
+        for _ in range(hand_size):
+            add_card_to_hand(state, _make_shiv())
+    return effect
