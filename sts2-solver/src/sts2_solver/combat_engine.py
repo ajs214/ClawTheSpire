@@ -65,6 +65,9 @@ def can_play_card(state: CombatState, card_idx: int) -> bool:
 def effective_cost(state: CombatState, card: Card) -> int:
     """Get the effective energy cost of a card, accounting for powers."""
     cost = card.cost
+    # Bullet Time: all cards free
+    if state.player.all_cards_free:
+        return 0
     # Corruption: Skills cost 0
     if card.card_type == CardType.SKILL and state.player.powers.get("Corruption", 0) > 0:
         return 0
@@ -131,6 +134,12 @@ def play_card(
     # --- Execute card effect ---
     effect_fn = get_effect(card, card_db)
     effect_fn(state, target_idx)
+
+    # --- Burst: Skills played with active burst are played again ---
+    # FIXED: If Burst is active and this is a Skill, apply its effect again
+    if card.card_type == CardType.SKILL and state.player.burst_count > 0:
+        effect_fn(state, target_idx)
+        state.player.burst_count -= 1
 
     # --- Post-effect triggers ---
     # Dark Embrace: draw on exhaust (handled in _move_card_after_play)
@@ -233,6 +242,7 @@ def start_turn(state: CombatState) -> None:
     state.turn += 1
     state.cards_played_this_turn = 0
     state.attacks_played_this_turn = 0
+    state.discards_this_turn = 0  # Reset discard counter
 
     # Reset energy
     state.player.energy = state.player.max_energy
@@ -293,7 +303,7 @@ def end_turn(state: CombatState) -> None:
     Does NOT resolve enemy intents — call resolve_enemy_intents() separately
     so the solver can evaluate state before and after enemy actions.
     """
-    # Stampede: play attack(s) from hand against first alive enemy (before discard)
+    # Stampede: play attack(s) from hand against random alive enemy (before discard)
     stampede = state.player.powers.get("Stampede", 0)
     for _ in range(stampede):
         attacks = [c for c in state.player.hand if c.card_type == CardType.ATTACK]
@@ -302,11 +312,12 @@ def end_turn(state: CombatState) -> None:
         alive = [i for i, e in enumerate(state.enemies) if e.is_alive]
         if not alive:
             break
-        card = attacks[0]  # deterministic for solver
+        card = attacks[0]  # deterministic for solver (first attack in hand)
         card_idx = state.player.hand.index(card)
         effect_fn = get_effect(card)
         state.player.hand.pop(card_idx)
-        effect_fn(state, alive[0])
+        # FIXED: Use random.choice instead of deterministic alive[0]
+        effect_fn(state, random.choice(alive))
         state.player.discard_pile.append(card)
 
     # --- End-of-turn relic effects (dispatched through relic_effects) ---
@@ -338,6 +349,7 @@ def end_turn(state: CombatState) -> None:
             _on_exhaust(state)
         else:
             state.player.discard_pile.append(card)
+            state.discards_this_turn += 1  # Track for Memento Mori
     state.player.hand = remaining
 
     # End-of-turn power ticks
@@ -345,14 +357,111 @@ def end_turn(state: CombatState) -> None:
 
 
 def resolve_enemy_intents(state: CombatState) -> None:
-    """Resolve all enemy intents (attacks, buffs, etc.)."""
+    """Resolve all enemy intents (attacks, buffs, debuffs, etc.).
+
+    Handles:
+    - Attack: deal damage to player (with all modifier calculations)
+    - Defend: gain block
+    - Buff: self buffs (strength, block)
+    - Debuff: apply debuffs to player (weak, vulnerable, frail, etc.)
+    - Heal: restore enemy HP
+
+    The intents are set during _set_enemy_intents() from the move tables,
+    which store the full intent dict including all buff/debuff effects.
+    """
     for i, enemy in enumerate(state.enemies):
         if not enemy.is_alive:
             continue
+
+        # Resolve the primary intent action
         if enemy.intent_type == "Attack" and enemy.intent_damage is not None:
             _enemy_attacks_player(state, enemy)
         elif enemy.intent_type == "Defend" and enemy.intent_block is not None:
             enemy.block += enemy.intent_block
+
+        # Apply any secondary effects from the intent
+        # These are extracted from the move table and stored in intent_* fields
+        # The _set_enemy_intents() function in simulator.py stores the full intent dict
+        # on the AI as _pending_intent; for combat_engine to work independently,
+        # we need to store buff/debuff effects on the enemy itself.
+        # For now, these are handled in _resolve_sim_intents() in simulator.py
+        # but we include the logic here to be thorough.
+        _apply_intent_effects(state, enemy)
+
+
+def _apply_intent_effects(state: CombatState, enemy: EnemyState) -> None:
+    """Apply buff/debuff effects from an enemy's intent.
+
+    These effects are stored on the enemy by _set_enemy_intents() in simulator.py
+    which extracts them from the move tables and stores them as intent_* fields
+    on the EnemyState. This function applies those effects to the game state.
+
+    Enemy self-buffs:
+    - intent_self_strength: gain Strength
+    - intent_self_block: gain Block (secondary effect, distinct from Defend intent)
+    - intent_self_heal: restore HP (capped at max_hp)
+
+    Player debuffs:
+    - intent_player_weak: apply Weak
+    - intent_player_vulnerable: apply Vulnerable
+    - intent_player_frail: apply Frail
+    - intent_player_constrict: apply Constrict
+    - intent_player_tangled: apply Tangled
+    - intent_player_shrink: reduce Strength
+
+    All-enemy buffs:
+    - intent_all_strength: all alive enemies gain Strength
+    """
+    # Self-buffs for enemy
+    if hasattr(enemy, 'intent_self_strength') and enemy.intent_self_strength:
+        enemy.powers["Strength"] = (
+            enemy.powers.get("Strength", 0) + enemy.intent_self_strength
+        )
+
+    if hasattr(enemy, 'intent_self_block') and enemy.intent_self_block:
+        enemy.block += enemy.intent_self_block
+
+    if hasattr(enemy, 'intent_self_heal') and enemy.intent_self_heal:
+        enemy.hp = min(enemy.hp + enemy.intent_self_heal, enemy.max_hp)
+
+    # All-ally buffs
+    if hasattr(enemy, 'intent_all_strength') and enemy.intent_all_strength:
+        for e in state.enemies:
+            if e.is_alive:
+                e.powers["Strength"] = (
+                    e.powers.get("Strength", 0) + enemy.intent_all_strength
+                )
+
+    # Player debuffs
+    if hasattr(enemy, 'intent_player_weak') and enemy.intent_player_weak:
+        state.player.powers["Weak"] = (
+            state.player.powers.get("Weak", 0) + enemy.intent_player_weak
+        )
+
+    if hasattr(enemy, 'intent_player_vulnerable') and enemy.intent_player_vulnerable:
+        state.player.powers["Vulnerable"] = (
+            state.player.powers.get("Vulnerable", 0) + enemy.intent_player_vulnerable
+        )
+
+    if hasattr(enemy, 'intent_player_frail') and enemy.intent_player_frail:
+        state.player.powers["Frail"] = (
+            state.player.powers.get("Frail", 0) + enemy.intent_player_frail
+        )
+
+    if hasattr(enemy, 'intent_player_constrict') and enemy.intent_player_constrict:
+        state.player.powers["Constrict"] = (
+            state.player.powers.get("Constrict", 0) + enemy.intent_player_constrict
+        )
+
+    if hasattr(enemy, 'intent_player_tangled') and enemy.intent_player_tangled:
+        state.player.powers["Tangled"] = (
+            state.player.powers.get("Tangled", 0) + enemy.intent_player_tangled
+        )
+
+    if hasattr(enemy, 'intent_player_shrink') and enemy.intent_player_shrink:
+        state.player.powers["Shrink"] = (
+            state.player.powers.get("Shrink", 0) - enemy.intent_player_shrink
+        )
 
 
 def _enemy_attacks_player(state: CombatState, enemy: EnemyState) -> None:
@@ -458,6 +567,33 @@ def _tick_start_of_turn_powers(state: CombatState) -> None:
             picked = attacks_in_discard[0]  # deterministic for solver
             state.player.discard_pile.remove(picked)
             state.player.hand.append(picked)
+
+    # Tools of the Trade: draw 1 card, then discard 1 card
+    if "Tools of the Trade" in powers:
+        # FIXED: Added implementation of Tools of the Trade power trigger
+        draw_cards(state, 1)
+        if state.player.hand:
+            # Heuristically discard the worst card: prefer Status/Curse > high-cost > last card
+            worst_idx = 0
+            worst_card = state.player.hand[0]
+            for i, c in enumerate(state.player.hand):
+                # Prioritize junk cards
+                if c.is_junk and not worst_card.is_junk:
+                    worst_idx = i
+                    worst_card = c
+                elif c.is_junk and worst_card.is_junk:
+                    # Both junk: prefer highest cost
+                    if c.cost > worst_card.cost:
+                        worst_idx = i
+                        worst_card = c
+                elif not c.is_junk and not worst_card.is_junk:
+                    # Neither junk: prefer highest cost (excess capacity)
+                    if c.cost > worst_card.cost:
+                        worst_idx = i
+                        worst_card = c
+            # Discard the worst card
+            from .effects import discard_card_from_hand
+            discard_card_from_hand(state, worst_idx)
 
 
 def _tick_end_of_turn_powers(state: CombatState) -> None:

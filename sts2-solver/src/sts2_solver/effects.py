@@ -176,6 +176,9 @@ def draw_cards(state: CombatState, count: int) -> None:
     Hellraiser: when a Strike is drawn and Hellraiser power is active,
     the Strike is immediately played against the first alive enemy and discarded.
     """
+    # FIXED: Bullet Time prevents drawing cards
+    if state.player.no_draw_this_turn:
+        return
     state.cards_drawn_this_turn += count  # Track for evaluator scoring
     for _ in range(count):
         if not state.player.draw_pile and state.player.discard_pile:
@@ -190,7 +193,8 @@ def draw_cards(state: CombatState, count: int) -> None:
                     and ("Strike" in card.tags or "Strike" in card.name)):
                 alive = [i for i, e in enumerate(state.enemies) if e.is_alive]
                 if alive:
-                    target = alive[0]  # deterministic for solver
+                    # FIXED: Use random.choice instead of deterministic alive[0]
+                    target = random.choice(alive)
                     per_hit = calculate_attack_damage(
                         card.damage or 0, state, state.enemies[target]
                     )
@@ -251,6 +255,7 @@ def discard_card_from_hand(state: CombatState, card_idx: int) -> Card:
     """
     card = state.player.hand.pop(card_idx)
     state.player.discard_pile.append(card)
+    state.discards_this_turn += 1  # Track for Memento Mori and other effects
     _on_discard_from_hand(state, card)
     return card
 

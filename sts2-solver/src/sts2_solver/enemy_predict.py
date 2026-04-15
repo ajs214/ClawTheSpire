@@ -18,6 +18,9 @@ def _match_move_index(enemy_id: str, intent_type: str | None,
 
     Returns the index into the move table that best matches the current
     intent, or None if no match is found.
+
+    Fix 8: Includes fuzzy matching with tolerance for damage variations
+    due to Strength buffs or other enemy modifications.
     """
     table = ENEMY_MOVE_TABLES.get(enemy_id)
     if not table or intent_type is None:
@@ -25,7 +28,9 @@ def _match_move_index(enemy_id: str, intent_type: str | None,
 
     best_idx = None
     best_score = -1
+    fuzzy_match_used = False
 
+    # First pass: exact matching
     for i, move in enumerate(table):
         score = 0
         # Type must match
@@ -43,6 +48,56 @@ def _match_move_index(enemy_id: str, intent_type: str | None,
         if score > best_score:
             best_score = score
             best_idx = i
+
+    # If exact match found, return it
+    if best_idx is not None:
+        return best_idx
+
+    # Second pass: fuzzy matching with tolerance (±3 damage)
+    # This handles cases where enemies have Strength buffs or other modifications
+    damage_tolerance = 3
+    for i, move in enumerate(table):
+        score = 0
+        # Type must match
+        if move.get("type") != intent_type:
+            continue
+        score += 1
+
+        # For attacks, fuzzy match damage and hits
+        if intent_type == "Attack":
+            if intent_damage is not None:
+                move_damage = move.get("damage", 0)
+                if abs(intent_damage - move_damage) <= damage_tolerance:
+                    score += 2
+                    # Give extra credit for closer matches
+                    score += (damage_tolerance - abs(intent_damage - move_damage)) * 0.5
+            if intent_hits == move.get("hits", 1):
+                score += 1
+
+        if score > best_score:
+            best_score = score
+            best_idx = i
+            fuzzy_match_used = True
+
+    # If fuzzy match found, log it for debugging
+    if best_idx is not None and fuzzy_match_used:
+        import sys
+        move = table[best_idx]
+        print(
+            f"[enemy_predict] Fuzzy match for {enemy_id}: "
+            f"observed damage={intent_damage}, matched move damage={move.get('damage')}",
+            file=sys.stderr
+        )
+
+    # If still no match, fall back to the first move (default)
+    if best_idx is None and table:
+        best_idx = 0
+        import sys
+        print(
+            f"[enemy_predict] No fuzzy match for {enemy_id}; "
+            f"using default move (index 0)",
+            file=sys.stderr
+        )
 
     return best_idx
 

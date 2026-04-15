@@ -832,10 +832,20 @@ class Runner:
                 n_actions = len(_enum_actions(sim))
                 sims = scale_simulations(200, n_actions)
                 action, policy, root_value = self._mcts.search(
-                    sim, num_simulations=sims, temperature=0,
+                    sim, num_simulations=sims, temperature=0.15,
                 )
             except Exception:
                 break
+
+            # -- Force-play override: if MCTS wants END_TURN but there are
+            # affordable playable cards, override with 50% probability.
+            # This bridges the gap between training (80% override) and live play.
+            if action.action_type == "end_turn":
+                from .alphazero.self_play import _affordable_play_actions
+                import random
+                affordable = _affordable_play_actions(_enum_actions(sim), sim)
+                if affordable and random.random() < 0.50:
+                    action = random.choice(affordable)
 
             if action.action_type == "end_turn":
                 plan.append(("END_TURN", None, None))
@@ -869,6 +879,79 @@ class Runner:
                 break
 
         return plan
+
+    def _get_heuristic_fallback_action(self, sim_state, hand, enemies):
+        """Fix 7: When MCTS fails, play the safest card heuristically.
+
+        Priority:
+        1. If enemies are attacking, play highest-block card
+        2. If enemies have low HP, play highest-damage card
+        3. Otherwise play lowest-cost playable card
+        4. If nothing playable, return None (end turn)
+        """
+        from .combat_engine import can_play_card
+        from .actions import Action, END_TURN
+
+        if not sim_state or not hand:
+            return END_TURN
+
+        # Find all playable cards
+        playable_indices = []
+        for i, card in enumerate(sim_state.player.hand):
+            if can_play_card(sim_state, i):
+                playable_indices.append(i)
+
+        if not playable_indices:
+            return END_TURN
+
+        # Check if enemies are attacking
+        enemies_attacking = False
+        min_enemy_hp = float('inf')
+        for e in enemies:
+            if e.get("intent_type") == "Attack":
+                enemies_attacking = True
+            hp = e.get("current_hp", 0)
+            min_enemy_hp = min(min_enemy_hp, hp)
+
+        # Strategy 1: If enemies are attacking, play highest-block card
+        if enemies_attacking:
+            best_idx = None
+            best_block = -1
+            for i in playable_indices:
+                card = hand[i]
+                block_val = card.block or 0
+                if block_val > best_block:
+                    best_block = block_val
+                    best_idx = i
+            if best_idx is not None and best_block > 0:
+                return Action("play_card", card_idx=best_idx)
+
+        # Strategy 2: If enemies have low HP, play highest-damage card
+        if min_enemy_hp < float('inf') and min_enemy_hp <= 30:
+            best_idx = None
+            best_damage = -1
+            for i in playable_indices:
+                card = hand[i]
+                damage_val = card.damage or 0
+                if damage_val > best_damage:
+                    best_damage = damage_val
+                    best_idx = i
+            if best_idx is not None and best_damage > 0:
+                return Action("play_card", card_idx=best_idx)
+
+        # Strategy 3: Play lowest-cost playable card
+        best_idx = None
+        best_cost = float('inf')
+        for i in playable_indices:
+            card = hand[i]
+            if card.cost < best_cost:
+                best_cost = card.cost
+                best_idx = i
+
+        if best_idx is not None:
+            return Action("play_card", card_idx=best_idx)
+
+        return END_TURN
 
     def _handle_combat(self) -> None:
         gs = self.game_state
@@ -945,7 +1028,7 @@ class Runner:
                 _n_actions = len(_enum_actions(sim_state))
                 _sims = scale_simulations(200, _n_actions)
                 first_action, policy, root_value = self._mcts.search(
-                    sim_state, num_simulations=_sims, temperature=0,
+                    sim_state, num_simulations=_sims, temperature=0.15,
                 )
                 solve_ms = (time.perf_counter() - t0) * 1000
                 total_states += _sims
@@ -953,6 +1036,16 @@ class Runner:
                 best_score = max(policy) if policy else 0
                 if turn_root_value is None:
                     turn_root_value = root_value
+
+                # -- Force-play override: if MCTS wants END_TURN but there are
+                # affordable playable cards, override with 50% probability.
+                # This bridges the gap between training (80% override) and live play.
+                if first_action.action_type == "end_turn":
+                    from .alphazero.self_play import _affordable_play_actions
+                    import random
+                    affordable = _affordable_play_actions(_enum_actions(sim_state), sim_state)
+                    if affordable and random.random() < 0.50:
+                        first_action = random.choice(affordable)
 
                 # V11: Compare MCTS pick to planned sequence for diagnostics
                 if plan_idx < len(planned_sequence):
@@ -975,7 +1068,21 @@ class Runner:
                 self._log_action(f"[red]MCTS error: {e}[/red]")
                 import traceback
                 traceback.print_exc()
-                break
+
+                # Fix 7: Heuristic fallback when MCTS fails
+                # Enumerate playable cards and play the safest one
+                self._log_action("[yellow]Attempting heuristic fallback...[/yellow]")
+                fallback_action = self._get_heuristic_fallback_action(
+                    sim_state, hand, enemies
+                )
+                if fallback_action:
+                    first_action = fallback_action
+                    self._log_action(
+                        f"[yellow]Fallback: playing {fallback_action}[/yellow]"
+                    )
+                else:
+                    self._log_action("[yellow]No playable cards; ending turn[/yellow]")
+                    break
 
             # If MCTS says end turn, we're done
             if first_action.action_type == "end_turn":

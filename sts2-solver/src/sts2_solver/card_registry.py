@@ -12,6 +12,7 @@ Usage:
 from __future__ import annotations
 
 import math
+import random
 from typing import TYPE_CHECKING, Callable
 
 from .constants import CardType, TargetType
@@ -212,7 +213,8 @@ def _havoc(card: Card, card_db: CardDB | None) -> CardEffect:
             t = None
             if top_card.target in (TargetType.ANY_ENEMY, TargetType.RANDOM_ENEMY):
                 alive = [i for i, e in enumerate(state.enemies) if e.is_alive]
-                t = alive[0] if alive else None
+                # FIXED: Use random.choice instead of deterministic alive[0]
+                t = random.choice(alive) if alive else None
             card_effect(state, t)
             state.player.exhaust_pile.append(top_card)
     return effect
@@ -231,7 +233,8 @@ def _cascade(card: Card, card_db: CardDB | None) -> CardEffect:
             t = None
             if top_card.target in (TargetType.ANY_ENEMY, TargetType.RANDOM_ENEMY):
                 alive = [i for i, e in enumerate(state.enemies) if e.is_alive]
-                t = alive[0] if alive else None
+                # FIXED: Use random.choice instead of deterministic alive[0]
+                t = random.choice(alive) if alive else None
             card_effect(state, t)
             state.player.discard_pile.append(top_card)
     return effect
@@ -241,10 +244,18 @@ def _cascade(card: Card, card_db: CardDB | None) -> CardEffect:
 def _infernal_blade(card: Card, card_db: CardDB | None) -> CardEffect:
     """Add a random Attack to hand, free this turn. Exhaust."""
     def effect(state: CombatState, target_idx: int | None = None) -> None:
-        # In the sim, we can't easily generate a truly random attack.
-        # Stub: this is a no-op for sim search purposes.
-        # The solver will treat this conservatively.
-        pass
+        # Create a generic attack approximation: Pummel-like 8-damage attack
+        # This represents a random attack that costs 0 this turn.
+        # FIXED: Added approximation of random attack generation for solver.
+        attack_card = Card(
+            id="INFERNAL_BLADE_ATTACK",
+            name="Infernal Blade Attack",
+            cost=0,
+            card_type=CardType.ATTACK,
+            target=TargetType.ANY_ENEMY,
+            damage=8,
+        )
+        add_card_to_hand(state, attack_card)
     return effect
 
 
@@ -520,9 +531,9 @@ def _burst(card: Card, card_db: CardDB | None) -> CardEffect:
     count = 1 if not card.upgraded else 2
 
     def effect(state: CombatState, target_idx: int | None = None) -> None:
-        # Track as a power — the combat engine would need to handle double-play
-        # For now, approximate as energy gain (playing a skill twice ~= 1 free energy)
-        apply_power_to_player(state, "Burst", count)
+        # FIXED: Set burst_count flag for double-play. Combat engine will check
+        # this when playing Skills and apply the card effect twice.
+        state.player.burst_count += count
     return effect
 
 
@@ -605,12 +616,12 @@ def _finisher(card: Card, card_db: CardDB | None) -> CardEffect:
 def _bullet_time(card: Card, card_db: CardDB | None) -> CardEffect:
     """X-cost: All cards in hand are free to play this turn. No more draws."""
     def effect(state: CombatState, target_idx: int | None = None) -> None:
-        # Make all cards in hand cost 0 by giving enough energy
-        # (approximation: the real effect modifies card costs)
+        # FIXED: Set flags to make cards free and block drawing
+        state.player.all_cards_free = True
+        state.player.no_draw_this_turn = True
+        # Refund the X cost and add energy since all cards are now free
         x = state.last_x_cost
-        state.player.energy += x  # Refund the X cost since cards are free
-        # In practice, this means the player has unlimited plays this turn
-        # The solver will handle the actual card plays
+        state.player.energy += x
     return effect
 
 
@@ -657,7 +668,8 @@ def _bouncing_flask(card: Card, card_db: CardDB | None) -> CardEffect:
         alive = [i for i, e in enumerate(state.enemies) if e.is_alive]
         if alive:
             for _ in range(hits):
-                t = alive[0]  # Deterministic for solver
+                # FIXED: Use random.choice instead of deterministic alive[0]
+                t = random.choice(alive)
                 apply_power_to_enemy(state, t, "Poison", poison)
     return effect
 
@@ -683,10 +695,9 @@ def _memento_mori(card: Card, card_db: CardDB | None) -> CardEffect:
 
     def effect(state: CombatState, target_idx: int | None = None) -> None:
         if target_idx is not None:
-            # Approximate discards this turn from discard pile growth
-            # This is imprecise but functional
-            total = calc_base + extra_per * 0  # TODO: track discards_this_turn
-            deal_damage(state, target_idx, max(calc_base, total))
+            # FIXED: Now uses actual discards_this_turn counter
+            total = calc_base + extra_per * state.discards_this_turn
+            deal_damage(state, target_idx, total)
     return effect
 
 
@@ -713,7 +724,8 @@ def _ricochet(card: Card, card_db: CardDB | None) -> CardEffect:
         alive = [i for i, e in enumerate(state.enemies) if e.is_alive]
         if alive:
             for _ in range(hits):
-                t = alive[0]  # Deterministic for solver
+                # FIXED: Use random.choice instead of deterministic alive[0]
+                t = random.choice(alive)
                 deal_damage(state, t, dmg, 1)
     return effect
 

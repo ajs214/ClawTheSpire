@@ -582,9 +582,10 @@ def _parse_powers(powers_raw: list[dict]) -> dict[str, int]:
 def _card_from_runtime(raw: dict, card_db: CardDB) -> Card:
     """Build a Card from runtime combat hand data.
 
-    Prefers the card_db definition but uses runtime dynamic_values
-    for the most accurate current values (accounting for relics, powers, etc.).
-    Runtime values override base values for damage/block calculations.
+    Uses the card_db definition for damage/block (base, un-modified values).
+    The simulator will apply power modifiers (Strength, Dexterity, Weak, etc.)
+    during MCTS search, so we pass BASE values here to avoid double-application
+    of power modifiers (the game's runtime values already have them applied).
     """
     card_id = raw.get("card_id", "")
     upgraded = raw.get("upgraded", False)
@@ -593,35 +594,33 @@ def _card_from_runtime(raw: dict, card_db: CardDB) -> Card:
     card = card_db.get(card_id, upgraded=upgraded)
 
     if card is not None:
-        # Override with runtime dynamic values if present
-        dynamic = {dv["name"]: dv["base_value"] for dv in raw.get("dynamic_values", [])}
-        damage = dynamic.get("Damage", card.damage)
-        block = dynamic.get("Block", card.block)
+        # Use the card_db's base damage/block values (not power-modified).
+        # The simulator will apply power modifiers during MCTS.
+        # Only override cost with runtime cost (can be modified by Liquid Memories, etc.)
+        return Card(
+            id=card.id,
+            name=card.name,
+            cost=raw.get("energy_cost", card.cost),
+            card_type=card.card_type,
+            target=card.target,
+            upgraded=upgraded,
+            damage=card.damage,
+            block=card.block,
+            hit_count=card.hit_count,
+            powers_applied=card.powers_applied,
+            cards_draw=card.cards_draw,
+            energy_gain=card.energy_gain,
+            hp_loss=card.hp_loss,
+            keywords=card.keywords,
+            tags=card.tags,
+            spawns_cards=card.spawns_cards,
+            is_x_cost=card.is_x_cost,
+        )
 
-        # Return a copy with runtime values if they differ
-        if damage != card.damage or block != card.block:
-            return Card(
-                id=card.id,
-                name=card.name,
-                cost=raw.get("energy_cost", card.cost),
-                card_type=card.card_type,
-                target=card.target,
-                upgraded=upgraded,
-                damage=damage,
-                block=block,
-                hit_count=card.hit_count,
-                powers_applied=card.powers_applied,
-                cards_draw=card.cards_draw,
-                energy_gain=card.energy_gain,
-                hp_loss=card.hp_loss,
-                keywords=card.keywords,
-                tags=card.tags,
-                spawns_cards=card.spawns_cards,
-                is_x_cost=card.is_x_cost,
-            )
-        return card
-
-    # Card not in DB - build a minimal Card from runtime data
+    # Card not in DB - build a minimal Card from runtime data.
+    # NOTE: For unknown cards, we must use runtime values, which may already
+    # include power modifications. The simulator will apply them again, potentially
+    # causing double-application. This should be rare (only for mod cards).
     from .constants import CardType, TargetType
 
     dynamic = {dv["name"]: dv["base_value"] for dv in raw.get("dynamic_values", [])}

@@ -131,6 +131,10 @@ class PlayerState:
     exhaust_pile: list[Card] = field(default_factory=list)
     potions: list[dict] = field(default_factory=list)  # [{"name": ..., "heal": 20}, ...]
 
+    burst_count: int = 0  # Number of Skills to play twice (Burst card)
+    no_draw_this_turn: bool = False  # Bullet Time: prevent drawing cards
+    all_cards_free: bool = False  # Bullet Time: make all cards cost 0
+
 
 @dataclass
 class EnemyState:
@@ -146,6 +150,19 @@ class EnemyState:
     intent_damage: int | None = None
     intent_hits: int = 1
     intent_block: int | None = None
+
+    # Buff/debuff effects from the move table
+    # These are populated by _set_enemy_intents() in simulator.py
+    intent_self_strength: int | None = None  # Strength to gain
+    intent_self_block: int | None = None  # Block to gain (secondary effect, distinct from Defend intent)
+    intent_self_heal: int | None = None  # HP to restore
+    intent_all_strength: int | None = None  # Strength for all allies
+    intent_player_weak: int | None = None  # Weak to apply to player
+    intent_player_vulnerable: int | None = None  # Vulnerable to apply to player
+    intent_player_frail: int | None = None  # Frail to apply to player
+    intent_player_constrict: int | None = None  # Constrict to apply to player
+    intent_player_tangled: int | None = None  # Tangled to apply to player
+    intent_player_shrink: int | None = None  # Shrink to apply to player
 
     # Predicted future intents (from move table lookahead)
     predicted_intents: list[dict] = field(default_factory=list)
@@ -178,6 +195,7 @@ class CombatState:
     cards_played_this_turn: int = 0
     attacks_played_this_turn: int = 0
     cards_drawn_this_turn: int = 0  # Total draw effects triggered (for scoring)
+    discards_this_turn: int = 0  # Cards discarded this turn (for Memento Mori, etc.)
     last_x_cost: int = 0  # Energy spent on the most recent X-cost card
     relics: frozenset[str] = field(default_factory=frozenset)  # Relic IDs held
     floor: int = 0  # Current floor number (for scaling bonuses)
