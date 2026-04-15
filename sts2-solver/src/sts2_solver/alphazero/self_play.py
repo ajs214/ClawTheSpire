@@ -318,7 +318,7 @@ def play_one_game(
     encounter_id: str | None = None,
     deck: list[Card] | None = None,
     max_turns: int = 30,
-    mcts_simulations: int = 50,
+    mcts_simulations: int = 100,
     temperature: float = 1.0,
     rng: random.Random | None = None,
 ) -> tuple[list[TrainingSample], str, int, str]:
@@ -658,8 +658,8 @@ def _read_progress(path: Path) -> dict:
 
 def train_worker(
     num_generations: int = 100,
-    games_per_generation: int = 10,
-    mcts_simulations: int = 50,
+    games_per_generation: int = 7,
+    mcts_simulations: int = 100,
     batch_size: int = 64,
     train_epochs: int = 3,
     lr: float = 1e-3,
@@ -757,7 +757,9 @@ def train_worker(
     boss_log_path.parent.mkdir(parents=True, exist_ok=True)
     print(f"Boss-fight log: {boss_log_path}", flush=True)
 
-    print(f"AlphaZero training (full runs): {num_generations} generations, {games_per_generation} runs/gen, {mcts_simulations} sims", flush=True)
+    sim_early = int(mcts_simulations * 0.4)
+    sim_late = int(mcts_simulations * 1.8)
+    print(f"AlphaZero training (full runs): {num_generations} generations, {games_per_generation} runs/gen, {mcts_simulations} base sims ({sim_early}→{sim_late} progressive)", flush=True)
     print(f"Checkpoints: {save_path}", flush=True)
     print(f"Progress: {progress_path}", flush=True)
 
@@ -773,10 +775,12 @@ def train_worker(
             game_temp = 0.2 + 0.8 * temperature * (1 + math.cos(math.pi * progress)) / 2
 
             # Progressive sim scaling: ramp up sims as training progresses.
-            # Early gens (network is random): base sims are sufficient.
-            # Late gens (network is trained): deeper search finds better plays.
-            # Scales from 60% → 140% of base sims over training.
-            sim_scale = 0.6 + 0.8 * progress
+            # Early gens (network is random): fewer sims are fine (saves compute).
+            # Late gens (network is trained): deeper search finds better plays
+            # and produces higher-quality policy/value targets.
+            # Scales from 40% → 180% of base sims over training.
+            # With base=100: early=40 sims, mid=110 sims, late=180 sims.
+            sim_scale = 0.4 + 1.4 * progress
             gen_sims = int(mcts_simulations * sim_scale)
 
             result = play_full_run(
@@ -1075,8 +1079,8 @@ if __name__ == "__main__":
     # Train command
     train_parser = subparsers.add_parser("train", help="Run headless training worker")
     train_parser.add_argument("--generations", type=int, default=100)
-    train_parser.add_argument("--games-per-gen", type=int, default=10)
-    train_parser.add_argument("--sims", type=int, default=50)
+    train_parser.add_argument("--games-per-gen", type=int, default=7)
+    train_parser.add_argument("--sims", type=int, default=100)
     train_parser.add_argument("--batch-size", type=int, default=64)
     train_parser.add_argument("--epochs", type=int, default=3)
     train_parser.add_argument("--lr", type=float, default=1e-3)
