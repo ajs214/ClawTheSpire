@@ -661,7 +661,7 @@ def score_card(
     deck: list[Card],
     floor: int,
     hp: int = 50,
-    max_hp: int = 80,
+    max_hp: int = 70,
     relics: frozenset[str] | set[str] | None = None,
 ) -> float:
     """Score a card for the pick decision. Higher = better to pick.
@@ -767,7 +767,7 @@ def pick_card(
     deck: list[Card],
     floor: int = 1,
     hp: int = 50,
-    max_hp: int = 80,
+    max_hp: int = 70,
     relics: frozenset[str] | set[str] | None = None,
 ) -> Card | None:
     """Pick the best card from offered rewards, or None to skip.

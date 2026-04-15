@@ -1,35 +1,82 @@
-"""Config Profile B — "Challenger: Survive & Scale"
+"""Config Profile B — "Deterministic Baseline" (rule-based routing for non-combat).
 
-Hypothesis: The champion (A) dies to bosses and elites because it
-undervalues defensive cards and doesn't build a coherent enough deck.
-Silent needs to survive Act 1 to have any shot at winning.
+Experiment design (2026-04-11):
+  Profile B is the deterministic baseline in the 2026-04-11 A/B experiment.
+  It sets USE_NETWORK_ROUTING = False, so every non-combat screen is
+  driven by the rule-based deterministic_advisor with no network attempt.
+  Combat still uses MCTS (the network's combat head is not part of the
+  experiment — we know it beats any deterministic combat alternative).
 
-Key changes vs. champion:
-  EVALUATOR:
-    - Higher kill bonus (50 → 62) and damage weight (3.0 → 3.5) → finish enemies
-    - Higher block weight (+15%, was +33% — pulled back to avoid over-blocking)
-    - Higher lethal penalty (500 → 700) → avoid greed when close to death
-    - Higher Vulnerable value (3.5 → 4.5) → applying Vulnerable is offensive
-    - Higher Weak value (+40%) → Neutralize and Leg Sweep are Silent's edge
-    - Higher poison discount (1.0 → 1.3) → lean into Silent's unique scaling
-    - Higher dexterity value (5 → 8) → Footwork is Silent's best defense
-    - Moderate wasted block penalty (1.5 → 1.2) → some caution but not wasteful
-  CARD TIERS:
-    - Promoted Leg Sweep and Dodge and Roll to S-tier → survival cards
-    - Promoted Backflip to A-tier → draw + block is exactly what Silent needs
-    - Promoted Catalyst to A-tier → enables poison to actually kill bosses
-    - Demoted Accuracy/Infinite Blades from S to A → Shivs are slow vs bosses
-    - Added more cards to avoid tier → keep the deck lean and focused
-  STRATEGY:
-    - More conservative rest thresholds → heal more, upgrade less
-    - Lower deck lean target (12 → 10) → thin deck draws key cards faster
-    - Higher HP threshold for elites → don't fight elites at 60% HP
+  Profile A (config_a.py) is the "Self-Play" profile that sets
+  USE_NETWORK_ROUTING = True and leans on the network's option head
+  first for map/rest/shop/Neow, falling back to deterministic only when
+  the network returns None.
 
-Run: bash play.sh --profile b
-Compare results against profile A using the encounter report.
+  Both profiles carry IDENTICAL scalar weights — EVALUATOR and STRATEGY
+  values are midpoints between the old Champion and Challenger tunings.
+  The ONLY experimental variable is routing, so any win-rate difference
+  should cleanly attribute to "network option head" vs "deterministic
+  advisor" for the three screens where routing differs.
+
+  Universal network routes (both profiles, NOT gated by USE_NETWORK_ROUTING):
+    - Card reward: network option head picks take-card-N / skip.
+      Falls back to decide_card_reward (organic picker) on network failure.
+    - Act 1+ events: network option head picks among unlocked event
+      options. Falls back to decide_event_default (sim scorer) on
+      network failure.
+
+  Residual value differences:
+    - CARD_TIERS lists still differ between profiles. Profile B keeps
+      the "Survive & Scale" tier list (kept here) to preserve its
+      elite/boss survival lessons as a fallback signal if the network
+      card-reward handler ever bails. Profile A keeps the Champion
+      tier list. In normal operation both profiles defer to the
+      network card-reward handler, so the tier list is a fallback.
+
+Run: bash play.sh --profile b   (or set STS2_CONFIG_PROFILE=b)
+Compare: bash play.sh --profile a
+
+===========================================================================
+DECISION ROUTING — who actually drives each screen (verified 2026-04-11)
+===========================================================================
+
+| Screen          | Training (full_run)        | Live play (runner, A=Self-Play / B=Deterministic)     | Learn signal? |
+|-----------------|----------------------------|-------------------------------------------------------|---------------|
+| Combat          | solve_turn (heuristic DFS) | AlphaZero MCTS (both profiles)                        | YES (MCTS)    |
+| Map node        | network.pick_best_option   | A: network.pick_best_option → deterministic fallback  | YES (value)   |
+|                 |                            | B: decide_map (deterministic_advisor)                 |               |
+| Rest site       | network.pick_best_option   | A: network.pick_best_option → deterministic fallback  | YES (value)   |
+|                 |                            | B: decide_rest (deterministic_advisor)                |               |
+| Shop            | network.pick_best_option   | A: network.pick_best_option → deterministic fallback  | YES (value)   |
+|                 |                            | B: decide_shop (deterministic_advisor)                |               |
+| Card reward     | network.pick_best_option   | network.pick_best_option → organic_picker fallback    | YES (value)   |
+|                 |   (OPTION_CARD_REWARD/SKIP)|   (BOTH profiles — not gated by USE_NETWORK_ROUTING)  |               |
+| Event (Act 1+)  | network.pick_best_option   | network.pick_best_option → sim scorer fallback        | YES (value)   |
+|                 |   (OPTION_EVENT_CHOICE)    |   (BOTH profiles — not gated by USE_NETWORK_ROUTING)  |               |
+| Event (Neow)    | network option head        | A: _az_decide_neow → decide_neow fallback             | YES (value)   |
+|                 |   + decide_neow fallback   | B: decide_neow (keyword rule)                         |               |
+| Boss relic      | _pick_best_relic (rule)    | decide_boss_relic (rule, both profiles)               | NO — rule     |
+| Elite relic     | _pick_best_relic (rule)    | deterministic_advisor (rule, both profiles)           | NO — rule     |
+| Treasure relic  | _pick_best_relic (rule)    | deterministic_advisor (rule, both profiles)           | NO — rule     |
+| Neow bonus      | not modeled                | runner auto-handler (both profiles)                   | NO — absent   |
+| Capstone/bundle | not modeled                | runner auto-handler (both profiles)                   | NO — absent   |
+
+See IMPROVEMENTS.md at the repo root for the full gap list and fixes.
+===========================================================================
 """
 
 from __future__ import annotations
+
+
+# ---------------------------------------------------------------------------
+# Routing flag — the core A/B experimental variable.
+# ---------------------------------------------------------------------------
+# False → live play skips the network entirely for non-combat screens and
+#         goes straight to the deterministic advisor. This is the
+#         "Deterministic Baseline" profile. Combat is still MCTS.
+# Profile A (config_a.py) sets this to True (Self-Play).
+# Consumed by runner.py's non-combat screen dispatcher.
+USE_NETWORK_ROUTING: bool = False
 
 
 # Enemies that respawn or split on death (e.g. medium slimes → 2 small slimes).
@@ -45,86 +92,64 @@ RESPAWNING_ENEMIES: frozenset[str] = frozenset({
 # ---------------------------------------------------------------------------
 
 EVALUATOR = {
-    # ── Damage scoring ──
-    # Raised to counterbalance the higher block weights — removing an
-    # attacker permanently is better than blocking its damage every turn.
-    "kill_bonus": 62.0,              # ⬆ was 50 — finishing enemies removes threats forever
-    "buff_kill_bonus": 95.0,         # ⬆ was 85 — Buff enemies snowball; kill ASAP
-    "strength_kill_bonus_per": 12.0, # ⬆ was 10 — high-Str enemies are urgent kills
-    "damage_alive_weight": 3.5,      # ⬆ was 3.0 — each HP of damage is worth more
-    "damage_dead_weight": 0.2,       # (unchanged from A)
-    "kill_proximity_weight": 12.0,   # ⬆ was 10 — reward getting enemies close to dead
+    # ── A/B midpoints (2026-04-11) ──
+    # All scalars below are midpoints between the old Champion (A) and
+    # Challenger "Survive & Scale" (B) tunings. config_a.py and
+    # config_b.py carry IDENTICAL values — the A/B experiment is now
+    # about ROUTING (USE_NETWORK_ROUTING flag), not weights.
 
-    # ── Enemy threat prioritisation ──
-    # Slightly higher threat awareness — bot should respect dangerous enemies more
-    "threat_buff_intent": 0.8,       # ⬆ was 0.6 — Buff enemies snowball; kill them faster
-    "threat_strength_per": 0.10,     # ⬆ was 0.08 — high-Strength enemies are lethal
-    "threat_attack_damage_per": 0.015, # ⬆ was 0.01 — big hitters are more dangerous
-    "threat_max_hp_per": 0.001,      # (unchanged from A)
-    "threat_status_intent": 0.3,     # (unchanged from A)
-    "threat_debuff_intent": 0.2,     # (unchanged from A)
+    # Damage scoring
+    "kill_bonus": 56.0,              # midpoint of 50 / 62
+    "buff_kill_bonus": 90.0,         # midpoint of 85 / 95
+    "strength_kill_bonus_per": 11.0, # midpoint of 10 / 12
+    "damage_alive_weight": 3.25,     # midpoint of 3.0 / 3.5
+    "damage_dead_weight": 0.2,       # unchanged
+    "kill_proximity_weight": 11.0,   # midpoint of 10 / 12
 
-    # ── Block scoring ──
-    # HYPOTHESIS: Champion undervalues blocking, leading to death vs bosses.
-    # Silent has low HP (70 max) and needs to survive long fights.
-    # Raising block weight by ~33% should make the solver play defensively
-    # when threatened instead of always going face.
-    "effective_block_weight": 2.3,   # ⬆ was 2.0 (was 2.7 — too defensive, pulled back)
-    "wasted_block_penalty": 1.2,     # ⬇ was 1.5 (was 0.8 — too lenient on over-block;
-                                     #   1.2 still forgives some caution but punishes
-                                     #   wasting energy on block when you should attack)
-    "idle_block_weight": 0.15,       # ⬆ was 0.1 — proactive block has some value
+    # Enemy threat prioritisation
+    "threat_buff_intent": 0.7,       # midpoint of 0.6 / 0.8
+    "threat_strength_per": 0.09,     # midpoint of 0.08 / 0.10
+    "threat_attack_damage_per": 0.0125, # midpoint of 0.01 / 0.015
+    "threat_max_hp_per": 0.001,      # unchanged
+    "threat_status_intent": 0.3,     # unchanged
+    "threat_debuff_intent": 0.2,     # unchanged
 
-    # HP-aware block scaling — raise the threshold so bot blocks earlier
-    "hp_block_threshold": 70,        # ⬆ was 60 — Silent starts at 70 HP, so this
-                                     #   activates from turn 1 of every fight
-    "hp_block_scale": 0.06,          # ⬆ was 0.05 — steeper curve at low HP
+    # Block scoring
+    "effective_block_weight": 2.15,  # midpoint of 2.0 / 2.3
+    "wasted_block_penalty": 1.35,    # midpoint of 1.5 / 1.2
+    "idle_block_weight": 0.125,      # midpoint of 0.10 / 0.15
 
-    # ── Unblocked damage ──
-    # Higher lethal penalty should prevent greedy plays that leave us dead
-    "unblocked_damage_penalty": 1.4, # ⬆ was 1.2 — take unblocked damage more seriously
-    "lethal_damage_penalty": 700.0,  # ⬆ was 500 — dying is never worth it; this makes
-                                     #   the solver block even when killing looks tempting
+    # HP-aware block scaling
+    "hp_block_threshold": 65,        # midpoint of 60 / 70
+    "hp_block_scale": 0.055,         # midpoint of 0.05 / 0.06
+
+    # Unblocked damage
+    "unblocked_damage_penalty": 1.3, # midpoint of 1.2 / 1.4
+    "lethal_damage_penalty": 600.0,  # midpoint of 500 / 700
 
     # Self-damage
-    "self_damage_weight": 0.8,       # (unchanged from A)
+    "self_damage_weight": 0.8,       # unchanged
 
-    # ── Debuffs on enemies ──
-    # Weak is Silent's bread and butter (Neutralize, Leg Sweep, Crippling Cloud).
-    # Raising Weak value makes the solver use these defensively.
-    "vulnerable_value": 4.5,         # ⬆ was 3.5 — Vulnerable makes enemies take 50%
-                                     #   more damage; applying it IS an offensive play
-    "weak_vs_attack_value": 3.5,     # ⬆ was 2.5 — Weak reduces incoming damage by 25%,
-                                     #   which compounds over multi-turn boss fights
-    "weak_vs_other_value": 1.2,      # ⬆ was 1.0 — Weak still useful even on non-attackers
+    # Debuffs on enemies
+    "vulnerable_value": 4.0,         # midpoint of 3.5 / 4.5
+    "weak_vs_attack_value": 3.0,     # midpoint of 2.5 / 3.5
+    "weak_vs_other_value": 1.1,      # midpoint of 1.0 / 1.2
 
-    # ── Player buffs ──
-    # Dexterity (from Footwork) is Silent's primary defensive scaling.
-    # Champion severely undervalues it — 5 vs Strength's 15.
-    "strength_gained_value": 15.0,   # (unchanged from A)
-    "dexterity_gained_value": 8.0,   # ⬆ was 5.0 — Footwork is core; each point of
-                                     #   Dexterity adds block to EVERY block card played
+    # Player buffs
+    "strength_gained_value": 15.0,   # unchanged
+    "dexterity_gained_value": 6.5,   # midpoint of 5.0 / 8.0
 
-    # ── Poison scoring ──
-    # Poison is Silent's way to kill bosses — high HP enemies where raw damage
-    # falls short. Triangle-sum means poison stacks compound: 10 stacks deals
-    # 55 damage over time. Raising this makes the solver invest in poison
-    # plays instead of always choosing direct damage.
-    "poison_future_discount": 1.3,   # ⬆ was 1.0 — lean into poison as boss-killer
+    # Poison scoring (Silent)
+    "poison_future_discount": 1.15,  # midpoint of 1.0 / 1.3
 
     # Energy efficiency
-    "unspent_energy_penalty": 12.0,  # (unchanged from A)
+    "unspent_energy_penalty": 12.0,  # unchanged
 
-    # ── Card draw ──
-    # Slightly higher draw value — Silent needs to find her key cards
-    "card_draw_value": 8.0,          # ⬆ was 7.0 — draw cards like Acrobatics/Backflip
-                                     #   are more valuable in a lean deck
+    # Card draw
+    "card_draw_value": 7.5,          # midpoint of 7.0 / 8.0
 
-    # ── Enemy simulation ──
-    # Slightly higher weight on looking ahead — helps with boss fights
-    # where surviving THIS turn matters for the turns after
-    "enemy_sim_discount": 0.35,      # ⬆ was 0.3 — give slightly more weight to
-                                     #   post-enemy-turn consequences
+    # 2-ply enemy simulation
+    "enemy_sim_discount": 0.325,     # midpoint of 0.30 / 0.35
 }
 
 
@@ -478,25 +503,25 @@ CHARACTER_CONFIG: dict[str, dict] = {
 # ---------------------------------------------------------------------------
 
 STRATEGY = {
+    # ── A/B midpoints (2026-04-11) ──
+    # All scalars below are midpoints between the old Champion (A) and
+    # Challenger "Survive & Scale" (B) tunings. config_a.py and
+    # config_b.py carry IDENTICAL STRATEGY values — the A/B experiment
+    # is about ROUTING (USE_NETWORK_ROUTING), not weights.
+
     # ── Deck size ──
-    # HYPOTHESIS: Leaner deck = draw key cards more often = more consistent.
-    # Champion's 12-card target lets junk accumulate. Going to 10 means we
-    # skip more mediocre card rewards and remove more at shops.
-    "deck_lean_target": 10,          # ⬇ was 12 — thinner deck draws Footwork/Leg Sweep faster
-    "deck_warn_threshold": 13,       # ⬇ was 15 — warn earlier about bloated deck
+    "deck_lean_target": 11,          # midpoint of 12 / 10
+    "deck_warn_threshold": 14,       # midpoint of 15 / 13
 
     # ── HP thresholds for map decisions ──
-    # More conservative pathing — avoid fights when hurt, skip elites unless healthy.
-    # The encounter report shows 0% elite/boss win rate, so preserving HP is critical.
-    "hp_critical_pct": 0.40,         # ⬆ was 0.35 — avoid combat sooner
-    "hp_low_pct": 0.60,              # ⬆ was 0.55 — avoid elites sooner
-    "hp_elite_min_pct": 0.80,        # ⬆ was 0.75 — only fight elites when near full HP
+    "hp_critical_pct": 0.375,        # midpoint of 0.35 / 0.40
+    "hp_low_pct": 0.575,             # midpoint of 0.55 / 0.60
+    "hp_elite_min_pct": 0.775,       # midpoint of 0.75 / 0.80
 
     # ── Rest site thresholds ──
-    # More healing, less upgrading. Dead bots don't benefit from upgrades.
-    "rest_heal_threshold": 0.50,     # ⬆ was 0.40 — heal when below 50% (was 40%)
-    "rest_upgrade_threshold": 0.80,  # ⬆ was 0.70 — only upgrade when at 80%+ HP
-    "boss_rest_threshold": 0.80,     # ⬆ was 0.70 — always heal before boss unless nearly full
+    "rest_heal_threshold": 0.45,     # midpoint of 0.40 / 0.50
+    "rest_upgrade_threshold": 0.75,  # midpoint of 0.70 / 0.80
+    "boss_rest_threshold": 0.75,     # midpoint of 0.70 / 0.80
 
     # ── Shop behavior ──
     "auto_remove_at_shop": True,     # (unchanged) — removing Strikes is always good

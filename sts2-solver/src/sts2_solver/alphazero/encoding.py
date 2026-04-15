@@ -114,13 +114,31 @@ def build_vocabs_from_card_db(card_db) -> Vocabs:
     relics = Vocabulary()
     relics.add("<PAD>")
     relics.add("<UNK>")
-    # Will be populated from relic data; for now add observed ones
-    for r in [
-        "Ring of the Snake", "Pomander", "Precise Scissors",
-        "New Leaf", "Arcane Scroll", "Golden Pearl", "Cloak Clasp",
-        "Eternal Feather", "Stone Humidifier", "Bone Tea", "Game Piece",
-    ]:
-        relics.add(r)
+    # Populate from relics.json so the option head can distinguish
+    # relic identities in shop/elite/treasure screens. Previously
+    # only 11 hardcoded relics were in the vocab — everything else
+    # collapsed to UNK (docs/shop_parity.md #18, IMPROVEMENTS #9).
+    try:
+        from ..data_loader import DEFAULT_DATA_DIR
+        _relic_path = DEFAULT_DATA_DIR / "relics.json"
+        if _relic_path.exists():
+            with open(_relic_path, encoding="utf-8") as _rf:
+                _relic_data = json.load(_rf)
+            if isinstance(_relic_data, dict):
+                _relic_data = _relic_data.get("relics", list(_relic_data.values()))
+            for _r in _relic_data:
+                if isinstance(_r, dict):
+                    _name = _r.get("name") or _r.get("id") or ""
+                    if _name:
+                        relics.add(_name)
+    except Exception:
+        # Fallback: add the original small set so tests still work
+        for r in [
+            "Ring of the Snake", "Pomander", "Precise Scissors",
+            "New Leaf", "Arcane Scroll", "Golden Pearl", "Cloak Clasp",
+            "Eternal Feather", "Stone Humidifier", "Bone Tea", "Game Piece",
+        ]:
+            relics.add(r)
 
     intent_types = Vocabulary()
     intent_types.add("<PAD>")
@@ -163,8 +181,13 @@ class EncoderConfig:
     potion_feature_dim: int = 6  # occupied(1) + type one-hot(5): heal/block/str/dmg/weak
 
     # Option evaluation
-    num_option_types: int = 16
+    num_option_types: int = 20  # bumped from 16 for OPTION_SHOP_BUY_RELIC (16) + headroom
     option_type_embed_dim: int = 16
+    # Event-choice embedding (V10): dedicated table for (event_id, option_idx)
+    # IDs, replacing the positional placeholder that abused card_embed.
+    # 256 slots covers 66 events × ~2.2 opts + 7 Neow blessings + headroom.
+    num_event_choices: int = 256
+    event_choice_embed_dim: int = 32  # match card_embed_dim so option head dims stay the same
 
     # Card stats vector: upgraded(1) + cost(1) + damage(1) + block(1) +
     # is_x_cost(1) + card_type_onehot(5) + target_type_onehot(5) +

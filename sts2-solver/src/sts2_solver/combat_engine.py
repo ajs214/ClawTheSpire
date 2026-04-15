@@ -47,6 +47,18 @@ def can_play_card(state: CombatState, card_idx: int) -> bool:
     # Velvet Choker: can only play 6 cards per turn
     if state.player.powers.get("Velvet Choker", 0) > 0 and state.cards_played_this_turn >= 6:
         return False
+    # --- Conditional play restrictions ---
+    # Grand Finale: can only be played if draw pile is empty
+    if card.id == "GRAND_FINALE" and len(state.player.draw_pile) > 0:
+        return False
+    # Clash: can only be played if every card in hand is an Attack
+    if card.id == "CLASH":
+        for c in state.player.hand:
+            if c.card_type != CardType.ATTACK:
+                return False
+    # Pact's End: can only be played if 3+ cards in exhaust pile
+    if card.id == "PACTS_END" and len(state.player.exhaust_pile) < 3:
+        return False
     return True
 
 

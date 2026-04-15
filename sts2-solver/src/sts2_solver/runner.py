@@ -802,6 +802,74 @@ class Runner:
 
         return None
 
+    def _plan_full_turn(self, game_state: dict) -> list[tuple[str, int | None, int | None]]:
+        """Plan a full turn's card sequence using internal MCTS simulation.
+
+        Runs MCTS on a copy of the game state to explore the full turn's card
+        sequencing without affecting the real game. Useful for understanding
+        what multi-card plays are worth executing.
+
+        Returns list of (card_name, card_hand_idx, target_idx) tuples.
+        The hand_idx is relative to the current hand. An end_turn entry
+        has card_name="END_TURN".
+        """
+        from .bridge import state_from_mcp
+        from .actions import enumerate_actions as _enum_actions
+        from copy import deepcopy
+
+        try:
+            sim_state = state_from_mcp(game_state, self.card_db,
+                                       move_indices=self._combat_move_indices)
+        except Exception:
+            return []
+
+        plan = []
+        sim = deepcopy(sim_state)
+        max_cards = 12
+
+        for step_idx in range(max_cards):
+            try:
+                n_actions = len(_enum_actions(sim))
+                sims = scale_simulations(200, n_actions)
+                action, policy, root_value = self._mcts.search(
+                    sim, num_simulations=sims, temperature=0,
+                )
+            except Exception:
+                break
+
+            if action.action_type == "end_turn":
+                plan.append(("END_TURN", None, None))
+                break
+
+            if action.action_type == "play_card":
+                if action.card_idx is not None and action.card_idx < len(sim.player.hand):
+                    card = sim.player.hand[action.card_idx]
+                    plan.append((card.name, action.card_idx, action.target_idx))
+
+                    # Simulate the card play internally to continue planning
+                    try:
+                        from .combat_engine import can_play_card, play_card, is_combat_over
+                        if can_play_card(sim, action.card_idx):
+                            play_card(sim, action.card_idx, action.target_idx, self.card_db)
+                        else:
+                            break
+                        if is_combat_over(sim):
+                            break
+                    except Exception:
+                        break
+                else:
+                    break
+            elif action.action_type == "use_potion":
+                # Record potion usage in the plan
+                pot_name = "POTION"
+                plan.append((pot_name, None, action.target_idx))
+                # Note: We don't simulate potions in the planning loop
+                # since they affect game state in ways the simulator may not model
+            else:
+                break
+
+        return plan
+
     def _handle_combat(self) -> None:
         gs = self.game_state
         combat = gs.get("combat") or {}
@@ -856,6 +924,16 @@ class Runner:
         turn_root_value: float | None = None  # first MCTS value of the turn
         max_cards = 12  # safety cap to prevent infinite loops
 
+        # V11: Plan full turn sequence for comparison and potential direct execution
+        planned_sequence = self._plan_full_turn(gs)
+        plan_idx = 0
+        plan_divergences = 0
+        if planned_sequence:
+            plan_str = " → ".join(
+                p[0] for p in planned_sequence[:5]
+            ) + ("..." if len(planned_sequence) > 5 else "")
+            self._log_action(f"  [dim]Turn plan: {plan_str}[/dim]")
+
         while len(cards_played) < max_cards:
             # Build combat state and run MCTS
             try:
@@ -875,6 +953,24 @@ class Runner:
                 best_score = max(policy) if policy else 0
                 if turn_root_value is None:
                     turn_root_value = root_value
+
+                # V11: Compare MCTS pick to planned sequence for diagnostics
+                if plan_idx < len(planned_sequence):
+                    pname, _, _ = planned_sequence[plan_idx]
+                    if first_action.action_type == "end_turn":
+                        actual_name = "END_TURN"
+                    elif first_action.action_type == "use_potion":
+                        actual_name = "POTION"
+                    else:
+                        actual_name = (
+                            hand[first_action.card_idx].name
+                            if first_action.card_idx is not None and first_action.card_idx < len(hand)
+                            else "?"
+                        )
+                    if actual_name != pname:
+                        plan_divergences += 1
+                    plan_idx += 1
+
             except Exception as e:
                 self._log_action(f"[red]MCTS error: {e}[/red]")
                 import traceback
@@ -961,13 +1057,36 @@ class Runner:
             # before sending the next action to reduce 409 rejections.
             mcp_action = action_to_mcp(first_action)
             try:
-                self._execute_with_retry(
+                result = self._execute_with_retry(
                     mcp_action["action"],
                     card_index=mcp_action.get("card_index"),
                     target_index=mcp_action.get("target_index"),
                 )
+                if not result:
+                    # Card was rejected (permanent 409 — e.g. Grand Finale
+                    # when draw pile isn't empty). Track it so MCTS doesn't
+                    # pick it again this turn, then re-solve from fresh state.
+                    rejected_card = label
+                    if not hasattr(self, "_rejected_cards_this_turn"):
+                        self._rejected_cards_this_turn = set()
+                    self._rejected_cards_this_turn.add(
+                        first_action.card_idx if first_action else -1
+                    )
+                    self._log_action(
+                        f"  [yellow]! {rejected_card} rejected by game — "
+                        f"re-solving without it[/yellow]"
+                    )
+                    # Pop the failed card from our played list so stats are accurate
+                    if cards_played and cards_played[-1] == logged_name:
+                        cards_played.pop()
+                    if targets_chosen:
+                        targets_chosen.pop()
+                    continue  # Re-enter the MCTS loop with fresh state
                 self._log_action(f"  [green]>[/green] {label}")
                 self.action_count += 1
+                # Clear rejected set on successful play (state has changed)
+                if hasattr(self, "_rejected_cards_this_turn"):
+                    self._rejected_cards_this_turn.clear()
             except Exception as e:
                 self._log_action(f"  [red]X {label}: {e}[/red]")
                 break
@@ -1032,6 +1151,14 @@ class Runner:
                 self.action_count += 1
             except Exception as e:
                 self._log_action(f"  [red]X End Turn: {e}[/red]")
+
+        # V11: Log plan divergence statistics
+        if planned_sequence and len(cards_played) > 0:
+            div_pct = int(100 * plan_divergences / len(cards_played)) if cards_played else 0
+            self._log_action(
+                f"  [dim]Plan divergences: {plan_divergences}/{plan_idx} "
+                f"({div_pct}%)[/dim]"
+            )
 
         # Log the full turn (pass pre-play state for combat snapshot)
         self.logger.log_combat_turn(
@@ -1606,10 +1733,27 @@ class Runner:
                         self._log_action(f"  [red]Failed: {e}[/red]")
                 return
 
-        # Try network-based decisions first, fall back to deterministic
-        _NETWORK_HANDLERS = {
+        # Try network-based decisions first, fall back to deterministic.
+        # USE_NETWORK_ROUTING is the A/B experimental flag:
+        #   Profile A ("Self-Play")         → True  → network first on map/rest/shop
+        #   Profile B ("Deterministic Base") → False → skip network on map/rest/shop
+        # Card-reward and event-choice are ALWAYS routed through the
+        # network regardless of profile — the learned policy for those
+        # two screens is strictly better than the deterministic tier
+        # lists, and training value targets were computed assuming the
+        # network makes these picks, so bypassing it in live play
+        # desyncs the two loops.
+        from .config import USE_NETWORK_ROUTING
+        _NETWORK_HANDLERS_AB = {
             "rest": self._az_decide_rest,
             "map": self._az_decide_map,
+        }
+        # V10: shop moves to always-on — the network now sees the same
+        # option set in training and live (relics, 6 cards, real event
+        # vocab). Deterministic decide_shop remains the fallback if the
+        # network returns None (error / empty options).
+        _NETWORK_HANDLERS_ALWAYS = {
+            "card_reward": self._az_decide_card_reward,
             "shop": self._az_decide_shop,
         }
         _DETERMINISTIC_HANDLERS = {
@@ -1620,14 +1764,25 @@ class Runner:
             "boss_relic": lambda: decide_boss_relic(gs, self.game_data),
         }
 
-        net_handler = _NETWORK_HANDLERS.get(screen_type)
-        if net_handler:
-            decision = net_handler(gs)
+        # Always-on network handlers (card reward).
+        always_handler = _NETWORK_HANDLERS_ALWAYS.get(screen_type)
+        if always_handler:
+            decision = always_handler(gs)
             if decision is not None:
                 self._execute_deterministic(
                     gs, decision, screen_type, actions, run,
                 )
                 return
+
+        if USE_NETWORK_ROUTING:
+            net_handler = _NETWORK_HANDLERS_AB.get(screen_type)
+            if net_handler:
+                decision = net_handler(gs)
+                if decision is not None:
+                    self._execute_deterministic(
+                        gs, decision, screen_type, actions, run,
+                    )
+                    return
 
         handler = _DETERMINISTIC_HANDLERS.get(screen_type)
         if handler:
@@ -1642,6 +1797,8 @@ class Runner:
         # keyword scorer. _az_decide_neow returns None on any error or
         # when no live option tag-matches a blessing, so the fall-through
         # behavior is identical to pre-network runs.
+        # V10: always-on — the network has real EVENT_CHOICE_VOCAB ids
+        # for Neow blessings (no longer positional placeholders).
         if screen_type == "event" and "choose_event_option" in actions:
             az_neow = self._az_decide_neow(gs)
             if az_neow is not None:
@@ -1657,12 +1814,33 @@ class Runner:
                 )
                 return
 
-            # Non-Neow events: reuse the simulator's event scorer so that
-            # live play makes the same decision the training loop assumed
-            # when it simulated this event. This replaces the old LLM
-            # fallthrough — which was hanging indefinitely when Ollama
-            # wasn't reachable — with deterministic logic that's both fast
-            # and aligned with training-time value targets.
+            # Non-Neow events: Tablet of Truth gets a hardcoded guard
+            # first, overriding both network and heuristic. The event's
+            # escalating HP cost chain and inconsistent Give Up
+            # exposure make it too dangerous for either learned or
+            # deterministic scorers to handle reliably — see
+            # _decide_tablet_of_truth for the policy.
+            tablet_decision = self._decide_tablet_of_truth(gs)
+            if tablet_decision is not None:
+                self._execute_deterministic(
+                    gs, tablet_decision, screen_type, actions, run,
+                )
+                return
+
+            # Otherwise, first try the network's option head (always
+            # on, not gated by USE_NETWORK_ROUTING, so both profiles
+            # use training output for event choice). If the network
+            # handler bails (unreadable screen, empty options, tensor
+            # failure), fall through to the deterministic sim scorer
+            # which stays aligned with training value targets because
+            # both call ``_evaluate_event_options``.
+            az_event = self._az_decide_event_choice(gs)
+            if az_event is not None:
+                self._execute_deterministic(
+                    gs, az_event, screen_type, actions, run,
+                )
+                return
+
             event_decision = decide_event_default(gs)
             if event_decision is not None:
                 self._execute_deterministic(
@@ -1963,14 +2141,218 @@ class Runner:
             self._log_action(f"  [dim]Network deck_select failed ({e}), falling back[/dim]")
             return None
 
+    def _az_decide_card_reward(self, gs: dict) -> "Decision | None":
+        """Use network option-head to take/skip a card reward.
+
+        Mirrors training's ``_network_pick_card``: build
+        ``[OPTION_CARD_REWARD]*N + [OPTION_CARD_SKIP]`` and let
+        ``pick_best_option`` choose. Returns a ``Decision`` that calls
+        ``choose_reward_card(idx)`` or ``skip_reward_cards``.
+
+        Intentionally NOT gated by ``USE_NETWORK_ROUTING`` — card
+        rewards are always routed through the network in live play so
+        both A and B profiles use the learned card-value policy. The
+        old deterministic/tier-list path remains available as a
+        fallback when the network handler returns None (bad reward
+        payload, no vocabs, etc.).
+        """
+        import torch
+        from .bridge import card_reward_options_from_mcp
+        from .deterministic_advisor import Decision
+
+        try:
+            _, hidden, _hp, _max_hp, _gold, _floor, _deck = (
+                self._az_run_state_tensors(gs))
+            network = self._mcts.network
+
+            parsed = card_reward_options_from_mcp(gs, self._mcts_vocabs)
+            opt_types = parsed["opt_types"]
+            opt_cards = parsed["opt_cards"]
+            reward_actions = parsed["actions"]
+
+            if not opt_types:
+                return None
+
+            with torch.no_grad():
+                best_idx, scores = network.pick_best_option(
+                    hidden, opt_types, opt_cards)
+                nv = network.value_head(hidden).item()
+
+            option_labels = [ra[2] for ra in reward_actions]
+            hs = {
+                "head": "option_eval",
+                "chosen": best_idx,
+                "options": [{"label": lbl, "score": round(s, 4)}
+                            for lbl, s in zip(option_labels, scores)],
+            }
+
+            action_name, opt_idx, reason = reward_actions[best_idx]
+            return Decision(
+                action_name, opt_idx,
+                f"Network: {reason} (score={scores[best_idx]:.2f})",
+                network_value=nv, head_scores=hs,
+                source="network_option_head")
+        except Exception as e:
+            self._log_action(
+                f"  [dim]Network card_reward failed ({e}), falling back[/dim]")
+            return None
+
+    def _az_decide_event_choice(self, gs: dict) -> "Decision | None":
+        """Use network option-head to pick a non-Neow event option.
+
+        Mirrors training's event-choice branch in ``full_run``: builds
+        ``[OPTION_EVENT_CHOICE]*N`` with real EVENT_CHOICE_VOCAB IDs
+        via the dedicated event_choice_embed table (V10).
+
+        Intentionally NOT gated by ``USE_NETWORK_ROUTING`` — non-Neow
+        events always route through the network in live play so the
+        training value targets (which were computed against the
+        network's pick) match what live play actually does. The
+        deterministic ``decide_event_default`` path remains the fallback
+        when the network handler returns None (locked options,
+        unreadable screen, tensor build failure, etc.).
+        """
+        import torch
+        from .bridge import event_options_from_mcp
+        from .deterministic_advisor import Decision
+
+        try:
+            event = gs.get("event") or (
+                gs.get("agent_view") or {}).get("event") or {}
+            if not event:
+                return None
+            # Skip Neow — _az_decide_neow handles that screen.
+            event_name = (
+                event.get("name") or event.get("event_id") or "").lower()
+            run = gs.get("run") or {}
+            floor = int(run.get("floor") or 0)
+            if "neow" in event_name or floor <= 1:
+                return None
+
+            _, hidden, _hp, _max_hp, _gold, _floor, _deck = (
+                self._az_run_state_tensors(gs))
+            network = self._mcts.network
+
+            parsed = event_options_from_mcp(gs, self._mcts_vocabs)
+            opt_types = parsed["opt_types"]
+            opt_cards = parsed["opt_cards"]
+            event_actions = parsed["actions"]
+
+            if not opt_types:
+                return None
+
+            with torch.no_grad():
+                best_idx, scores = network.pick_best_option(
+                    hidden, opt_types, opt_cards)
+                nv = network.value_head(hidden).item()
+
+            option_labels = [ea[2] for ea in event_actions]
+            hs = {
+                "head": "option_eval",
+                "chosen": best_idx,
+                "options": [{"label": lbl, "score": round(s, 4)}
+                            for lbl, s in zip(option_labels, scores)],
+            }
+
+            action_name, opt_idx, reason = event_actions[best_idx]
+            display_name = (
+                event.get("name") or event.get("event_id") or "event")
+            return Decision(
+                action_name, opt_idx,
+                f"Network {display_name}: {reason} "
+                f"(score={scores[best_idx]:.2f})",
+                network_value=nv, head_scores=hs,
+                source="network_option_head")
+        except Exception as e:
+            self._log_action(
+                f"  [dim]Network event_choice failed ({e}), falling back[/dim]")
+            return None
+
+    def _decide_tablet_of_truth(self, gs: dict) -> "Decision | None":
+        """Hardcoded guard for the Tablet of Truth event.
+
+        The event chains 4+ decipher pages that each cost -3 max HP and
+        grant a random upgrade, ending with a "Lose Everything" page
+        that upgrades all cards at the cost of nearly all remaining HP.
+        In practice the escalating HP cost bankrupts the run long
+        before the full-deck upgrade pays off, and the continuation
+        pages don't consistently expose a "Give Up" choice — so the
+        only reliable control we have is on the INITIAL page.
+
+        Strategy:
+          * INITIAL page (where a "smash" option is available): always
+            pick Smash (+20 HP). Never start the decipher chain — it's
+            the only binding decision we get, so the once-per-run cap
+            requested by the user is best enforced as "zero decipher
+            chains".
+          * Continuation page (no smash option): look for any label
+            that matches "give up"/"leave"/"stop"/"decline" and pick
+            it. Otherwise return None and let the network/heuristic
+            handle it — we're locked in and have no override.
+
+        Returns a Decision with ``source="hardcoded_tablet_guard"`` so
+        the log line is distinguishable from the network and the
+        heuristic fallback.
+        """
+        from .deterministic_advisor import Decision
+
+        event = gs.get("event") or (gs.get("agent_view") or {}).get("event") or {}
+        if not event:
+            return None
+        event_id = (
+            event.get("event_id") or event.get("id")
+            or event.get("name") or "").upper().replace(" ", "_")
+        if "TABLET_OF_TRUTH" not in event_id and "TABLET OF TRUTH" not in (
+                event.get("name") or "").upper():
+            return None
+
+        raw_options = event.get("options") or []
+        labelled: list[tuple[int, str, int]] = []
+        for i, opt in enumerate(raw_options):
+            if opt.get("locked"):
+                continue
+            label = (
+                opt.get("title") or opt.get("name")
+                or (opt.get("description") or "")[:40] or ""
+            ).lower()
+            game_idx = opt.get("index", i)
+            labelled.append((i, label, int(game_idx)))
+
+        if not labelled:
+            return None
+
+        # INITIAL page → always Smash. Don't start the chain.
+        for _, label, game_idx in labelled:
+            if "smash" in label:
+                return Decision(
+                    "choose_event_option", game_idx,
+                    "Tablet of Truth: Smash (+20 HP, skipping decipher chain)",
+                    source="hardcoded_tablet_guard",
+                )
+
+        # Continuation page → look for an escape route.
+        _ESCAPE_KEYWORDS = ("give up", "leave", "stop", "decline", "refuse")
+        for _, label, game_idx in labelled:
+            if any(kw in label for kw in _ESCAPE_KEYWORDS):
+                return Decision(
+                    "choose_event_option", game_idx,
+                    f"Tablet of Truth: escape via '{label}'",
+                    source="hardcoded_tablet_guard",
+                )
+
+        # Locked-in continuation with no escape — nothing we can do.
+        # Fall through to the normal handlers so at least something
+        # gets clicked and the event progresses.
+        return None
+
     def _az_decide_neow(self, gs: dict) -> "Decision | None":
         """Use network to pick a Neow blessing on floor 1.
 
         Training path: ``play_full_run`` scores the canonical
         ``NEOW_BLESSINGS`` list in its static order, with
         ``opt_types == [OPTION_EVENT_CHOICE] * N`` and
-        ``opt_cards == [min(i+1, vocab_n-1)]``. We mirror that exactly
-        here so the network sees the same input it trained on.
+        ``opt_cards == [vocab_id_for_each_blessing]`` (V10 real IDs).
+        We mirror that exactly here.
 
         The network returns an index into ``NEOW_BLESSINGS`` (training's
         synthetic list). We then map that back to the live game's option
@@ -2027,8 +2409,9 @@ class Runner:
 
             n_bless = len(NEOW_BLESSINGS)
             opt_types = [OPTION_EVENT_CHOICE] * n_bless
-            vocab_n = len(vocabs.cards)
-            opt_cards = [min(i + 1, vocab_n - 1) for i in range(n_bless)]
+            # V10: real EVENT_CHOICE_VOCAB ids via dedicated embedding
+            from .simulator import _event_choice_vocab_id, _NEOW_EVENT_ID as _NEI
+            opt_cards = [_event_choice_vocab_id(_NEI, i) for i in range(n_bless)]
 
             with torch.no_grad():
                 best_idx, scores = network.pick_best_option(
@@ -2299,27 +2682,51 @@ class Runner:
             priority = [card.get("index", i) for i, card in enumerate(cards)]
 
         picked = 0
+        attempted_indices: set[int] = set()
         max_attempts = num_to_pick * 3  # Safety limit
 
         for attempt in range(max_attempts):
             if picked >= num_to_pick:
                 break
-            if attempt >= len(priority):
-                break
 
-            idx = priority[attempt] if attempt < len(priority) else attempt
+            # Walk the priority list for the first index we haven't
+            # already tried this round. Using attempt-as-index was
+            # fragile when a previous iteration refreshed state and
+            # `picked` advanced mid-loop.
+            idx: int | None = None
+            for cand in priority:
+                if cand not in attempted_indices:
+                    idx = cand
+                    break
+            if idx is None:
+                break
+            attempted_indices.add(idx)
+
             card_name = next(
                 (c.get("name", "?") for c in cards if c.get("index") == idx),
                 f"index {idx}",
             )
             self._log_action(f"  [cyan]Selecting {card_name} (index {idx})[/cyan]")
 
+            send_failed = False
             if not self.dry_run:
                 try:
                     self._execute_with_retry("select_deck_card", option_index=idx)
                 except Exception as e:
-                    self._log_action(f"  [yellow]Select failed: {e}[/yellow]")
-                    continue
+                    # IMPORTANT: An HTTP timeout here does NOT mean the
+                    # action failed on the game side. The mod may have
+                    # processed the selection successfully and hung on
+                    # an animation / save-game hook. We MUST refresh
+                    # game state before deciding what to do next —
+                    # otherwise we risk double-selecting, missing a
+                    # successful selection, or shifting indices
+                    # underneath ourselves. Fall through to the
+                    # ground-truth check below instead of `continue`.
+                    self._log_action(
+                        f"  [yellow]Select send failed: {e} "
+                        f"— refreshing state[/yellow]"
+                    )
+                    send_failed = True
 
             time.sleep(1.0)  # Wait for the game to process
 
@@ -2330,7 +2737,10 @@ class Runner:
             self.game_state = gs
             actions = gs.get("available_actions", [])
 
-            # Check if confirm appeared or screen changed
+            # Check if confirm appeared or screen changed — this is the
+            # ground-truth "we're done" signal. It fires regardless of
+            # whether the previous select_deck_card call got a clean
+            # HTTP response.
             if "confirm_selection" in actions:
                 if not self.dry_run:
                     try:
@@ -2342,11 +2752,26 @@ class Runner:
             if "select_deck_card" not in actions:
                 return  # Screen changed, done
 
-            # Check selected count
+            # Ground-truth check against the game's own counter. This
+            # works whether the previous send succeeded or timed out.
             sel = gs.get("selection") or {}
             curr = sel.get("selected_count", 0)
             if curr > picked:
                 picked = curr
+                # The selection landed (even if the HTTP call looked
+                # like it failed). Clear the send-failed flag so we
+                # don't double-log it.
+                send_failed = False
+
+            if send_failed:
+                # The send raised AND the game's counter didn't
+                # advance AND we didn't see confirm/screen-change.
+                # Treat this idx as genuinely untaken; the next loop
+                # iteration will try the next priority index.
+                self._log_action(
+                    f"  [dim]index {idx} did not land — "
+                    f"trying next priority[/dim]"
+                )
 
         # If we exhausted attempts without the screen changing,
         # mark as stuck so the main loop can time out
@@ -2457,18 +2882,29 @@ class Runner:
         state" (retriable — game is animating) and permanent errors like
         "invalid_target" or "card cannot be played" (not retriable).
         """
-        # Truly permanent 409 errors — never retry these
+        # Truly permanent 409 errors — never retry these.
+        # "cannot be played" was previously treated as transient (animation
+        # timing), but cards with unmet conditions (e.g. Grand Finale when
+        # draw pile isn't empty) will NEVER become playable on the same
+        # game state. Retrying just wastes 10 attempts and then the bot
+        # dies. Treat it as permanent so the caller can re-plan.
         _PERMANENT_409 = (
             "invalid_target", "out of range",
             "is locked", "out of stock", "not supported",
+            "cannot be played",
         )
-        # Transient 409 errors — game is animating or card state shifted.
-        # "cannot be played" is often caused by sending a play_card while
-        # a previous card's animation is still resolving.
+        # Transient 409 errors — game is animating or action state shifted.
         _TRANSIENT_409 = (
-            "cannot be played", "not available",
+            "not available",
         )
+        # HTTP timeouts from the mod — see note below. Cap timeout retries
+        # at 2 (not `retries`) because if the mod is hung past a couple of
+        # 10s timeouts, we're almost certainly in a worse state than the
+        # caller can recover from with more retries. The caller should
+        # refresh game state on None/{} return and decide what to do.
+        _TIMEOUT_RETRY_LIMIT = 2
 
+        timeout_attempts = 0
         for attempt in range(retries + 1):
             try:
                 return self.client.execute_action(
@@ -2479,22 +2915,69 @@ class Runner:
                 )
             except ConnectionError as e:
                 err_str = str(e)
+                # HTTP timeouts — the mod didn't respond within its 10s
+                # window. IMPORTANT: a timeout does NOT mean the action
+                # failed on the game side; the mod may have processed it
+                # and hung on a follow-up animation. Callers that care
+                # about ground truth should re-check the game state on
+                # return. Retry a bounded number of times to handle
+                # purely-transient slow responses (save-game hooks,
+                # animation stalls), then raise so the caller can take
+                # corrective action.
+                if "Timed out" in err_str:
+                    timeout_attempts += 1
+                    if timeout_attempts <= _TIMEOUT_RETRY_LIMIT:
+                        wait = min(delay * (1.5 ** (timeout_attempts - 1)), 2.0)
+                        self._log_action(
+                            f"  [dim]timeout on {action}, retry "
+                            f"{timeout_attempts}/{_TIMEOUT_RETRY_LIMIT}[/dim]"
+                        )
+                        time.sleep(wait)
+                        continue
+                    # Exhausted timeout retries — raise so callers can
+                    # refresh state and decide whether the action
+                    # actually landed or not.
+                    self._log_action(
+                        f"  [yellow]timeout after {_TIMEOUT_RETRY_LIMIT} "
+                        f"retries: {err_str[:80]}[/yellow]"
+                    )
+                    raise
                 if "409" not in err_str:
                     raise
                 # Permanent errors — don't retry
                 if any(kw in err_str for kw in _PERMANENT_409):
                     self._log_action(
-                        f"  [yellow]rejected: {err_str[:120]}[/yellow]"
+                        f"  [yellow]rejected: {err_str[:240]}[/yellow]"
                     )
                     return {}
-                # Transient / animation timing — retry with backoff
+                # Transient / animation timing — retry with backoff, but
+                # re-validate against current game state first. If the
+                # action is no longer in available_actions, the game has
+                # moved on (animation landed, screen changed, potion gone)
+                # and retrying would be a no-op at best and wrong at
+                # worst. Bail out early and let the caller re-plan.
                 if attempt < retries:
+                    try:
+                        gs = self.client.get_state()
+                        avail = gs.get("available_actions", []) or []
+                        if action not in avail:
+                            self._log_action(
+                                f"  [yellow]{action} no longer available "
+                                f"after 409 (screen="
+                                f"{gs.get('screen', '?')}); skipping[/yellow]"
+                            )
+                            self.game_state = gs
+                            return {}
+                    except Exception:
+                        # State fetch failed — fall through to retry
+                        pass
                     wait = min(delay * (1.5 ** attempt), 2.0)
                     time.sleep(wait)
                     continue
-                # Exhausted retries — log and move on
+                # Exhausted retries — log full body (not truncated at 80)
                 self._log_action(
-                    f"  [yellow]skipped after {retries} retries: {err_str[:80]}[/yellow]"
+                    f"  [yellow]skipped after {retries} retries: "
+                    f"{err_str[:240]}[/yellow]"
                 )
                 return {}
 

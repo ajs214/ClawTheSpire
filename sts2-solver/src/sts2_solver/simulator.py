@@ -258,8 +258,8 @@ ENEMY_MOVE_TABLES: dict[str, list[dict]] = {
         {"type": "Debuff", "player_frail": 1},                     # Goop
     ],
     "EXOSKELETON": [
-        {"type": "Attack", "damage": 5, "hits": 2},                # Skitter x2
-        {"type": "Attack", "damage": 12, "hits": 1},               # Mandible
+        {"type": "Attack", "damage": 1, "hits": 2},                # Skitter x2
+        {"type": "Attack", "damage": 8, "hits": 1},                # Mandible
         {"type": "Buff", "self_strength": 2},                       # Enrage
     ],
     "SCROLL_OF_BITING": [
@@ -310,19 +310,19 @@ ENEMY_MOVE_TABLES: dict[str, list[dict]] = {
         {"type": "Debuff", "player_vulnerable": 2},                    # Screech
     ],
     "BOWLBUG_EGG": [
-        {"type": "Attack", "damage": 6, "hits": 1},                # Bite
+        {"type": "Attack", "damage": 7, "hits": 1},                # Bite
     ],
     "BOWLBUG_NECTAR": [
-        {"type": "Attack", "damage": 7, "hits": 1},                # Thrash
+        {"type": "Attack", "damage": 3, "hits": 1},                # Thrash
         {"type": "Buff", "all_strength": 1},                        # Buff (heals/buffs team)
-        {"type": "Attack", "damage": 10, "hits": 1},               # Thrash (stronger)
+        {"type": "Attack", "damage": 3, "hits": 1},                # Thrash (stronger)
     ],
     "BOWLBUG_ROCK": [
-        {"type": "Attack", "damage": 14, "hits": 1},               # Headbutt
+        {"type": "Attack", "damage": 15, "hits": 1},               # Headbutt
         {"type": "Debuff", "player_weak": 1},                      # Dizzy
     ],
     "BOWLBUG_SILK": [
-        {"type": "Attack", "damage": 9, "hits": 1},                # Trash
+        {"type": "Attack", "damage": 4, "hits": 1},                # Trash
         {"type": "Debuff", "player_frail": 2, "damage": 5},       # Toxic Spit
     ],
     "TWO_TAILED_RAT": [
@@ -337,9 +337,9 @@ ENEMY_MOVE_TABLES: dict[str, list[dict]] = {
     ],
     "FROG_KNIGHT": [
         {"type": "Buff", "self_strength": 2, "self_block": 8},    # For the Queen
-        {"type": "Attack", "damage": 16, "hits": 1},               # Strike Down Evil
-        {"type": "Attack", "damage": 5, "hits": 3},                # Tongue Lash x3
-        {"type": "Attack", "damage": 20, "hits": 1},               # Beetle Charge
+        {"type": "Attack", "damage": 21, "hits": 1},               # Strike Down Evil
+        {"type": "Attack", "damage": 13, "hits": 1},               # Tongue Lash
+        {"type": "Attack", "damage": 35, "hits": 1},               # Beetle Charge
     ],
     "FOSSIL_STALKER": [
         {"type": "Attack", "damage": 10, "hits": 1},               # Tackle
@@ -399,24 +399,24 @@ ENEMY_MOVE_TABLES: dict[str, list[dict]] = {
         {"type": "Buff", "self_strength": 1},                       # Swarm
     ],
     "AXEBOT": [
-        {"type": "Attack", "damage": 10, "hits": 1, "self_block": 5},  # Axe Swing
-        {"type": "Attack", "damage": 6, "hits": 2},                     # Double Chop x2
+        {"type": "Attack", "damage": 5, "hits": 1, "self_block": 5},   # Axe Swing (One-Two)
+        {"type": "Attack", "damage": 8, "hits": 1},                     # Hammer Uppercut
         {"type": "Buff", "self_strength": 2},                            # Sharpen
     ],
     "GLOBE_HEAD": [
-        {"type": "Attack", "damage": 8, "hits": 1},                # Beam
-        {"type": "Debuff", "player_vulnerable": 1, "damage": 6},  # Flash
-        {"type": "Attack", "damage": 12, "hits": 1},               # Overload
+        {"type": "Attack", "damage": 6, "hits": 1},                # Thunder Strike
+        {"type": "Debuff", "player_vulnerable": 1, "damage": 13}, # Shocking Slap
+        {"type": "Attack", "damage": 16, "hits": 1},               # Galvanic Burst
     ],
     "HAUNTED_SHIP": [
-        {"type": "Attack", "damage": 6, "hits": 3},                # Broadside x3
-        {"type": "Debuff", "player_frail": 2},                     # Ghost Wind
-        {"type": "Attack", "damage": 18, "hits": 1},               # Ram
+        {"type": "Attack", "damage": 10, "hits": 1},               # Ramming Speed
+        {"type": "Attack", "damage": 13, "hits": 1},               # Swipe
+        {"type": "Debuff", "player_frail": 2},                     # Haunt
+        {"type": "Attack", "damage": 4, "hits": 1},                # Stomp
     ],
     "SEWER_CLAM": [
-        {"type": "Defend", "block": 8},                             # Shell Up
-        {"type": "Attack", "damage": 10, "hits": 1, "player_weak": 1},  # Spit
-        {"type": "Attack", "damage": 14, "hits": 1},               # Snap
+        {"type": "Defend", "block": 8},                             # Pressurize
+        {"type": "Attack", "damage": 10, "hits": 1},               # Jet
     ],
     "THE_LOST": [
         {"type": "Attack", "damage": 6, "hits": 2},                # Slash x2
@@ -432,27 +432,20 @@ ENEMY_MOVE_TABLES: dict[str, list[dict]] = {
         {"type": "Attack", "damage": 16, "hits": 1},               # Void Blast
     ],
     "OVICOPTER": [
-        {"type": "Attack", "damage": 8, "hits": 1},                # Swoop
+        {"type": "Attack", "damage": 16, "hits": 1},               # Smash
         {"type": "Buff"},                                           # Lay Egg (summons)
-        {"type": "Attack", "damage": 5, "hits": 3},                # Barrage x3
+        {"type": "Attack", "damage": 7, "hits": 1},                # Tenderizer
     ],
     "TOUGH_EGG": [
         {"type": "Defend", "block": 6},                             # Harden
-        {"type": "Attack", "damage": 8, "hits": 1},                # Hatch (emerges)
+        {"type": "Attack", "damage": 4, "hits": 1},                # Nibble
     ],
 
     # ── New elites ──
-    "DECIMILLIPEDE_SEGMENT_FRONT": [
-        {"type": "Attack", "damage": 6, "hits": 3},                # Mandible Flurry x3
-        {"type": "Buff", "self_strength": 2, "self_block": 8},    # Burrow
-    ],
-    "DECIMILLIPEDE_SEGMENT_MIDDLE": [
-        {"type": "Attack", "damage": 8, "hits": 2},                # Body Slam x2
-        {"type": "Defend", "block": 12},                            # Curl Up
-    ],
-    "DECIMILLIPEDE_SEGMENT_BACK": [
-        {"type": "Attack", "damage": 5, "hits": 4},                # Tail Whip x4
-        {"type": "Debuff", "player_vulnerable": 2},                # Acid Spray
+    "DECIMILLIPEDE_SEGMENT": [
+        {"type": "Attack", "damage": 5, "hits": 1},                # Writhe
+        {"type": "Buff", "self_block": 6},                         # Bulk
+        {"type": "Debuff", "player_constrict": 2},                 # Constrict
     ],
     "ENTOMANCER": [
         {"type": "Buff", "self_strength": 3},                       # Summon Swarm
@@ -514,77 +507,161 @@ ENEMY_MOVE_TABLES: dict[str, list[dict]] = {
 
     # ── New bosses ──
     "DOORMAKER": [
-        {"type": "Buff", "self_strength": 3, "self_block": 15},    # Seal Door
-        {"type": "Attack", "damage": 10, "hits": 3},               # Door Slam x3
-        {"type": "Debuff", "player_frail": 2, "player_weak": 2},  # Dimensional Rip
-        {"type": "Attack", "damage": 28, "hits": 1},               # Grand Slam
+        {"type": "Buff", "self_strength": 3, "self_block": 15},    # What is it (startup)
+        {"type": "Attack", "damage": 31, "hits": 1},               # Precision Beam
+        {"type": "Debuff", "player_frail": 2, "player_weak": 2},  # Get Back In (phase change)
+        {"type": "Attack", "damage": 40, "hits": 1},               # Get Back In (attack)
     ],
     "DOOR": [
-        {"type": "Defend", "block": 20},                            # Reinforce
-        {"type": "Attack", "damage": 12, "hits": 1},               # Slam
+        {"type": "Attack", "damage": 25, "hits": 1},               # Dramatic Open
+        {"type": "Attack", "damage": 20, "hits": 1},               # Enforce
+        {"type": "Attack", "damage": 15, "hits": 1},               # Door Slam
     ],
     "WATERFALL_GIANT": [
-        {"type": "Attack", "damage": 8, "hits": 3},                # Cascade x3
-        {"type": "Buff", "self_strength": 4, "self_block": 12},   # Rising Tide
-        {"type": "Attack", "damage": 30, "hits": 1},               # Tidal Crush
-        {"type": "Debuff", "player_frail": 3},                     # Drenching Wave
-        {"type": "Attack", "damage": 12, "hits": 3},               # Torrent x3
+        {"type": "Defend", "block": 8},                             # Pressurize (setup)
+        {"type": "Attack", "damage": 15, "hits": 1},               # Stomp
+        {"type": "Attack", "damage": 10, "hits": 1},               # Ram
+        {"type": "Buff", "self_strength": 2},                       # Pressure Up
+        {"type": "Attack", "damage": 20, "hits": 1},               # Base Pressure Gun
     ],
     "LAGAVULIN_MATRIARCH": [
-        {"type": "Buff"},                                           # Slumber (asleep T1)
-        {"type": "Buff"},                                           # Slumber (asleep T2)
+        {"type": "Buff"},                                           # Sleep (asleep T1)
+        {"type": "Buff"},                                           # Sleep (asleep T2)
         {"type": "Debuff", "player_shrink": 2, "player_frail": 2},  # Wake (debuff burst)
-        {"type": "Attack", "damage": 20, "hits": 1},               # Pummel
-        {"type": "Attack", "damage": 8, "hits": 3},                # Flurry x3
-        {"type": "Buff", "self_strength": 3},                       # Roar
+        {"type": "Attack", "damage": 19, "hits": 1},               # Slash
+        {"type": "Attack", "damage": 12, "hits": 1},               # Slash2
+        {"type": "Attack", "damage": 9, "hits": 1},                # Disembowel
     ],
     "KNOWLEDGE_DEMON": [
-        {"type": "Debuff", "player_weak": 2, "player_vulnerable": 2},  # Dark Knowledge
-        {"type": "Attack", "damage": 7, "hits": 4},                     # Mind Rend x4
-        {"type": "Buff", "self_strength": 5},                            # Study
-        {"type": "Attack", "damage": 30, "hits": 1},                    # Enlightened Fury
+        {"type": "Debuff", "player_weak": 2, "player_vulnerable": 2},  # Curse of Knowledge
+        {"type": "Attack", "damage": 17, "hits": 1},                    # Slap
+        {"type": "Buff", "self_strength": 2},                            # Ponder
+        {"type": "Attack", "damage": 8, "hits": 1},                     # Knowledge Overwhelming
     ],
     "CRUSHER": [
-        {"type": "Attack", "damage": 12, "hits": 2},               # Claw Crush x2
-        {"type": "Buff", "self_strength": 3, "self_block": 15},   # Harden Shell
-        {"type": "Attack", "damage": 25, "hits": 1},               # Mega Claw
+        {"type": "Attack", "damage": 12, "hits": 1},               # Thrash
+        {"type": "Buff", "self_strength": 3, "self_block": 15},   # Adapt (harden/shell)
+        {"type": "Attack", "damage": 6, "hits": 1},                # Bug Sting
+        {"type": "Attack", "damage": 12, "hits": 1},               # Guarded Strike
     ],
     "ROCKET": [
-        {"type": "Attack", "damage": 5, "hits": 5},                # Rocket Barrage x5
-        {"type": "Debuff", "player_vulnerable": 2},                # Lock On
-        {"type": "Attack", "damage": 20, "hits": 1},               # Big Shot
+        {"type": "Attack", "damage": 3, "hits": 1},                # Targeting Reticle
+        {"type": "Attack", "damage": 18, "hits": 1},               # Precision Beam
+        {"type": "Debuff", "player_vulnerable": 2},                # Charge Up
+        {"type": "Attack", "damage": 31, "hits": 1},               # Laser
     ],
     "QUEEN": [
-        {"type": "Buff", "self_strength": 4, "self_block": 12},   # Royal Decree
-        {"type": "Attack", "damage": 8, "hits": 4},                # Swarm Command x4
-        {"type": "Debuff", "player_frail": 2, "player_weak": 2},  # Weakening Aura
-        {"type": "Attack", "damage": 30, "hits": 1},               # Queen's Wrath
+        {"type": "Buff", "self_strength": 4, "self_block": 12},   # Puppet Strings
+        {"type": "Attack", "damage": 3, "hits": 1},                # Off With Your Head
+        {"type": "Debuff", "player_frail": 2, "player_weak": 2},  # Burn Bright for Me
+        {"type": "Attack", "damage": 15, "hits": 1},               # Execution
     ],
     "TORCH_HEAD_AMALGAM": [
-        {"type": "Attack", "damage": 10, "hits": 2},               # Flame Lash x2
-        {"type": "Buff", "self_strength": 3},                       # Ignite
-        {"type": "Attack", "damage": 18, "hits": 1},               # Fireball
+        {"type": "Attack", "damage": 18, "hits": 1},               # Tackle
+        {"type": "Attack", "damage": 14, "hits": 1},               # Weak Tackle
+        {"type": "Buff", "self_strength": 2},                       # Beam (soul beam)
+        {"type": "Attack", "damage": 8, "hits": 1},                # Soul Beam variant
     ],
     "SOUL_FYSH": [
-        {"type": "Debuff", "player_weak": 2},                      # Soul Siphon
-        {"type": "Attack", "damage": 6, "hits": 4},                # Bubble Barrage x4
-        {"type": "Buff", "self_strength": 4, "self_block": 10},   # Deep Dive
-        {"type": "Attack", "damage": 25, "hits": 1},               # Leviathan Crush
-        {"type": "Debuff", "player_frail": 3, "damage": 12},      # Abyssal Wave
+        {"type": "Debuff", "player_weak": 2},                      # Beckon
+        {"type": "Attack", "damage": 16, "hits": 1},               # De-Gas
+        {"type": "Buff", "self_strength": 3},                       # Gaze
+        {"type": "Debuff", "player_frail": 1},                     # Fade (escape)
+        {"type": "Attack", "damage": 11, "hits": 1},               # Scream
     ],
     "TEST_SUBJECT": [
-        {"type": "Buff", "self_strength": 3},                       # Mutate
-        {"type": "Attack", "damage": 10, "hits": 2},               # Lash x2
-        {"type": "Attack", "damage": 7, "hits": 4},                # Frenzy x4
-        {"type": "Debuff", "player_vulnerable": 3},                # Acid Spray
-        {"type": "Attack", "damage": 28, "hits": 1},               # Annihilate
+        {"type": "Buff", "self_strength": 3},                       # Respawn (phase change)
+        {"type": "Attack", "damage": 20, "hits": 1},               # Bite
+        {"type": "Attack", "damage": 14, "hits": 1},               # Skull Bash
+        {"type": "Attack", "damage": 30, "hits": 1},               # Pounce
+        {"type": "Attack", "damage": 10, "hits": 1},               # Multi Claw
+        {"type": "Attack", "damage": 10, "hits": 1},               # Phase 3 Lacerate
+        {"type": "Attack", "damage": 45, "hits": 1},               # Big Pounce
     ],
     "THE_INSATIABLE": [
-        {"type": "Attack", "damage": 8, "hits": 3},                # Devour x3
-        {"type": "Buff", "self_strength": 5},                       # Hunger
-        {"type": "Debuff", "player_weak": 2, "player_frail": 2},  # Consume
-        {"type": "Attack", "damage": 35, "hits": 1},               # Feast
-        {"type": "Attack", "damage": 12, "hits": 3},               # Ravage x3
+        {"type": "Defend", "block": 5},                             # Liquify Ground (setup)
+        {"type": "Attack", "damage": 8, "hits": 1},                # Thrash Move 1
+        {"type": "Attack", "damage": 8, "hits": 1},                # Thrash Move 2
+        {"type": "Attack", "damage": 28, "hits": 1},               # Lunging Bite
+        {"type": "Debuff", "player_weak": 1, "player_frail": 1},  # Salivate
+    ],
+    # ── Missing entries from monsters.json ──
+    "ARCHITECT": [
+        {"type": "Buff"},                                           # Nothing (NPC/decoration)
+    ],
+    "BATTLE_FRIEND_V1": [
+        {"type": "Buff"},                                           # Nothing (ally)
+    ],
+    "BATTLE_FRIEND_V2": [
+        {"type": "Buff"},                                           # Nothing (ally)
+    ],
+    "BATTLE_FRIEND_V3": [
+        {"type": "Buff"},                                           # Nothing (ally)
+    ],
+    "BYRDPIP": [
+        {"type": "Buff"},                                           # Nothing (NPC/decoration)
+    ],
+    "FAT_GREMLIN": [
+        {"type": "Attack", "damage": 1, "hits": 1},                # Spawned (weak)
+        {"type": "Debuff", "player_weak": 1},                      # Flee (escape)
+    ],
+    "GREMLIN_MERC": [
+        {"type": "Attack", "damage": 7, "hits": 1},                # Gimme
+        {"type": "Attack", "damage": 6, "hits": 2},                # Double Smash x2
+        {"type": "Buff", "self_strength": 2},                       # Hehe (laugh)
+    ],
+    "GUARDBOT": [
+        {"type": "Defend", "block": 8},                             # Guard
+    ],
+    "LIVING_SHIELD": [
+        {"type": "Attack", "damage": 16, "hits": 1},               # Smash
+        {"type": "Defend", "block": 6},                             # Shield Slam
+    ],
+    "NOISEBOT": [
+        {"type": "Debuff", "player_frail": 1, "player_vulnerable": 1},  # Noise
+    ],
+    "OSTY": [
+        {"type": "Buff"},                                           # Nothing (NPC)
+    ],
+    "PAELS_LEGION": [
+        {"type": "Buff"},                                           # Nothing (NPC/placeholder)
+    ],
+    "PARAFRIGHT": [
+        {"type": "Attack", "damage": 16, "hits": 1},               # Slam
+    ],
+    "SLUMBERING_BEETLE": [
+        {"type": "Buff"},                                           # Snore (asleep)
+        {"type": "Attack", "damage": 16, "hits": 1},               # Roll Out
+    ],
+    "SNEAKY_GREMLIN": [
+        {"type": "Attack", "damage": 1, "hits": 1},                # Spawned (weak)
+        {"type": "Attack", "damage": 9, "hits": 1},                # Tackle
+    ],
+    "STABBOT": [
+        {"type": "Attack", "damage": 11, "hits": 1},               # Stab
+    ],
+    "THE_ADVERSARY_MK_ONE": [
+        {"type": "Attack", "damage": 12, "hits": 1},               # Smash
+        {"type": "Attack", "damage": 15, "hits": 1},               # Beam
+        {"type": "Attack", "damage": 8, "hits": 2},                # Barrage x2
+    ],
+    "THE_ADVERSARY_MK_TWO": [
+        {"type": "Attack", "damage": 13, "hits": 1},               # Bash
+        {"type": "Attack", "damage": 16, "hits": 1},               # Flame Beam
+        {"type": "Attack", "damage": 9, "hits": 2},                # Barrage x2
+    ],
+    "THE_ADVERSARY_MK_THREE": [
+        {"type": "Attack", "damage": 15, "hits": 1},               # Crash
+        {"type": "Attack", "damage": 18, "hits": 1},               # Flame Beam
+        {"type": "Attack", "damage": 10, "hits": 2},               # Barrage x2
+    ],
+    "TURRET_OPERATOR": [
+        {"type": "Attack", "damage": 3, "hits": 1},                # Unload Move 1
+        {"type": "Attack", "damage": 3, "hits": 1},                # Unload Move 2
+        {"type": "Defend", "block": 6},                             # Reload
+    ],
+    "ZAPBOT": [
+        {"type": "Attack", "damage": 14, "hits": 1},               # Zap
     ],
 }
 
@@ -676,7 +753,23 @@ def _spawn_enemy(monster_id: str) -> EnemyState:
 
 # STS-like rarity weights: Common 60%, Uncommon 37%, Rare 3%
 RARITY_WEIGHTS = {"Common": 60, "Uncommon": 37, "Rare": 3}
-REWARD_CARDS_OFFERED = 3
+REWARD_CARDS_OFFERED = 3  # base count; varies with relics (see _effective_reward_count)
+
+
+def _effective_reward_count(relics: frozenset[str] | set[str] | None = None) -> int:
+    """Return the number of card rewards to offer, accounting for relics.
+
+    Base is 3 (standard STS2). Certain relics add +1:
+    - QUESTION_CARD: +1 card choice at reward screens
+    - BUSTED_CROWN: -2 card choices (minimum 1)
+    """
+    count = REWARD_CARDS_OFFERED
+    if relics:
+        if "QUESTION_CARD" in relics:
+            count += 1
+        if "BUSTED_CROWN" in relics:
+            count -= 2
+    return max(1, count)
 
 
 def _build_card_pool(card_db: CardDB, character_color: str) -> dict[str, list[Card]]:
@@ -715,9 +808,12 @@ def _build_card_pool(card_db: CardDB, character_color: str) -> dict[str, list[Ca
 def _offer_card_rewards(
     pools: dict[str, list[Card]],
     deck: list[Card],
-    count: int = REWARD_CARDS_OFFERED,
+    count: int | None = None,
+    relics: frozenset[str] | set[str] | None = None,
 ) -> list[Card]:
     """Generate a card reward offering (no duplicates, not already in deck)."""
+    if count is None:
+        count = _effective_reward_count(relics)
     deck_ids = {c.id for c in deck}
     offered: list[Card] = []
     rarities = list(RARITY_WEIGHTS.keys())
@@ -806,7 +902,7 @@ def _score_card_for_pick(card: Card, deck: list[Card]) -> float:
 
 def _smart_pick_or_fallback(
     offered: list[Card], deck: list[Card],
-    floor: int = 1, hp: int = 50, max_hp: int = 80,
+    floor: int = 1, hp: int = 50, max_hp: int = 70,
     relics: frozenset[str] | set[str] | None = None,
 ) -> Card | None:
     """Use the organic card picker (rule-based, relic-aware).
@@ -1422,6 +1518,458 @@ def _simulate_event(
     return _apply_event_option(best_option, hp, max_hp, deck, card_db, rng)
 
 
+# ---------------------------------------------------------------------------
+# IMPROVEMENTS.md #4: event-choice enumeration for self-play training
+#
+# The training loop needs to *see* each event option as a discrete choice
+# so the option-head network can score them. These helpers expose the
+# raw options + their simulated effect tuples so full_run.py can build
+# an OptionSample, run pick_best_option, and apply the chosen effect.
+# ---------------------------------------------------------------------------
+
+# Global vocab of (event_id, option_index) → stable integer id, populated
+# lazily the first time an event is enumerated. Id 0 is reserved for
+# UNK / unseen events. The ``__neow__`` sentinel event id shares the same
+# pool so Neow blessings get stable ids too.
+#
+# V10 (2026-04-11): This vocab is now ACTIVE — the option head uses a
+# dedicated ``event_choice_embed`` table indexed by these IDs.  The
+# vocab is pre-populated deterministically at first access via
+# ``_pre_populate_event_choice_vocab()`` so IDs are stable across runs
+# regardless of which events the RNG happens to pick.
+EVENT_CHOICE_VOCAB: dict[tuple[str, int], int] = {}
+
+
+_EVENT_CHOICE_VOCAB_POPULATED = False
+
+
+def _pre_populate_event_choice_vocab() -> None:
+    """Deterministically assign stable IDs to every (event_id, option_idx).
+
+    Called once at first access.  Events are iterated in sorted-id order
+    so the mapping is reproducible regardless of training-run RNG.  Neow
+    blessings (under ``_NEOW_EVENT_ID``) are registered last.
+    """
+    global _EVENT_CHOICE_VOCAB_POPULATED
+    if _EVENT_CHOICE_VOCAB_POPULATED:
+        return
+    _ensure_data_loaded()
+    # 1. All regular events, sorted by event id for stability
+    for eid in sorted(_EVENTS_BY_ID.keys()):
+        ev = _EVENTS_BY_ID[eid]
+        for i in range(len(ev.get("options", []) or [])):
+            _event_choice_vocab_id_raw(eid, i)
+    # 2. Neow blessings (imported lazily to avoid circular ref)
+    for i in range(len(NEOW_BLESSINGS)):
+        _event_choice_vocab_id_raw(_NEOW_EVENT_ID, i)
+    _EVENT_CHOICE_VOCAB_POPULATED = True
+
+
+def _event_choice_vocab_id_raw(event_id: str, option_idx: int) -> int:
+    """Low-level ID assignment — always auto-increments for new keys."""
+    key = (event_id, option_idx)
+    vid = EVENT_CHOICE_VOCAB.get(key)
+    if vid is None:
+        vid = len(EVENT_CHOICE_VOCAB) + 1  # reserve 0 for UNK
+        EVENT_CHOICE_VOCAB[key] = vid
+    return vid
+
+
+def _event_choice_vocab_id(event_id: str, option_idx: int) -> int:
+    """Return the stable vocab ID for (event_id, option_idx).
+
+    Triggers pre-population on first call so IDs are deterministic.
+    """
+    if not _EVENT_CHOICE_VOCAB_POPULATED:
+        _pre_populate_event_choice_vocab()
+    return _event_choice_vocab_id_raw(event_id, option_idx)
+
+
+def enumerate_event_options(
+    event_id: str,
+    deck: list[Card],
+    hp: int,
+    max_hp: int,
+    gold: int,
+    card_db: CardDB,
+    rng: random.Random,
+) -> list[dict]:
+    """Return a list of ``{vocab_id, description, changes}`` per event option.
+
+    ``changes`` is an ``_apply_event_option`` result — already resolved
+    so the caller can apply a single selection atomically. RNG-dependent
+    effects (card rolls, relic grants) are baked in here, so the caller
+    does not need to re-seed.
+
+    Used by ``play_full_run`` to build an ``OptionSample`` for the
+    event-choice head.
+    """
+    _ensure_data_loaded()
+    event = _EVENTS_BY_ID.get(event_id)
+    if not event:
+        return []
+    options = event.get("options", []) or []
+    result: list[dict] = []
+    for i, opt in enumerate(options):
+        vid = _event_choice_vocab_id(event_id, i)
+        # Apply each option with a *fresh local rng copy* keyed off the
+        # caller's rng so parallel enumeration doesn't shift global state.
+        local_rng = random.Random(rng.random())
+        changes = _apply_event_option(opt, hp, max_hp, deck, card_db, local_rng)
+        result.append({
+            "vocab_id": vid,
+            "description": _clean_event_desc(opt.get("description")),
+            "changes": changes,
+        })
+    return result
+
+
+def heuristic_event_option_index(
+    event_id: str,
+    hp: int,
+    max_hp: int,
+    gold: int,
+    deck: list[Card],
+) -> int:
+    """Return the index of the option the legacy heuristic would pick.
+
+    Used as the shadow advisor pick for the agreement-rate diagnostic
+    (IMPROVEMENTS.md #10). Returns 0 if the event is unknown / has no
+    options.
+    """
+    _ensure_data_loaded()
+    event = _EVENTS_BY_ID.get(event_id)
+    if not event:
+        return 0
+    options = event.get("options", []) or []
+    if not options:
+        return 0
+    best = _evaluate_event_options(options, hp, max_hp, gold, deck)
+    for i, opt in enumerate(options):
+        if opt is best:
+            return i
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Neow blessings (IMPROVEMENTS.md #7)
+# ---------------------------------------------------------------------------
+
+# Semantic Neow option tags. Both live play (keyword-scoring the game's
+# option text in ``deterministic_advisor.decide_neow``) and training
+# (scoring the fixed ``NEOW_BLESSINGS`` list via key lookup in
+# ``shadow_advisor.heuristic_neow_option_index``) funnel through the
+# SAME priority table below — so the two code paths can't drift on
+# "how good is Remove a Strike?". If the table changes, both scorers
+# change together. This is the analogue of ``_evaluate_event_options``
+# being shared between training and ``decide_event_default`` for
+# regular events.
+
+# Canonical tags (string constants are fine; keeping a tuple for
+# documentation / future typing).
+NEOW_TAGS = (
+    "deck_thin",       # remove basic / transform — highest impact on Silent
+    "relic",           # obtain a random relic
+    "rare_card",       # gain a random rare / colorless / card pack
+    "upgrade_single",  # upgrade a specific card / card rewards upgraded
+    "draw",            # draw N extra cards first turn
+    "risky_trade",     # lose max hp, gain relic — conditional on hp_frac
+    "rest_bonus",      # rest at a rest site heals more
+    "max_hp",          # +N max hp
+    "full_heal",       # heal to full — conditional on hp_frac
+    "gold",            # +N gold
+    "boss_dependent",  # "boss drops" etc. — Act 2+ value, near-zero for Act 1
+    "unknown",         # fallback for unrecognized text
+)
+
+
+# Tag priorities are tuned to stay close to the legacy
+# ``_NEOW_KEYWORD_SCORES`` table that used to live in
+# ``deterministic_advisor.py`` — so refactoring to a shared table
+# doesn't silently change live-play Neow picks. Deviations from the
+# old numbers: (1) rest_bonus collapses into its own tag so the
+# old 4.0 flat score is preserved instead of leaking into full_heal,
+# (2) boss_dependent stays at its old 3.0 instead of being routed to
+# rare_card, (3) risky_trade is new and only used by training's Neow
+# blessing list (``lose_mhp_for_relic``).
+NEOW_TAG_PRIORITY: dict[str, float] = {
+    "deck_thin":       9.0,
+    "relic":           7.0,
+    "rare_card":       6.5,
+    "upgrade_single":  5.5,
+    "draw":            4.5,
+    "risky_trade":     7.0,  # same as "relic" — it IS a relic grant
+    "rest_bonus":      4.0,
+    "max_hp":          3.5,
+    "full_heal":       4.0,  # conditional — weighted by (1 - hp_frac)
+    "gold":            2.5,
+    "boss_dependent":  3.0,  # Act 1 simulator can't value this
+    "unknown":         1.0,
+}
+
+
+# Keyword → tag classification for LIVE option text. Order matters:
+# earlier, more specific matches win. Mirrors the old
+# ``_NEOW_KEYWORD_SCORES`` order; only the numeric scores have moved to
+# the tag table.
+_NEOW_TEXT_KEYWORDS: list[tuple[str, str]] = [
+    # Most-specific phrases first — earlier matches win, so anything
+    # that also contains a later generic keyword (e.g. "boss drops are
+    # upgraded" contains "upgraded") must be matched up here.
+    ("boss drops",              "boss_dependent"),
+    ("card rewards you see are upgraded", "upgrade_single"),
+    ("rest at a rest site",     "rest_bonus"),
+    ("raise your max hp",       "max_hp"),
+    ("obtain a random relic",   "relic"),
+    ("obtain a relic",          "relic"),
+    ("random rare card",        "rare_card"),
+    ("gain 150 gold",           "gold"),
+    ("gain 100 gold",           "gold"),
+
+    # Top tier: deck thinning
+    ("remove",                  "deck_thin"),
+    ("transform",               "deck_thin"),
+
+    # Upgrade-flavoured mid tier
+    ("enchant",                 "upgrade_single"),
+    ("upgraded",                "upgrade_single"),
+
+    # Card packs / colorless — grouped with rare-card tier
+    ("colorless card",          "rare_card"),
+    ("packs of cards",          "rare_card"),
+
+    # Situational: "draw N extra cards on first turn"
+    ("draw",                    "draw"),
+
+    # Generic fallbacks
+    ("gain",                    "unknown"),
+    ("gold",                    "gold"),
+]
+
+
+# HP / resource loss penalty phrases that apply on TOP of the base tag
+# score. Live play is the only caller that sees option text; training
+# already bakes HP/max_hp deltas into ``changes`` and routes them via a
+# different code path, so this table is only consulted when ``text`` is
+# passed to ``score_neow_option``.
+_NEOW_HP_PENALTIES: list[tuple[str, float]] = [
+    ("lose max hp",                      -4.0),
+    ("lose 10 max hp",                   -5.0),
+    ("lose 7 max hp",                    -4.0),
+    ("lose 5 max hp",                    -3.0),
+    ("lose hp",                          -3.0),
+    ("lose 7 hp",                        -2.5),
+    ("lose 10 hp",                       -3.0),
+    ("lose all gold",                    -1.5),
+    ("treasure chest you open is empty", -1.0),
+]
+
+
+def classify_neow_option_text(text: str) -> str:
+    """Return a ``NEOW_TAGS`` tag for a live Neow option's visible text."""
+    if not text:
+        return "unknown"
+    lower = text.lower()
+    for kw, tag in _NEOW_TEXT_KEYWORDS:
+        if kw in lower:
+            return tag
+    return "unknown"
+
+
+def score_neow_option(
+    *,
+    tag: str,
+    text: str | None = None,
+    hp_frac: float = 1.0,
+) -> float:
+    """Return a comparable score for a Neow option identified by tag.
+
+    ``text`` (optional) is the live option's visible description — when
+    provided, HP-loss penalties in ``_NEOW_HP_PENALTIES`` are applied so
+    live play still ranks "-10 Max HP, obtain a relic" below a plain
+    relic grant. Training callers pass ``text=None`` because they know
+    the underlying blessing key's cost structure already.
+
+    ``hp_frac`` (``hp/max_hp`` in [0, 1]) modulates conditional tags:
+    ``full_heal`` is scored proportional to missing HP, and
+    ``risky_trade`` is suppressed at low HP.
+    """
+    base = NEOW_TAG_PRIORITY.get(tag, 0.0)
+
+    if tag == "full_heal":
+        base *= max(0.0, 1.0 - hp_frac)
+    elif tag == "risky_trade" and hp_frac < 0.7:
+        # Below 70% HP, giving up 8 more max HP is too fragile.
+        base *= 0.4
+
+    if text:
+        lower = text.lower()
+        for phrase, penalty in _NEOW_HP_PENALTIES:
+            if phrase in lower:
+                base += penalty
+
+    return base
+
+
+# Training blessing key → semantic tag. Paired with ``NEOW_BLESSINGS``
+# below. If you add a blessing, add its tag here.
+_NEOW_KEY_TO_TAG: dict[str, str] = {
+    "max_hp_8":            "max_hp",
+    "full_heal":           "full_heal",
+    "gold_100":            "gold",
+    "random_relic":        "relic",
+    "remove_basic":        "deck_thin",
+    "upgrade_random":      "upgrade_single",
+    "lose_mhp_for_relic":  "risky_trade",
+}
+
+
+
+# Canonical Neow blessings exposed to training. Each entry is
+# ``(key, description, applier)`` where ``applier`` is a callable
+# ``(hp, max_hp, gold, deck, card_db, rng) -> changes`` that returns an
+# event-style changes dict. We reuse the event-changes dict so
+# ``play_full_run`` can apply the result with the same code path it uses
+# for events. Selections are enumerated in a stable order so the shared
+# ``EVENT_CHOICE_VOCAB`` assigns each blessing a fixed vocab id.
+#
+# The blessing list is intentionally short and represents the most
+# impactful real Neow choices — expanding this is cheap but more options
+# means more noise for the option head to chew through before it
+# converges on "is this blessing good for the current deck/hp".
+
+_NEOW_EVENT_ID = "__neow__"
+
+
+def _neow_bless_max_hp(hp, max_hp, gold, deck, card_db, rng):
+    c = _empty_event_changes()
+    c["max_hp_delta"] = 8
+    c["hp_delta"] = 8  # heal to new max by also restoring 8
+    return c
+
+
+def _neow_bless_full_heal(hp, max_hp, gold, deck, card_db, rng):
+    c = _empty_event_changes()
+    c["hp_delta"] = max_hp - hp  # fully heal
+    return c
+
+
+def _neow_bless_gold(hp, max_hp, gold, deck, card_db, rng):
+    c = _empty_event_changes()
+    c["gold_delta"] = 100
+    return c
+
+
+def _neow_bless_random_relic(hp, max_hp, gold, deck, card_db, rng):
+    c = _empty_event_changes()
+    c["grants_relic"] = True
+    return c
+
+
+def _neow_bless_remove_basic(hp, max_hp, gold, deck, card_db, rng):
+    """Remove a random Strike or Defend from the starting deck."""
+    c = _empty_event_changes()
+    basic_idxs = [i for i, card in enumerate(deck)
+                  if card.name in ("Strike", "Defend") and not card.upgraded]
+    if basic_idxs:
+        c["cards_removed"] = [rng.choice(basic_idxs)]
+    return c
+
+
+def _neow_bless_upgrade_random(hp, max_hp, gold, deck, card_db, rng):
+    """Upgrade a random non-basic, non-curse card (encoded as remove+add)."""
+    c = _empty_event_changes()
+    candidates = []
+    for i, card in enumerate(deck):
+        if card.upgraded:
+            continue
+        if card.card_type in (CardType.STATUS, CardType.CURSE):
+            continue
+        if card.name in ("Strike", "Defend"):
+            continue
+        candidates.append(i)
+    if candidates:
+        idx = rng.choice(candidates)
+        upgraded = card_db.get_upgraded(deck[idx].id)
+        if upgraded is not None:
+            c["cards_removed"] = [idx]
+            c["cards_added"] = [upgraded]
+    return c
+
+
+def _neow_bless_lose_max_hp_for_relic(hp, max_hp, gold, deck, card_db, rng):
+    c = _empty_event_changes()
+    c["max_hp_delta"] = -8
+    c["grants_relic"] = True
+    return c
+
+
+# Ordered list — the index is stable so vocab ids stay put across runs.
+# Each callable is (key, description, apply_fn).
+NEOW_BLESSINGS: list[tuple[str, str, Any]] = [
+    ("max_hp_8",          "Gain 8 Max HP",                    _neow_bless_max_hp),
+    ("full_heal",         "Fully heal",                       _neow_bless_full_heal),
+    ("gold_100",          "Gain 100 Gold",                    _neow_bless_gold),
+    ("random_relic",      "Obtain a random Relic",            _neow_bless_random_relic),
+    ("remove_basic",      "Remove a Strike or Defend",        _neow_bless_remove_basic),
+    ("upgrade_random",    "Upgrade a random card",            _neow_bless_upgrade_random),
+    ("lose_mhp_for_relic", "Lose 8 Max HP, obtain a Relic",   _neow_bless_lose_max_hp_for_relic),
+]
+
+
+def enumerate_neow_options(
+    deck: list[Card],
+    hp: int,
+    max_hp: int,
+    gold: int,
+    card_db: CardDB,
+    rng: random.Random,
+) -> list[dict]:
+    """Return ``[{vocab_id, description, changes, key}, ...]`` for Neow.
+
+    Mirrors ``enumerate_event_options`` so ``play_full_run`` can reuse the
+    event-option code path. Each option is resolved against a fresh local
+    rng so enumeration never shifts the global run rng (important for
+    determinism when the network ultimately picks a different option).
+    """
+    _ensure_data_loaded()
+    result: list[dict] = []
+    for i, (key, desc, applier) in enumerate(NEOW_BLESSINGS):
+        vid = _event_choice_vocab_id(_NEOW_EVENT_ID, i)
+        local_rng = random.Random(rng.random())
+        changes = applier(hp, max_hp, gold, deck, card_db, local_rng)
+        result.append({
+            "vocab_id": vid,
+            "description": desc,
+            "changes": changes,
+            "key": key,
+        })
+    return result
+
+
+def heuristic_neow_option_index(
+    hp: int,
+    max_hp: int,
+    gold: int,
+    deck: list[Card],
+) -> int:
+    """Rule-of-thumb Neow pick used as the shadow advisor baseline.
+
+    Delegates to the shared ``score_neow_option`` scorer so training and
+    ``deterministic_advisor.decide_neow`` can't drift: both paths
+    consult ``NEOW_TAG_PRIORITY`` via the same code. Returns the index
+    of the best blessing in ``NEOW_BLESSINGS``.
+    """
+    hp_frac = hp / max_hp if max_hp > 0 else 1.0
+    best_i, best_s = 0, -1e9
+    for i, (key, _desc, _fn) in enumerate(NEOW_BLESSINGS):
+        tag = _NEOW_KEY_TO_TAG.get(key, "unknown")
+        s = score_neow_option(tag=tag, text=None, hp_frac=hp_frac)
+        if s > best_s:
+            best_i, best_s = i, s
+    return best_i
+
+
 def _evaluate_event_options(
     options: list[dict],
     hp: int, max_hp: int, gold: int,
@@ -1870,7 +2418,7 @@ def _simulate_shop(
     rng: random.Random,
     floor: int = 8,
     hp: int = 50,
-    max_hp: int = 80,
+    max_hp: int = 70,
     character: str = "SILENT",
     potions: list[dict] | None = None,
     relics: frozenset[str] | set[str] | None = None,
@@ -2062,7 +2610,7 @@ def simulate_act1(
 
     # Character setup
     char_data = _CHARACTERS_BY_ID.get(character, {})
-    hp = char_data.get("starting_hp", 80)
+    hp = char_data.get("starting_hp", 70)
     max_hp = hp
     gold = char_data.get("starting_gold", 99)
     max_energy = char_data.get("max_energy", 3)

@@ -36,6 +36,7 @@ class RunLogger:
         self._combat_start_hp: int | None = None
         self._combat_enemies: list[dict] | None = None
         self._combat_turn: int = 0
+        self._combat_move_log: list[dict] = []  # Per-turn enemy move history for boss analysis
         self._last_map_node: dict | None = None  # Track map position across screens
 
     def __del__(self) -> None:
@@ -127,16 +128,50 @@ class RunLogger:
 
         self._combat_start_hp = player.get("current_hp")
         self._combat_turn = 0
+        self._combat_move_log = []  # Reset move log for this combat
         self._combat_enemies = [
             {"name": e.get("name", "?"), "hp": e.get("current_hp", 0), "max_hp": e.get("max_hp", 0)}
             for e in enemies if e.get("is_alive", True)
         ]
 
         run = game_state.get("run") or {}
+
+        # Extract encounter ID from agent_view or combat dict
+        agent_view = game_state.get("agent_view") or {}
+        av_combat = agent_view.get("combat") or {}
+        encounter_id = (
+            av_combat.get("encounter_id")
+            or combat.get("encounter_id")
+            or combat.get("encounter")
+            or ""
+        )
+
+        # Capture full enemy details for unknown monster identification
+        enemies_full = []
+        for e in enemies:
+            if not e.get("is_alive", True):
+                continue
+            entry: dict[str, Any] = {
+                "name": e.get("name", "?"),
+                "id": e.get("id") or e.get("enemy_id", ""),
+                "hp": e.get("current_hp", 0),
+                "max_hp": e.get("max_hp", 0),
+                "block": e.get("block", 0),
+                "powers": [
+                    {"name": p.get("name", ""), "id": p.get("id", ""), "amount": p.get("amount", 0)}
+                    for p in (e.get("powers") or [])
+                ],
+                "raw_intents": e.get("intents") or e.get("intent") or [],
+                "raw_move": e.get("move") or e.get("next_move"),
+            }
+            enemies_full.append(entry)
+
         self._emit({
             "type": "combat_start",
             "floor": run.get("floor"),
+            "encounter_id": encounter_id,
             "enemies": self._combat_enemies,
+            "enemies_full": enemies_full,
         })
 
     def log_combat_turn(
@@ -148,6 +183,7 @@ class RunLogger:
         game_state: dict | None = None,
         targets_chosen: list[int | None] | None = None,
         network_value: float | None = None,
+        source: str = "mcts",
     ) -> None:
         """Log a single combat turn's solver output.
 
@@ -160,6 +196,10 @@ class RunLogger:
 
         network_value is the MCTS root value (win expectancy, -1 to +1)
         from the start of the turn.
+
+        source tags where this decision came from — default "mcts" because
+        combat is driven by AlphaZeroMCTS. Fallback paths should pass
+        "fallback_first_action". See IMPROVEMENTS.md #11.
         """
         self._combat_turn += 1
 
@@ -174,12 +214,48 @@ class RunLogger:
             "score": round(score, 1),
             "states_evaluated": states_evaluated,
             "solve_ms": round(solve_ms, 1),
+            "source": source,
         }
         if targets_chosen is not None:
             event["targets_chosen"] = targets_chosen
         if network_value is not None:
             event["network_value"] = round(network_value, 4)
 
+        self._emit(event)
+
+    def log_decision_detail(
+        self,
+        game_state: dict,
+        screen_type: str,
+        all_options: list[dict],
+        chosen_idx: int,
+        scores: list[float] | None = None,
+        source: str = "network",
+        extra: dict | None = None,
+    ) -> None:
+        """Log detailed decision info for performance tuning.
+
+        Captures every option that was available, the score assigned to each,
+        and which was chosen. This is richer than log_decision for offline analysis.
+        """
+        self.ensure_run(game_state)
+        run = game_state.get("run") or {}
+
+        event: dict[str, Any] = {
+            "type": "decision_detail",
+            "screen_type": screen_type,
+            "floor": run.get("floor"),
+            "hp": run.get("current_hp"),
+            "max_hp": run.get("max_hp"),
+            "gold": run.get("gold"),
+            "all_options": all_options,
+            "chosen_idx": chosen_idx,
+            "source": source,
+        }
+        if scores is not None:
+            event["scores"] = [round(s, 4) for s in scores]
+        if extra:
+            event.update(extra)
         self._emit(event)
 
     def _emit_combat_snapshot(self, game_state: dict, turn: int) -> None:
@@ -257,8 +333,24 @@ class RunLogger:
                 "intent_damage": intent_damage,
                 "intent_hits": intent_hits,
                 "intent_block": intent_block,
+                "raw_intents": e.get("intents") or e.get("intent") or [],
+                "raw_move": e.get("move") or e.get("next_move"),
             }
             enemies.append(entry)
+
+        # Accumulate per-turn enemy intent log for boss fight analysis
+        turn_moves = []
+        for e in enemies:
+            turn_moves.append({
+                "name": e["name"],
+                "id": e.get("id", ""),
+                "intent_type": e.get("intent_type"),
+                "intent_damage": e.get("intent_damage"),
+                "intent_hits": e.get("intent_hits"),
+                "intent_block": e.get("intent_block"),
+                "hp": e.get("hp"),
+            })
+        self._combat_move_log.append({"turn": turn, "enemies": turn_moves})
 
         self._emit({
             "type": "combat_snapshot",
@@ -289,17 +381,107 @@ class RunLogger:
             return  # No active combat to close
         run = game_state.get("run") or {}
         hp_after = run.get("current_hp") or (game_state.get("combat", {}).get("player", {}).get("current_hp"))
+        floor = run.get("floor")
 
-        self._emit({
+        # Determine if this is a boss fight
+        boss_floors = {15, 16, 17, 33, 34, 51, 52}
+        is_boss = floor in boss_floors if floor else False
+
+        event: dict[str, Any] = {
             "type": "combat_end",
             "outcome": outcome,
             "turns": self._combat_turn,
             "hp_before": self._combat_start_hp,
             "hp_after": hp_after,
-        })
+            "floor": floor,
+            "is_boss": is_boss,
+        }
+
+        # Include enemy roster at combat end for post-analysis
+        if self._combat_enemies:
+            event["enemies"] = self._combat_enemies
+
+        self._emit(event)
+
+        # If this was a boss fight, emit a dedicated boss_fight event with
+        # extra detail for building/validating simulator boss models
+        if is_boss and self._combat_enemies:
+            self._emit_boss_fight_detail(game_state, outcome)
+
         self._combat_start_hp = None
         self._combat_enemies = None
         self._combat_turn = 0
+
+    def _emit_boss_fight_detail(self, game_state: dict, outcome: str) -> None:
+        """Emit rich boss fight data for analysis and simulator validation.
+
+        Captures everything needed to build or verify boss encounter models:
+        enemy IDs, HP values, move patterns observed during the fight, player
+        deck/relics/potions state, and the full encounter context.
+        """
+        run = game_state.get("run") or {}
+        combat = game_state.get("combat") or {}
+        enemies_raw = combat.get("enemies") or []
+        player = combat.get("player") or {}
+
+        # Capture full enemy details including IDs (for matching simulator tables)
+        enemies_detail = []
+        for e in enemies_raw:
+            entry: dict[str, Any] = {
+                "name": e.get("name", "?"),
+                "id": e.get("id") or e.get("enemy_id") or e.get("encounter_id", ""),
+                "hp": e.get("current_hp", 0),
+                "max_hp": e.get("max_hp", 0),
+                "block": e.get("block", 0),
+                "is_alive": e.get("is_alive", True),
+                # Capture ALL powers/buffs — useful for understanding boss mechanics
+                "powers": [
+                    {"name": p.get("name", ""), "id": p.get("id", ""), "amount": p.get("amount", 0)}
+                    for p in (e.get("powers") or [])
+                ],
+                # Capture raw intents — multiple field names for robustness
+                "raw_intents": e.get("intents") or e.get("intent") or [],
+                "raw_move": e.get("move") or e.get("next_move"),
+                "raw_move_history": e.get("move_history") or e.get("moves_used") or [],
+            }
+            enemies_detail.append(entry)
+
+        # Capture the encounter context
+        encounter_id = ""
+        agent_view = game_state.get("agent_view") or {}
+        av_combat = agent_view.get("combat") or {}
+        encounter_id = (
+            av_combat.get("encounter_id")
+            or combat.get("encounter_id")
+            or combat.get("encounter")
+            or ""
+        )
+
+        self._emit({
+            "type": "boss_fight",
+            "encounter_id": encounter_id,
+            "outcome": outcome,
+            "turns": self._combat_turn,
+            "floor": run.get("floor"),
+            "hp_before": self._combat_start_hp,
+            "hp_after": run.get("current_hp") or player.get("current_hp"),
+            "max_hp": run.get("max_hp") or player.get("max_hp"),
+            "energy": run.get("max_energy") or player.get("energy"),
+            "enemies": enemies_detail,
+            "deck": _summarize_deck_list(run.get("deck", [])),
+            "deck_size": len(run.get("deck", [])),
+            "relics": [
+                {"name": r.get("name", "?"), "id": r.get("relic_id") or r.get("id", "")}
+                for r in run.get("relics", [])
+            ],
+            "potions": [
+                {"name": p.get("name"), "occupied": p.get("occupied", False)}
+                for p in run.get("potions", [])
+            ],
+            "gold": run.get("gold"),
+            # Full move history per turn — critical for building unknown boss models
+            "move_log": self._combat_move_log,
+        })
 
     def log_run_end(self, game_state: dict, outcome: str) -> None:
         """Log the end of a run."""

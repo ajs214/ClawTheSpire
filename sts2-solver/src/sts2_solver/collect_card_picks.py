@@ -57,7 +57,7 @@ def collect_one_run(
     card_db = load_cards()
 
     char_data = _CHARACTERS_BY_ID.get(character, {})
-    hp = char_data.get("starting_hp", 80)
+    hp = char_data.get("starting_hp", 70)
     max_hp = hp
     gold = char_data.get("starting_gold", 99)
     max_energy = char_data.get("max_energy", 3)

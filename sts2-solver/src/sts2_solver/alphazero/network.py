@@ -45,6 +45,10 @@ from .encoding import (
 if TYPE_CHECKING:
     pass
 
+# Mirror of self_play.OPTION_EVENT_CHOICE — duplicated here to avoid
+# circular import (self_play imports STS2Network).
+_OPTION_EVENT_CHOICE = 15
+
 
 class CardSetEncoder(nn.Module):
     """Encode a variable-size set of cards using self-attention.
@@ -160,6 +164,10 @@ class STS2Network(nn.Module):
         # map pathing, and shop (buy/remove/leave). Option type embedding
         # carries context (free reward vs 75g purchase vs 50g removal).
         self.option_type_embed = nn.Embedding(cfg.num_option_types, cfg.option_type_embed_dim, padding_idx=0)
+        # V10: dedicated embedding for event-choice options, replacing the
+        # positional placeholder that abused card_embed indices.
+        self.event_choice_embed = nn.Embedding(
+            cfg.num_event_choices, cfg.event_choice_embed_dim, padding_idx=0)
         self.option_eval_head = nn.Sequential(
             nn.Linear(256 + cfg.option_type_embed_dim + cfg.card_embed_dim, 64),
             nn.ReLU(),
@@ -301,17 +309,28 @@ class STS2Network(nn.Module):
         self,
         hidden: torch.Tensor,         # (batch, 256)
         option_types: torch.Tensor,    # (batch, num_options) — option type indices
-        option_cards: torch.Tensor,    # (batch, num_options) — card vocab indices (0 if N/A)
+        option_cards: torch.Tensor,    # (batch, num_options) — card/event-choice vocab indices
         option_mask: torch.Tensor,     # (batch, num_options) — True = invalid/padded
     ) -> torch.Tensor:
         """Score a set of discrete options. Returns (batch, num_options) scores (unbounded)."""
         type_embeds = self.option_type_embed(option_types)      # (B, N, 16)
-        card_embeds = self.card_embed(option_cards)              # (B, N, 32)
+
+        # V10: event-choice options use a dedicated embedding table instead
+        # of the card embedding.  We compute both lookups and select per-slot
+        # based on whether option_type == OPTION_EVENT_CHOICE.
+        is_event = (option_types == _OPTION_EVENT_CHOICE)       # (B, N)
+        # Clamp indices to valid range for each table to avoid OOB
+        card_idx = option_cards.clamp(0, self.card_embed.num_embeddings - 1)
+        evt_idx = option_cards.clamp(0, self.event_choice_embed.num_embeddings - 1)
+        card_embeds = self.card_embed(card_idx)                 # (B, N, 32)
+        evt_embeds = self.event_choice_embed(evt_idx)           # (B, N, 32)
+        opt_embeds = torch.where(
+            is_event.unsqueeze(-1), evt_embeds, card_embeds)    # (B, N, 32)
 
         batch, num_opts, _ = type_embeds.shape
         hidden_exp = hidden.unsqueeze(1).expand(-1, num_opts, -1)  # (B, N, 256)
 
-        combined = torch.cat([hidden_exp, type_embeds, card_embeds], dim=-1)  # (B, N, 304)
+        combined = torch.cat([hidden_exp, type_embeds, opt_embeds], dim=-1)  # (B, N, 304)
         scores = self.option_eval_head(combined).squeeze(-1)      # (B, N)
 
         # Mask invalid options with large negative

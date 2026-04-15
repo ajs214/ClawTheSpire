@@ -89,6 +89,11 @@ class OptionSample:
     option_cards: list[int]   # Card vocab indices (0 when N/A)
     chosen_idx: int           # Which option was picked
     value: float              # Run outcome value (assigned after run ends)
+    # Agreement-rate diagnostic (#10): shadow pick from the deterministic
+    # advisor computed at the same decision site. None when shadow logging
+    # is disabled (production training). Never used in loss — read-only
+    # telemetry consumed by tools/agreement_rate.py.
+    shadow_chosen_idx: int | None = None
 
 
 # Option type constants (indices into option_type_embed)
@@ -106,6 +111,16 @@ OPTION_SHOP_LEAVE = 11
 OPTION_CARD_REWARD = 12
 OPTION_CARD_SKIP = 13
 OPTION_SHOP_BUY_POTION = 14
+# IMPROVEMENTS.md #4: event-choice decisions get their own option type so
+# the option-head network can learn per-event policies from outcome value.
+# opt_cards[i] carries the per-choice vocab id (see EVENT_CHOICE_VOCAB in
+# simulator.py). A new event seen for the first time maps to 0 (UNK) and
+# still gets a reasonable prior from the side-features wired through.
+OPTION_EVENT_CHOICE = 15
+# IMPROVEMENTS.md #18: shop relics were invisible to the option head.
+# Now enumerated in full_run's shop loop and bridge.shop_options_from_mcp.
+# opt_cards[i] carries the relic's vocab index from vocabs.relics.
+OPTION_SHOP_BUY_RELIC = 16
 
 ROOM_TYPE_TO_OPTION = {
     "weak": OPTION_MAP_WEAK,

@@ -94,6 +94,9 @@ START_OF_COMBAT: dict[str, dict[str, int]] = {
     "RADIANT_PEARL":     {},  # luminesce to hand; damage mult proxy
     "NEOWS_TORMENT":     {},  # Neow's Fury in deck; damage mult proxy
     "STORYBOOK":         {},
+    # --- cosmicImpetus/rune-based (summon/channel proxies) ---
+    "DATA_DISK":         {},  # Channel 1 Focus; damage mult proxy
+    "RUNIC_CAPACITOR":   {},  # Channel 3 Orb slots; damage mult proxy
 }
 
 # Akabeko's "next attack deals 8 extra" isn't a Power in our engine;
@@ -176,6 +179,11 @@ TURN_START: dict[str, list[dict]] = {
     "POLLINOUS_CORE":    [{"_marker": "pollinous"}],
     "SEAL_OF_GOLD":      [{"energy": 1}],  # spend-gold-for-energy proxy
 
+    # --- missing rune-based relics (summon/strength/star proxies) ---
+    "BOUND_PHYLACTERY":  [{"draw": 1}],  # Summon 1; proxy via extra draw
+    "BRIMSTONE":         [{"strength": 1}],            # gain Strength; direct effect
+    "EMOTION_CHIP":      [{"draw": 1}],                # conditional passive; proxy via draw
+
     "BLACK_BLOOD":       [],                            # end-of-combat only
 }
 
@@ -256,6 +264,18 @@ CARD_PLAY_TRIGGERS: dict[str, dict] = {
     # Trifecta / rainbow
     "RAINBOW_RING":  {"match": "trifecta", "every": 1, "scope": "turn",
                       "effect": {"strength": 1, "dexterity": 1}},
+
+    # --- missing "whenever" triggers ---
+    "BONE_FLUTE":    {"match": "power",  "every": 1, "scope": "always",
+                      "effect": {"block": 2}},  # Osty attack proxy
+    "CHARONS_ASHES": {"match": "exhaust", "every": 1, "scope": "always",
+                      "effect": {"damage_random": 3}},
+    "IVORY_TILE":    {"match": "expensive", "every": 1, "scope": "always",
+                      "effect": {"energy": 1}},  # cards cost 3+ → energy bonus
+    "REGALITE":      {"match": "power",  "every": 1, "scope": "always",
+                      "effect": {"block": 2}},  # colorless creation proxy
+    "SELF_FORMING_CLAY":{"match": "vulnerable_all", "every": 1, "scope": "combat",
+                         "effect": {"block": 3}},  # HP loss proxy via vulnerable check
 }
 
 
@@ -308,9 +328,11 @@ ENEMY_DEATH_TRIGGERS: dict[str, dict] = {
 
 FIRST_HP_LOSS_TRIGGERS: dict[str, dict] = {
     "CENTENNIAL_PUZZLE":{"draw": 3},
+    "DEMON_TONGUE":     {"heal": 3},  # heal equal to damage taken; proxy as flat heal
+    "RUINED_HELMET":    {"strength": 2},  # double strength gain; proxy via strength
 }
 
-FIRST_BLOCK_GAIN_DOUBLE: set[str] = {"VAMBRACE"}
+FIRST_BLOCK_GAIN_DOUBLE: set[str] = {"VAMBRACE"}  # Already defined, but now actually used
 
 
 # =============================================================================
@@ -331,6 +353,7 @@ END_OF_TURN: dict[str, dict] = {
     "PARRYING_SHIELD": {"if_block_at_least": (10, {"damage_random": 6})},
     "SCREAMING_FLAGON":{"if_empty_hand": {"damage_all": 20}},
     "POCKETWATCH":     {"if_played_at_most": (3, {"_marker": "pocketwatch_flag"})},
+    "LUNAR_PASTRY":    {},  # gain Star at end-of-turn; proxy via GLOBAL_DAMAGE_MULTIPLIERS
 }
 
 
@@ -537,6 +560,31 @@ GLOBAL_DAMAGE_MULTIPLIERS: dict[str, float] = {
     "SCROLL_BOXES":     1.02,  # lose gold + card pack
     "SWORD_OF_STONE":   1.03,  # transforms after 5 elites
     "VAKUU_CARD_SELECTOR":1.00, # mystery — neutral
+    # --- newly added rune/ancient relics (26 relics) ---
+    "BOUND_PHYLACTERY": 1.02,  # summon minion proxy
+    "BRIMSTONE":        1.03,  # strength gain → direct effect, small bonus
+    "CRACKED_CORE":     1.02,  # Channel lightning; damage mult proxy
+    "DATA_DISK":        1.02,  # Focus channel; damage mult proxy
+    "DEMON_TONGUE":     1.02,  # heal-on-damage; defensive proxy
+    "EMOTION_CHIP":     1.02,  # conditional passive; small bonus
+    "FUNERARY_MASK":    1.02,  # Soul mechanic; exotic proxy
+    "GOLD_PLATED_CABLES":1.02, # extra orb passive; complex mechanic
+    "IVORY_TILE":       1.01,  # expensive card energy; small bonus
+    "LUNAR_PASTRY":     1.02,  # star gain; exotic proxy
+    "METRONOME":        1.02,  # channel threshold; complex proxy
+    "MINI_REGENT":      1.02,  # star spend bonus; exotic proxy
+    "ORANGE_DOUGH":     1.03,  # free colorless cards on combat start
+    "PAPER_PHROG":      1.04,  # vulnerable damage amp; significant damage boost
+    "POWER_CELL":       1.02,  # zero-cost cards on combat start
+    "RED_SKULL":        1.02,  # strength when low HP; conditional proxy
+    "REGALITE":         1.01,  # colorless card creation; small bonus
+    "RUINED_HELMET":    1.02,  # first strength gain bonus; small bonus
+    "RUNIC_CAPACITOR":  1.03,  # extra orb slots; damage mult proxy
+    "SELF_FORMING_CLAY":1.02,  # damage reduction; defensive proxy
+    "SYMBIOTIC_VIRUS":  1.02,  # poison channel; damage mult proxy
+    "UNDYING_SIGIL":    1.01,  # doom mechanic; defensive/niche proxy
+    "VAMBRACE":         1.01,  # first block doubling; already in FIRST_BLOCK_GAIN_DOUBLE
+    "VITRUVIAN_MINION": 1.03,  # double damage on minion cards
 }
 
 GLOBAL_BLOCK_MULTIPLIERS: dict[str, float] = {

@@ -595,7 +595,7 @@ def xgb_pick_card_reward(
     deck: list[Card],
     floor: int = 1,
     hp: int = 50,
-    max_hp: int = 80,
+    max_hp: int = 70,
 ) -> Card | None:
     """Drop-in replacement for simulator._pick_card_reward.
 
