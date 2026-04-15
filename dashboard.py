@@ -30,6 +30,7 @@ BOSS_LOG_DIRS = {
     "v9": "alphazero_checkpoints_v9",
     "v10": "alphazero_checkpoints_v10",
     "v11": "alphazero_checkpoints_v11",
+    "v12": "alphazero_checkpoints_v12",
 }
 
 # Cached boss data (refreshed by poll thread)
@@ -337,12 +338,13 @@ VERSION_FILES = {
     "v9": "training_v9_progress.json",
     "v10": "training_v10_progress.json",
     "v11": "training_v11_progress.json",
+    "v12": "training_v12_progress.json",
 }
 
 # --- Shared state ---
 lock = threading.Lock()
 all_history: dict[str, list[dict]] = {
-    "v1": [], "v2": [], "v3": [], "v4": [], "v5": [], "v6": [], "v7": [], "v8": [], "v9": [], "v10": [], "v11": [],
+    "v1": [], "v2": [], "v3": [], "v4": [], "v5": [], "v6": [], "v7": [], "v8": [], "v9": [], "v10": [], "v11": [], "v12": [],
 }
 snapshots: dict[str, dict] = {}
 active_version: str = ""  # whichever is currently training
@@ -530,6 +532,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .v9c { color: #39d353; }
   .v10c { color: #f0883e; }
   .v11c { color: #e05dff; }
+  .v12c { color: #00d4aa; }
   .recent { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; }
   .recent h2 { color: #8b949e; font-size: 0.85em; text-transform: uppercase; margin-bottom: 10px; }
   .recent table { width: 100%; border-collapse: collapse; }
@@ -674,10 +677,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <div class="updated" id="updated"></div>
 
 <script>
-const COLORS = { early: '#6e7681', v5: '#bc8cff', v6: '#ff7b72', v7: '#ffa657', v8: '#2ea9e6', v9: '#39d353', v10: '#f0883e', v11: '#e05dff' };
-const LABELS = { early: 'Early (V1–V4)', v5: 'V5', v6: 'V6', v7: 'V7', v8: 'V8', v9: 'V9', v10: 'V10', v11: 'V11' };
+const COLORS = { early: '#6e7681', v5: '#bc8cff', v6: '#ff7b72', v7: '#ffa657', v8: '#2ea9e6', v9: '#39d353', v10: '#f0883e', v11: '#e05dff', v12: '#00d4aa' };
+const LABELS = { early: 'Early (V1–V4)', v5: 'V5', v6: 'V6', v7: 'V7', v8: 'V8', v9: 'V9', v10: 'V10', v11: 'V11', v12: 'V12' };
 // Display versions collapse V1–V4 into a single "early" track for readability.
-const VERSIONS = ['early','v5','v6','v7','v8','v9','v10','v11'];
+const VERSIONS = ['early','v5','v6','v7','v8','v9','v10','v11','v12'];
 const EARLY_SOURCES = ['v1','v2','v3','v4'];
 
 // Concatenate V1→V4 histories in order, remapping generation numbers
@@ -789,7 +792,7 @@ pctOpts.scales.y.ticks = { ...pctOpts.scales.y.ticks, callback: function(v) { re
 function makeVersionDatasets(field) {
   return VERSIONS.map(v => ({
     label: LABELS[v], data: [], borderColor: COLORS[v],
-    borderWidth: (v==='v11') ? 3.2 : (v==='v10') ? 3 : (v==='v9') ? 2.8 : (v==='v8') ? 2.4 : (v==='v7') ? 2 : (v==='v6') ? 1.6 : (v==='v5') ? 1.4 : 1.2,
+    borderWidth: (v==='v12') ? 3.5 : (v==='v11') ? 3.2 : (v==='v10') ? 3 : (v==='v9') ? 2.8 : (v==='v8') ? 2.4 : (v==='v7') ? 2 : (v==='v6') ? 1.6 : (v==='v5') ? 1.4 : 1.2,
     pointRadius: 0, tension: 0.3, borderDash: v==='early' ? [4,4] : [],
   }));
 }
@@ -1163,7 +1166,7 @@ async function poll() {
     const histDisplay = { early: earlyHist };
     const snapsDisplay = {};
     if (earlySnap) snapsDisplay.early = earlySnap;
-    for (const v of ['v5','v6','v7','v8','v9','v10','v11']) {
+    for (const v of ['v5','v6','v7','v8','v9','v10','v11','v12']) {
       histDisplay[v] = d.history[v] || [];
       if (d.snapshots[v]) {
         // Override games_played with cumulative total across sessions
@@ -1176,9 +1179,9 @@ async function poll() {
     }
 
     // Active version: if the backend reports v1–v4, map it to "early".
-    let activeVer = d.active_version || 'v11';
+    let activeVer = d.active_version || 'v12';
     if (EARLY_SOURCES.includes(activeVer)) activeVer = 'early';
-    const snap = snapsDisplay[activeVer] || snapsDisplay.v11 || snapsDisplay.v10 || snapsDisplay.v9 || snapsDisplay.v8 || snapsDisplay.v7 || snapsDisplay.v6 || snapsDisplay.v5 || snapsDisplay.early || {};
+    const snap = snapsDisplay[activeVer] || snapsDisplay.v12 || snapsDisplay.v11 || snapsDisplay.v10 || snapsDisplay.v9 || snapsDisplay.v8 || snapsDisplay.v7 || snapsDisplay.v6 || snapsDisplay.v5 || snapsDisplay.early || {};
 
     updateStats(snap, activeVer);
     updateVersionTable(snapsDisplay, histDisplay);
@@ -1197,7 +1200,7 @@ async function poll() {
     timeChart.update('none');
 
     // Boss data for active version
-    const rawActiveVer = d.active_version || 'v11';
+    const rawActiveVer = d.active_version || 'v12';
     const activeBoss = (d.boss_data || {})[rawActiveVer] || {};
     updateBossTable(activeBoss.per_boss || {});
     const gameBossMap = activeBoss.game_boss || {};
@@ -1284,7 +1287,7 @@ function updateLiveRuns(runs) {
     const bossInfo = (r.boss_fights || []).map(bf => bf.encounter_id || '?').join(', ') || '—';
     const bossColor = r.boss_fights && r.boss_fights.length ? (r.boss_fights.some(bf => bf.outcome === 'win') ? '#3fb950' : '#f85149') : '#484f58';
     const relicCount = (r.relics_gained || []).length + (r.starting_relics || []).length;
-    const verColor = {'v9':'#39d353','v10':'#f0883e','v11':'#e05dff'}[r.train_version] || '#8b949e';
+    const verColor = {'v9':'#39d353','v10':'#f0883e','v11':'#e05dff','v12':'#00d4aa'}[r.train_version] || '#8b949e';
     return `<tr onclick="showRunDetail('${r.run_id}')" style="${selectedRunId === r.run_id ? 'background:#1c2128' : ''}">
       <td style="font-family:monospace;color:#58a6ff">${r.run_id.substring(0,8)}</td>
       <td style="color:${verColor};font-weight:bold;font-size:0.8em">${r.train_version || '?'}</td>
