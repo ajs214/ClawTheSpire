@@ -27,8 +27,9 @@
 #       * Late-gen sims reach 180, close to live play's 200
 #   - Total custom card effects: 75 (was 56)
 #
-# No migration needed — V12 uses same network architecture as V11.
-# Resumes directly from latest V11 checkpoint.
+# Cold start — trains from random weights on the corrected V12 simulator.
+# No V11 checkpoint needed; the simulator changes are substantial enough
+# that learning from scratch produces a cleaner model.
 #
 # Usage:
 #   nohup bash ~/AJS_CTS/ClawTheSpire/train-v12-12hr.sh > train-v12-12hr.log 2>&1 &
@@ -49,29 +50,20 @@ BOSS_LOG_FILE="../alphazero_checkpoints_v12/boss_fights.jsonl"
 
 mkdir -p "$SAVE_DIR"
 
-# V12 uses same network architecture as V11 — copy latest V11 checkpoint
-if ! ls "$SAVE_DIR"/gen_*.pt &>/dev/null; then
-    V11_DIR="../alphazero_checkpoints_v11"
-    LATEST_V11=$(ls -t "$V11_DIR"/gen_*.pt 2>/dev/null | head -1)
-    if [ -n "$LATEST_V11" ]; then
-        echo "Copying latest V11 checkpoint to V12: $LATEST_V11"
-        cp "$LATEST_V11" "$SAVE_DIR/gen_0000.pt"
-    else
-        echo "!! No V11 checkpoint found in $V11_DIR"
-        echo "!! V12 needs a V11 checkpoint to resume from."
-        echo "!! Either run V11 training first or manually place a checkpoint."
-        exit 1
-    fi
-fi
+# V12: cold start — fresh random network. The simulator has changed enough
+# (19 new card effects, 9 gap fixes, enemy intent resolution) that we want
+# the network to learn from scratch on the corrected simulator rather than
+# inheriting potentially wrong beliefs from V11.
+# If no checkpoint exists, training starts from random weights automatically.
 
 LATEST_CKPT=$(ls -t "$SAVE_DIR"/gen_*.pt 2>/dev/null | head -1)
 
-echo "=== STS2 AlphaZero Training V12 — 12 Hour Run ==="
+echo "=== STS2 AlphaZero Training V12 — 12 Hour Run (COLD START) ==="
 echo "  Duration cap:  12 hours (hard timeout)"
 echo "  Gen budget:    1800"
 echo "  Games/gen:     10"
 echo "  MCTS sims:     400 base (progressive: 160→720)"
-echo "  Resuming from: $(basename "$LATEST_CKPT")"
+echo "  Start:         ${LATEST_CKPT:+Resuming from $(basename "$LATEST_CKPT")}${LATEST_CKPT:-FRESH (random weights)}"
 echo "  Save dir:      $SAVE_DIR"
 echo "  Progress:      $PROGRESS_FILE"
 echo "  Boss log:      $BOSS_LOG_FILE"
