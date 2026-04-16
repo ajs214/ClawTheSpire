@@ -1276,6 +1276,7 @@ class Runner:
             solve_ms=total_solve_ms,
             game_state=turn_start_gs,
             network_value=turn_root_value,
+            enemy_move_indices=getattr(self, '_combat_move_indices', None),
         )
 
         if self._store_run_started:

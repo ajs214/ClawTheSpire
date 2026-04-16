@@ -26,6 +26,18 @@ def _match_move_index(enemy_id: str, intent_type: str | None,
     if not table or intent_type is None:
         return None
 
+    # Normalize intent types: the game sometimes sends variants like
+    # "DebuffStrong" that should match our table's "Debuff", or
+    # "Sleep"/"Summon" which map to "Buff"/"Debuff" in our tables.
+    # "StatusCard" is a pre-combat indicator that can mean any non-attack.
+    _INTENT_NORMALIZE = {
+        "DebuffStrong": "Debuff",
+        "Sleep": "Buff",       # passive/setup intent
+        "Summon": "Buff",      # summoning is a non-attack action
+        "StatusCard": "Debuff",  # status card intent → debuff category
+    }
+    intent_type = _INTENT_NORMALIZE.get(intent_type, intent_type)
+
     best_idx = None
     best_score = -1
     fuzzy_match_used = False
@@ -89,14 +101,19 @@ def _match_move_index(enemy_id: str, intent_type: str | None,
             file=sys.stderr
         )
 
-    # If still no match, fall back to the first move (default)
+    # If still no match, fall back to the first move (default).
+    # Only warn once per enemy ID to avoid log spam.
     if best_idx is None and table:
         best_idx = 0
-        import sys
-        print(
-            f"[enemy_predict] No fuzzy match for {enemy_id}; "
-            f"using default move (index 0)",
-            file=sys.stderr
+        if not hasattr(_match_move_index, "_warned"):
+            _match_move_index._warned = set()
+        if enemy_id not in _match_move_index._warned:
+            _match_move_index._warned.add(enemy_id)
+            import sys
+            print(
+                f"[enemy_predict] No fuzzy match for {enemy_id} "
+                f"(intent={intent_type}); using default move (index 0)",
+                file=sys.stderr
         )
 
     return best_idx

@@ -22,6 +22,23 @@ LOGS_DIR = Path(os.environ.get(
 ))
 
 
+def floor_to_act(floor: int | None) -> int | None:
+    """Derive act number from floor number.
+
+    STS2 Silent act boundaries (observed from live play):
+      Act 1: floors 1–17  (boss on 15-17)
+      Act 2: floors 18–34 (boss on 33-34)
+      Act 3: floors 35+   (boss on 51-52)
+    """
+    if floor is None:
+        return None
+    if floor <= 17:
+        return 1
+    if floor <= 34:
+        return 2
+    return 3
+
+
 class RunLogger:
     """Tracks a single run, emitting events to a JSONL file."""
 
@@ -34,9 +51,11 @@ class RunLogger:
         self._prev_state: dict | None = None
         self._turn_start_hp: int | None = None
         self._combat_start_hp: int | None = None
+        self._combat_floor: int | None = None
         self._combat_enemies: list[dict] | None = None
         self._combat_turn: int = 0
         self._combat_move_log: list[dict] = []  # Per-turn enemy move history for boss analysis
+        self._prev_enemy_hp: dict[str, int] = {}  # enemy key → HP at last snapshot (for deltas)
         self._last_map_node: dict | None = None  # Track map position across screens
 
     def __del__(self) -> None:
@@ -122,6 +141,13 @@ class RunLogger:
     def log_combat_start(self, game_state: dict) -> None:
         """Log the beginning of a combat encounter."""
         self.ensure_run(game_state)
+
+        # Auto-close any unclosed combat — happens when the game transitions
+        # directly from one combat to the next without the runner detecting the
+        # end (e.g., screen stays on COMBAT between fights).
+        if self._combat_start_hp is not None:
+            self.log_combat_end(game_state, "win")
+
         combat = game_state.get("combat") or {}
         enemies = combat.get("enemies") or []
         player = combat.get("player") or {}
@@ -129,12 +155,14 @@ class RunLogger:
         self._combat_start_hp = player.get("current_hp")
         self._combat_turn = 0
         self._combat_move_log = []  # Reset move log for this combat
+        self._prev_enemy_hp = {}  # Reset HP delta tracking
         self._combat_enemies = [
             {"name": e.get("name", "?"), "hp": e.get("current_hp", 0), "max_hp": e.get("max_hp", 0)}
             for e in enemies if e.get("is_alive", True)
         ]
 
         run = game_state.get("run") or {}
+        self._combat_floor = run.get("floor")  # Track floor for combat_end
 
         # Extract encounter ID from agent_view or combat dict
         agent_view = game_state.get("agent_view") or {}
@@ -166,9 +194,19 @@ class RunLogger:
             }
             enemies_full.append(entry)
 
+        floor = run.get("floor")
+
+        # Build encounter_id from multiple sources — fallback to enemy names
+        # so we always have something usable for grouping encounters
+        if not encounter_id and enemies_full:
+            encounter_id = "+".join(
+                sorted(e["name"] for e in enemies_full)
+            )
+
         self._emit({
             "type": "combat_start",
-            "floor": run.get("floor"),
+            "floor": floor,
+            "act": floor_to_act(floor),
             "encounter_id": encounter_id,
             "enemies": self._combat_enemies,
             "enemies_full": enemies_full,
@@ -184,6 +222,7 @@ class RunLogger:
         targets_chosen: list[int | None] | None = None,
         network_value: float | None = None,
         source: str = "mcts",
+        enemy_move_indices: dict | None = None,
     ) -> None:
         """Log a single combat turn's solver output.
 
@@ -205,7 +244,7 @@ class RunLogger:
 
         # Emit snapshot BEFORE the turn event (pre-action state)
         if game_state is not None:
-            self._emit_combat_snapshot(game_state, self._combat_turn)
+            self._emit_combat_snapshot(game_state, self._combat_turn, enemy_move_indices)
 
         event: dict[str, Any] = {
             "type": "combat_turn",
@@ -241,10 +280,12 @@ class RunLogger:
         self.ensure_run(game_state)
         run = game_state.get("run") or {}
 
+        dd_floor = run.get("floor")
         event: dict[str, Any] = {
             "type": "decision_detail",
             "screen_type": screen_type,
-            "floor": run.get("floor"),
+            "floor": dd_floor,
+            "act": floor_to_act(dd_floor),
             "hp": run.get("current_hp"),
             "max_hp": run.get("max_hp"),
             "gold": run.get("gold"),
@@ -258,7 +299,7 @@ class RunLogger:
             event.update(extra)
         self._emit(event)
 
-    def _emit_combat_snapshot(self, game_state: dict, turn: int) -> None:
+    def _emit_combat_snapshot(self, game_state: dict, turn: int, enemy_move_indices: dict | None = None) -> None:
         """Emit a full combat state snapshot for replay validation.
 
         Captures everything needed to reconstruct the CombatState at the
@@ -297,7 +338,7 @@ class RunLogger:
 
         # Snapshot enemies (HP, block, powers, intents)
         enemies = []
-        for e in enemies_raw:
+        for idx, e in enumerate(enemies_raw):
             if not e.get("is_alive", True):
                 continue
             intents = e.get("intents") or []
@@ -318,9 +359,10 @@ class RunLogger:
                 elif it in ("Buff", "Debuff", "StatusCard"):
                     intent_type = intent_type or it
 
+            eid = e.get("id") or e.get("enemy_id", "")
             entry = {
                 "name": e.get("name", "?"),
-                "id": e.get("id") or e.get("enemy_id", ""),
+                "id": eid,
                 "hp": e.get("current_hp", 0),
                 "max_hp": e.get("max_hp", 0),
                 "block": e.get("block", 0),
@@ -336,11 +378,23 @@ class RunLogger:
                 "raw_intents": e.get("intents") or e.get("intent") or [],
                 "raw_move": e.get("move") or e.get("next_move"),
             }
+            # Add inferred move cycle index if available
+            if enemy_move_indices:
+                key = (idx, eid)
+                mi = enemy_move_indices.get(key)
+                if mi is not None:
+                    entry["move_index"] = mi
             enemies.append(entry)
 
-        # Accumulate per-turn enemy intent log for boss fight analysis
+        # Accumulate per-turn enemy intent log for boss fight analysis.
+        # Also compute HP deltas from last snapshot to detect what enemies
+        # actually did (damage dealt, healing, etc.)
         turn_moves = []
+        prev_enemies = self._prev_enemy_hp or {}
         for e in enemies:
+            ename = e.get("id") or e["name"]
+            prev_hp = prev_enemies.get(ename)
+            hp_now = e.get("hp")
             turn_moves.append({
                 "name": e["name"],
                 "id": e.get("id", ""),
@@ -348,13 +402,24 @@ class RunLogger:
                 "intent_damage": e.get("intent_damage"),
                 "intent_hits": e.get("intent_hits"),
                 "intent_block": e.get("intent_block"),
-                "hp": e.get("hp"),
+                "hp": hp_now,
+                "hp_delta": (hp_now - prev_hp) if prev_hp is not None and hp_now is not None else None,
+                "block": e.get("block", 0),
             })
+        # Update snapshot for next turn's delta calculation
+        self._prev_enemy_hp = {
+            (e.get("id") or e["name"]): e.get("hp")
+            for e in enemies
+        }
         self._combat_move_log.append({"turn": turn, "enemies": turn_moves})
 
+        run = game_state.get("run") or {}
+        snap_floor = run.get("floor")
         self._emit({
             "type": "combat_snapshot",
             "turn": turn,
+            "floor": snap_floor,
+            "act": floor_to_act(snap_floor),
             "player": {
                 "hp": player.get("current_hp"),
                 "max_hp": player.get("max_hp"),
@@ -381,7 +446,10 @@ class RunLogger:
             return  # No active combat to close
         run = game_state.get("run") or {}
         hp_after = run.get("current_hp") or (game_state.get("combat", {}).get("player", {}).get("current_hp"))
-        floor = run.get("floor")
+
+        # Use the floor from combat_start — the current game_state floor
+        # may already reflect the next floor if the game advanced.
+        floor = getattr(self, '_combat_floor', None) or run.get("floor")
 
         # Determine if this is a boss fight
         boss_floors = {15, 16, 17, 33, 34, 51, 52}
@@ -394,6 +462,7 @@ class RunLogger:
             "hp_before": self._combat_start_hp,
             "hp_after": hp_after,
             "floor": floor,
+            "act": floor_to_act(floor),
             "is_boss": is_boss,
         }
 
@@ -411,6 +480,7 @@ class RunLogger:
         self._combat_start_hp = None
         self._combat_enemies = None
         self._combat_turn = 0
+        self._combat_floor = None
 
     def _emit_boss_fight_detail(self, game_state: dict, outcome: str) -> None:
         """Emit rich boss fight data for analysis and simulator validation.
@@ -457,12 +527,14 @@ class RunLogger:
             or ""
         )
 
+        bf_floor = run.get("floor")
         self._emit({
             "type": "boss_fight",
             "encounter_id": encounter_id,
             "outcome": outcome,
             "turns": self._combat_turn,
-            "floor": run.get("floor"),
+            "floor": bf_floor,
+            "act": floor_to_act(bf_floor),
             "hp_before": self._combat_start_hp,
             "hp_after": run.get("current_hp") or player.get("current_hp"),
             "max_hp": run.get("max_hp") or player.get("max_hp"),
@@ -489,10 +561,12 @@ class RunLogger:
         deck = run.get("deck", [])
         relics = run.get("relics", [])
 
+        end_floor = run.get("floor")
         self._emit({
             "type": "run_end",
             "outcome": outcome,
-            "floor": run.get("floor"),
+            "floor": end_floor,
+            "act": floor_to_act(end_floor),
             "final_deck": _summarize_deck_list(deck),
             "final_relics": [r.get("name") or r.get("relic_id", "?") for r in relics],
             "final_hp": run.get("current_hp"),
@@ -623,10 +697,12 @@ class RunLogger:
             self._file = open(path, "a", encoding="utf-8")
             # Emit a resume marker instead of full run_start
             run = game_state.get("run") or {}
+            resume_floor = run.get("floor")
             self._emit({
                 "type": "run_resume",
                 "run_id": run_id,
-                "floor": run.get("floor"),
+                "floor": resume_floor,
+                "act": floor_to_act(resume_floor),
                 "hp": run.get("current_hp"),
                 "max_hp": run.get("max_hp"),
             })
@@ -646,13 +722,15 @@ class RunLogger:
             relics = run.get("relics", [])
             potions = run.get("potions", [])
 
+            start_floor = run.get("floor")
             event: dict[str, Any] = {
                 "type": "run_start",
                 "run_id": run_id,
                 "game_version": self.game_version,
                 **self.metadata,
                 "character": run.get("character_name") or run.get("character_id"),
-                "floor": run.get("floor"),
+                "floor": start_floor,
+                "act": floor_to_act(start_floor),
                 "hp": run.get("current_hp"),
                 "max_hp": run.get("max_hp"),
                 "gold": run.get("gold"),
