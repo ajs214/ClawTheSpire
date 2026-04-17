@@ -627,16 +627,15 @@ def _bullet_time(card: Card, card_db: CardDB | None) -> CardEffect:
 
 @register("FOLLOW_THROUGH")
 def _follow_through(card: Card, card_db: CardDB | None) -> CardEffect:
-    """Deal 6(9) damage to ALL enemies. If last card was Skill, apply 1 Weak to ALL."""
+    """Deal 6(9) damage to ALL enemies. If 5+ other cards in hand, hit again. (v0.103)"""
     dmg = 6 if not card.upgraded else 9
 
     def effect(state: CombatState, target_idx: int | None = None) -> None:
         deal_damage_all(state, dmg)
-        # Conditional Weak: check if previous card was a Skill
-        # We approximate by checking if attacks_played < cards_played
-        # (meaning a non-attack was played before this)
-        if state.cards_played_this_turn > 1 and state.attacks_played_this_turn <= 1:
-            apply_power_to_all_enemies(state, "Weak", 1)
+        # v0.103 rework: extra hit if 5+ other cards remain in hand
+        # (this card has already been removed from hand when played)
+        if len(state.player.hand) >= 5:
+            deal_damage_all(state, dmg)
     return effect
 
 
@@ -689,8 +688,8 @@ def _bubble_bubble(card: Card, card_db: CardDB | None) -> CardEffect:
 
 @register("MEMENTO_MORI")
 def _memento_mori(card: Card, card_db: CardDB | None) -> CardEffect:
-    """Deal 12 damage. +4 per card discarded this turn."""
-    calc_base = 8 if not card.upgraded else 10
+    """Deal damage. +4 per card discarded this turn. (v0.103: 8→9 / 10→11)"""
+    calc_base = 9 if not card.upgraded else 11
     extra_per = 4 if not card.upgraded else 5
 
     def effect(state: CombatState, target_idx: int | None = None) -> None:
@@ -1088,4 +1087,14 @@ def _prowess(card: Card, card_db: CardDB | None) -> CardEffect:
     def effect(state: CombatState, target_idx: int | None = None) -> None:
         apply_power_to_player(state, "Strength", amount)
         apply_power_to_player(state, "Dexterity", amount)
+    return effect
+
+
+@register("NOT_YET")
+def _not_yet(card: Card, card_db: CardDB | None) -> CardEffect:
+    """Heal 10(13) HP. Exhaust. (v0.102 new Rare Skill, cost 2)"""
+    heal = 10 if not card.upgraded else 13
+
+    def effect(state: CombatState, target_idx: int | None = None) -> None:
+        state.player.hp = min(state.player.hp + heal, state.player.max_hp)
     return effect

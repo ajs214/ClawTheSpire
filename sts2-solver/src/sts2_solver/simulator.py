@@ -507,10 +507,9 @@ ENEMY_MOVE_TABLES: dict[str, list[dict]] = {
 
     # ── New bosses ──
     "DOORMAKER": [
-        {"type": "Buff", "self_strength": 3, "self_block": 15},    # What is it (startup)
-        {"type": "Attack", "damage": 31, "hits": 1},               # Precision Beam
-        {"type": "Debuff", "player_frail": 2, "player_weak": 2},  # Get Back In (phase change)
-        {"type": "Attack", "damage": 40, "hits": 1},               # Get Back In (attack)
+        {"type": "Buff", "self_strength": 2, "self_block": 15},    # What is it (startup) — v0.103: str 3→2
+        {"type": "Attack", "damage": 25, "hits": 1},               # Precision Beam — v0.103: 31→25
+        {"type": "Attack", "damage": 32, "hits": 1},               # Get Back In — v0.103: 40→32, debuffs removed
     ],
     "DOOR": [
         {"type": "Attack", "damage": 25, "hits": 1},               # Dramatic Open
