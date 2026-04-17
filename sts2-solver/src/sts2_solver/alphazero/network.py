@@ -19,10 +19,16 @@ Architecture:
         - Score = dot(hidden_projected, action_embed)
         - Supports play_card, end_turn, use_potion, and choose_card actions
 
-    Option evaluation head (all non-combat decisions):
+    Option evaluation head (non-combat decisions except card picks):
         hidden + option_type_embed + card_embed → Linear(304→64) → ReLU → Linear(64→1)
-        Handles card rewards, rest/smith, map pathing, shop buy/remove/leave.
+        Handles rest/smith, map pathing, shop buy/remove/leave.
         Type embedding carries context (free reward vs gold cost vs removal).
+
+    Card-pick evaluation head (deck-aware):
+        hidden + deck_summary + card_embed + type_embed → 128 → 64 → 1
+        Dedicated head for card reward picks with deck composition context.
+        Deck summary is mean-pooled card embeddings → linear projection.
+        Trained with MSE + ranking loss for better relative card evaluation.
 """
 
 from __future__ import annotations
@@ -170,6 +176,23 @@ class STS2Network(nn.Module):
             cfg.num_event_choices, cfg.event_choice_embed_dim, padding_idx=0)
         self.option_eval_head = nn.Sequential(
             nn.Linear(256 + cfg.option_type_embed_dim + cfg.card_embed_dim, 64),
+            nn.ReLU(),
+            nn.Linear(64, 1),
+        )
+
+        # --- Dedicated card-pick evaluation head ---
+        # Richer than the generic option_eval_head: incorporates a learned
+        # deck composition summary so the network can reason about synergy,
+        # curve, and bloat when choosing which card to add (or skip).
+        #
+        # Input: hidden(256) + deck_summary(32) + card_embed(32) + type_embed(16) = 336
+        # Two hidden layers (128→64) for modelling deck×card interactions.
+        self.deck_summary_project = nn.Linear(cfg.card_embed_dim, cfg.card_embed_dim)
+        _card_head_input_dim = 256 + cfg.card_embed_dim + cfg.card_embed_dim + cfg.option_type_embed_dim  # 336
+        self.card_eval_head = nn.Sequential(
+            nn.Linear(_card_head_input_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, 64),
             nn.ReLU(),
             nn.Linear(64, 1),
         )
@@ -350,6 +373,79 @@ class STS2Network(nn.Module):
             cards_t = torch.tensor([option_cards], dtype=torch.long, device=device)
             mask = torch.zeros(1, len(option_types), dtype=torch.bool, device=device)
             scores = self.evaluate_options(hidden, types_t, cards_t, mask)
+            scores_list = scores[0].tolist()
+            best_idx = max(range(len(scores_list)), key=lambda i: scores_list[i])
+            return best_idx, scores_list
+
+    # ------------------------------------------------------------------
+    # Dedicated card-pick evaluation (deck-aware)
+    # ------------------------------------------------------------------
+
+    def _encode_deck_summary(
+        self,
+        deck_card_ids: torch.Tensor,  # (batch, max_deck)
+        deck_mask: torch.Tensor,      # (batch, max_deck) — True = padded
+    ) -> torch.Tensor:
+        """Mean-pool deck card embeddings → project → (batch, card_embed_dim)."""
+        embeds = self.card_embed(deck_card_ids)            # (B, D, 32)
+        valid = (~deck_mask).unsqueeze(-1).float()         # (B, D, 1)
+        count = valid.sum(dim=1).clamp(min=1)              # (B, 1)
+        meaned = (embeds * valid).sum(dim=1) / count       # (B, 32)
+        return self.deck_summary_project(meaned)           # (B, 32)
+
+    def evaluate_card_picks(
+        self,
+        hidden: torch.Tensor,         # (batch, 256)
+        deck_card_ids: torch.Tensor,   # (batch, max_deck) — card vocab IDs in current deck
+        deck_mask: torch.Tensor,       # (batch, max_deck) — True = padded
+        option_types: torch.Tensor,    # (batch, num_options) — OPTION_CARD_REWARD / SKIP
+        option_cards: torch.Tensor,    # (batch, num_options) — card vocab IDs for each option
+        option_mask: torch.Tensor,     # (batch, num_options) — True = invalid/padded
+    ) -> torch.Tensor:
+        """Score card-pick options with deck-composition awareness.
+
+        Returns (batch, num_options) unbounded scores.
+        """
+        deck_summary = self._encode_deck_summary(deck_card_ids, deck_mask)  # (B, 32)
+        type_embeds = self.option_type_embed(option_types)                   # (B, N, 16)
+        card_idx = option_cards.clamp(0, self.card_embed.num_embeddings - 1)
+        card_embeds = self.card_embed(card_idx)                              # (B, N, 32)
+
+        batch, num_opts, _ = type_embeds.shape
+        hidden_exp = hidden.unsqueeze(1).expand(-1, num_opts, -1)            # (B, N, 256)
+        deck_exp = deck_summary.unsqueeze(1).expand(-1, num_opts, -1)        # (B, N, 32)
+
+        # [hidden(256) + deck_summary(32) + card_embed(32) + type_embed(16)] = 336
+        combined = torch.cat([hidden_exp, deck_exp, card_embeds, type_embeds], dim=-1)
+        scores = self.card_eval_head(combined).squeeze(-1)                   # (B, N)
+
+        scores = scores.masked_fill(option_mask, -1e9)
+        return scores
+
+    def pick_best_card(
+        self,
+        hidden: torch.Tensor,       # (1, 256)
+        deck_card_ids: list[int],    # card vocab IDs currently in deck
+        option_types: list[int],
+        option_cards: list[int],
+    ) -> tuple[int, list[float]]:
+        """Pick the highest-scoring card option (deck-aware). Returns (best_index, all_scores)."""
+        with torch.no_grad():
+            device = hidden.device
+            types_t = torch.tensor([option_types], dtype=torch.long, device=device)
+            cards_t = torch.tensor([option_cards], dtype=torch.long, device=device)
+            opt_mask = torch.zeros(1, len(option_types), dtype=torch.bool, device=device)
+
+            # Build deck tensor with padding
+            if deck_card_ids:
+                deck_t = torch.tensor([deck_card_ids], dtype=torch.long, device=device)
+                deck_mask = torch.zeros(1, len(deck_card_ids), dtype=torch.bool, device=device)
+            else:
+                deck_t = torch.zeros(1, 1, dtype=torch.long, device=device)
+                deck_mask = torch.ones(1, 1, dtype=torch.bool, device=device)
+
+            scores = self.evaluate_card_picks(
+                hidden, deck_t, deck_mask, types_t, cards_t, opt_mask)
             scores_list = scores[0].tolist()
             best_idx = max(range(len(scores_list)), key=lambda i: scores_list[i])
             return best_idx, scores_list

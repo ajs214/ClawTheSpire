@@ -94,6 +94,10 @@ class OptionSample:
     # signal) to push the shadow's preferred option toward the run value,
     # plus consumed by tools/agreement_rate.py for diagnostics.
     shadow_chosen_idx: int | None = None
+    # Deck card vocab IDs at decision time — used by the dedicated
+    # card_eval_head to encode deck composition context.  None for
+    # non-card-pick decisions (rest, map, shop, events).
+    deck_card_ids: list[int] | None = None
 
 
 # Option type constants (indices into option_type_embed)
@@ -584,8 +588,14 @@ def train_batch(
         optimizer.step()
 
     # --- Option samples (all non-combat decisions): accumulate gradients, step once ---
+    # Card-pick samples (deck_card_ids != None) are routed through the
+    # dedicated card_eval_head with ranking loss.  All other option samples
+    # (rest, map, shop, events) use the generic option_eval_head as before.
     optimizer.zero_grad()
     option_valid = 0
+    SHADOW_ALPHA = 0.15
+    RANK_BETA = 0.10       # weight for ranking loss on card picks
+    RANK_MARGIN = 0.05     # minimum desired score gap between chosen and alternatives
     for sample in (option_samples or []):
         try:
             state_tensors = {k: v.to(device) for k, v in sample.state_tensors.items()}
@@ -595,25 +605,55 @@ def train_batch(
             clamped_cards = [c if c <= max_card_id else 1 for c in sample.option_cards]  # 1=UNK
             types_t = torch.tensor([sample.option_types], dtype=torch.long, device=device)
             cards_t = torch.tensor([clamped_cards], dtype=torch.long, device=device)
-            mask = torch.zeros(1, len(sample.option_types), dtype=torch.bool, device=device)
-
-            scores = network.evaluate_options(hidden, types_t, cards_t, mask)
+            opt_mask = torch.zeros(1, len(sample.option_types), dtype=torch.bool, device=device)
 
             target = torch.tensor([[sample.value]], dtype=torch.float32, device=device)
-            chosen_score = scores[0, sample.chosen_idx].unsqueeze(0).unsqueeze(0)
-            o_loss = 0.25 * F.mse_loss(chosen_score, target)
+
+            # ---- Card-pick samples: dedicated head + ranking loss ----
+            if sample.deck_card_ids is not None:
+                deck_ids = [min(d, max_card_id) if d is not None else 1 for d in sample.deck_card_ids]
+                deck_t = torch.tensor([deck_ids], dtype=torch.long, device=device)
+                deck_mask = torch.zeros(1, len(deck_ids), dtype=torch.bool, device=device)
+
+                scores = network.evaluate_card_picks(
+                    hidden, deck_t, deck_mask, types_t, cards_t, opt_mask)
+
+                # Primary loss: MSE on chosen option's score → run value
+                chosen_score = scores[0, sample.chosen_idx].unsqueeze(0).unsqueeze(0)
+                o_loss = 0.25 * F.mse_loss(chosen_score, target)
+
+                # Ranking loss: chosen should beat alternatives (good run)
+                # or alternatives should beat chosen (bad run).
+                num_opts = scores.shape[1]
+                if num_opts > 1:
+                    rank_loss = torch.tensor(0.0, device=device)
+                    chosen_s = scores[0, sample.chosen_idx]
+                    for j in range(num_opts):
+                        if j == sample.chosen_idx:
+                            continue
+                        other_s = scores[0, j]
+                        if sample.value > 0.5:
+                            # Good run: chosen should score > alternative by margin
+                            rank_loss = rank_loss + F.relu(RANK_MARGIN - (chosen_s - other_s))
+                        else:
+                            # Bad run: alternative should score > chosen by margin
+                            rank_loss = rank_loss + F.relu(RANK_MARGIN - (other_s - chosen_s))
+                    rank_loss = rank_loss / (num_opts - 1)
+                    o_loss = o_loss + RANK_BETA * rank_loss
+
+            # ---- All other options: generic option_eval_head ----
+            else:
+                scores = network.evaluate_options(hidden, types_t, cards_t, opt_mask)
+
+                chosen_score = scores[0, sample.chosen_idx].unsqueeze(0).unsqueeze(0)
+                o_loss = 0.25 * F.mse_loss(chosen_score, target)
 
             # ----------------------------------------------------------
-            # Approach 2: Shadow advisor signal
+            # Approach 2: Shadow advisor signal (all option types)
             # When the shadow (heuristic) advisor disagrees with the
             # network's choice, also push the shadow's preferred option
-            # toward the run outcome value.  This teaches the network
-            # what the heuristic *would* have scored, giving it data on
-            # options it might otherwise never evaluate.
-            # Weight (alpha=0.15) is low enough to let the network
-            # eventually override the heuristic with its own signal.
+            # toward the run outcome value.
             # ----------------------------------------------------------
-            SHADOW_ALPHA = 0.15
             if (sample.shadow_chosen_idx is not None
                     and sample.shadow_chosen_idx != sample.chosen_idx
                     and sample.shadow_chosen_idx < scores.shape[1]):

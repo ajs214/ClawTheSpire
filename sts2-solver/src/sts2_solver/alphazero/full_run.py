@@ -652,6 +652,12 @@ def _network_pick_card(
             opt_cards.append(vocabs.cards.get(base_id))
         opt_cards.append(0)  # PAD for skip
 
+        # Build deck card vocab IDs for the dedicated card_eval_head
+        deck_card_ids = []
+        for c in deck:
+            base_id = c.id.rstrip("+")
+            deck_card_ids.append(vocabs.cards.get(base_id, 1))  # 1=UNK
+
         # Shadow pick = what the organic heuristic would have chosen.
         # Now that the network makes the actual pick, this is a real
         # agreement signal (not self-comparison) and surfaces in the
@@ -675,11 +681,12 @@ def _network_pick_card(
                     len(offered),
                 )
         else:
-            # Self-play mode: the option head picks.
+            # Self-play mode: the dedicated card_eval_head picks,
+            # using deck composition for context.
             with torch.no_grad():
                 hidden = network.encode_state(**state_tensors)
-                best_idx, _scores = network.pick_best_option(
-                    hidden, opt_types, opt_cards)
+                best_idx, _scores = network.pick_best_card(
+                    hidden, deck_card_ids, opt_types, opt_cards)
             chosen_idx = int(best_idx)
             if chosen_idx >= len(offered):
                 pick = None  # skip slot
@@ -693,6 +700,7 @@ def _network_pick_card(
             chosen_idx=chosen_idx,
             value=0.0,  # Filled after run ends by _assign_run_values
             shadow_chosen_idx=shadow_idx,
+            deck_card_ids=deck_card_ids,
         )
     except Exception:
         # On any failure, fall back to the organic picker with no

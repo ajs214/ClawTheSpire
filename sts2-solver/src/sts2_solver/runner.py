@@ -2287,12 +2287,19 @@ class Runner:
             return None
 
     def _az_decide_card_reward(self, gs: dict) -> "Decision | None":
-        """Use network option-head to take/skip a card reward.
+        """Use dedicated card_eval_head to take/skip a card reward.
 
         Mirrors training's ``_network_pick_card``: build
         ``[OPTION_CARD_REWARD]*N + [OPTION_CARD_SKIP]`` and let
-        ``pick_best_option`` choose. Returns a ``Decision`` that calls
-        ``choose_reward_card(idx)`` or ``skip_reward_cards``.
+        ``pick_best_card`` choose using deck-composition context.
+        Returns a ``Decision`` that calls ``choose_reward_card(idx)``
+        or ``skip_reward_cards``.
+
+        Confidence gate: when the network's score spread across options
+        is below a threshold, the card_eval_head's random-init weights
+        haven't learned meaningful preferences yet — defer to the
+        organic card picker heuristic.  As the head trains and develops
+        a wider score spread, the gate self-retires.
 
         Intentionally NOT gated by ``USE_NETWORK_ROUTING`` — card
         rewards are always routed through the network in live play so
@@ -2306,11 +2313,12 @@ class Runner:
         from .deterministic_advisor import Decision
 
         try:
-            _, hidden, _hp, _max_hp, _gold, _floor, _deck = (
+            _, hidden, hp, max_hp, _gold, floor, deck_cards = (
                 self._az_run_state_tensors(gs))
             network = self._mcts.network
+            vocabs = self._mcts_vocabs
 
-            parsed = card_reward_options_from_mcp(gs, self._mcts_vocabs)
+            parsed = card_reward_options_from_mcp(gs, vocabs)
             opt_types = parsed["opt_types"]
             opt_cards = parsed["opt_cards"]
             reward_actions = parsed["actions"]
@@ -2318,25 +2326,100 @@ class Runner:
             if not opt_types:
                 return None
 
+            # Build deck card vocab IDs for the dedicated card_eval_head
+            deck_card_ids = []
+            for c in deck_cards:
+                base_id = c.id.rstrip("+")
+                deck_card_ids.append(vocabs.cards.get(base_id, 1))  # 1=UNK
+
             with torch.no_grad():
-                best_idx, scores = network.pick_best_option(
-                    hidden, opt_types, opt_cards)
+                best_idx, scores = network.pick_best_card(
+                    hidden, deck_card_ids, opt_types, opt_cards)
                 nv = network.value_head(hidden).item()
+
+            # ----------------------------------------------------------
+            # Confidence-gated card pick guard rail
+            #
+            # The card_eval_head starts with random weights when loaded
+            # from a pre-existing checkpoint.  Until it's trained enough
+            # to develop meaningful preferences, its scores will cluster
+            # tightly (low spread).  When the spread is below a
+            # threshold, fall back to the organic card picker which has
+            # solid hand-tuned heuristics for card evaluation.
+            #
+            # Score spread = max(scores) - min(scores).  A well-trained
+            # head will produce spreads >> 0.20 when it has opinions.
+            # ----------------------------------------------------------
+            CARD_CONFIDENCE_SPREAD = 0.20
+            score_spread = max(scores) - min(scores) if len(scores) > 1 else 0.0
+            overridden = False
+            organic_reason = ""
+
+            if score_spread < CARD_CONFIDENCE_SPREAD:
+                # Network isn't confident — ask the organic card picker
+                # via the deterministic advisor which already handles
+                # MCP payload parsing and has solid heuristics.
+                try:
+                    from .deterministic_advisor import decide_card_reward
+                    organic_decision = decide_card_reward(gs, self.game_data)
+                    if organic_decision is not None:
+                        overridden = True
+                        organic_reason = organic_decision.reason
+                        # Map the organic decision back to our action list
+                        organic_action = organic_decision.action
+                        organic_opt_idx = organic_decision.option_index
+
+                        # Find matching index in reward_actions
+                        organic_best_idx = None
+                        for ri, (aname, aidx, _label) in enumerate(reward_actions):
+                            if aname == organic_action and aidx == organic_opt_idx:
+                                organic_best_idx = ri
+                                break
+                        if organic_best_idx is None:
+                            # Organic picked skip but we have a skip action
+                            for ri, (aname, _, _) in enumerate(reward_actions):
+                                if aname == organic_action:
+                                    organic_best_idx = ri
+                                    break
+
+                        if organic_best_idx is not None:
+                            best_idx = organic_best_idx
+                            self._log_action(
+                                f"  [yellow]Card guard rail: network spread={score_spread:.3f} "
+                                f"< {CARD_CONFIDENCE_SPREAD}, deferring to organic picker[/yellow]"
+                            )
+                        else:
+                            overridden = False  # couldn't map organic → our actions
+                except Exception:
+                    overridden = False  # organic picker failed, use network
 
             option_labels = [ra[2] for ra in reward_actions]
             hs = {
-                "head": "option_eval",
+                "head": "card_eval",
                 "chosen": best_idx,
+                "deck_size": len(deck_cards),
+                "score_spread": round(score_spread, 4),
                 "options": [{"label": lbl, "score": round(s, 4)}
                             for lbl, s in zip(option_labels, scores)],
             }
+            if overridden:
+                hs["guard_rail_override"] = True
+                hs["organic_reason"] = organic_reason
 
             action_name, opt_idx, reason = reward_actions[best_idx]
+            if overridden:
+                reason_str = (
+                    f"Guard rail→organic: {organic_reason} "
+                    f"(net spread={score_spread:.3f})"
+                )
+            else:
+                reason_str = f"Network: {reason} (score={scores[best_idx]:.2f})"
+
             return Decision(
                 action_name, opt_idx,
-                f"Network: {reason} (score={scores[best_idx]:.2f})",
+                reason_str,
                 network_value=nv, head_scores=hs,
-                source="network_option_head")
+                source="network_card_eval_head" if not overridden else "organic_guard_rail")
         except Exception as e:
             self._log_action(
                 f"  [dim]Network card_reward failed ({e}), falling back[/dim]")
