@@ -1105,6 +1105,23 @@ def play_full_run(
                     opt_types, deck_indices, deck, hp, max_hp, floor_num,
                     relics=frozenset(relics),
                 )
+
+                # ----------------------------------------------------------
+                # Approach 3: Exploration forcing for REST
+                # With some probability, override the network's choice to
+                # REST when the shadow advisor also recommends rest.
+                # This ensures the training buffer gets episodes where the
+                # agent healed at low HP, so the value signal can propagate
+                # back to the REST option score.
+                # Exploration rate of 20% gives meaningful coverage without
+                # dominating the training signal.
+                # ----------------------------------------------------------
+                REST_EXPLORE_RATE = 0.20
+                if (best_idx != 0
+                        and shadow_idx == 0
+                        and rng.random() < REST_EXPLORE_RATE):
+                    best_idx = 0  # force REST for exploration
+
                 option_samples.append(OptionSample(
                     state_tensors={k: v.cpu() for k, v in st.items()},
                     option_types=opt_types, option_cards=opt_cards,

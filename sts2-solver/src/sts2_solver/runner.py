@@ -2072,6 +2072,35 @@ class Runner:
                 best_idx, scores = network.pick_best_option(hidden, opt_types, opt_cards)
                 nv = network.value_head(hidden).item()
 
+            # ----------------------------------------------------------
+            # Approach 1: Confidence-gated rest site guard rail
+            # If HP is critically low, override the network's choice to
+            # REST *unless* the network is confidently choosing SMITH
+            # (score gap exceeds a margin).  As the network learns the
+            # value of healing (via Approaches 2 & 3), it will develop
+            # confident opinions and this guard rail self-retires.
+            # ----------------------------------------------------------
+            overridden = False
+            hp_ratio = hp / max_hp if max_hp > 0 else 1.0
+            GUARD_HP_THRESHOLD = 0.50   # only intervene when below 50% HP
+            CONFIDENCE_MARGIN = 0.30    # network must beat REST by this much
+
+            if hp_ratio < GUARD_HP_THRESHOLD and best_idx != 0 and len(scores) > 1:
+                # Score gap: how much does the network prefer SMITH over REST?
+                smith_score = scores[best_idx]
+                rest_score = scores[0]
+                gap = smith_score - rest_score
+
+                if gap < CONFIDENCE_MARGIN:
+                    # Network isn't confident enough — override to REST
+                    overridden = True
+                    original_idx = best_idx
+                    best_idx = 0
+                    self._log_action(
+                        f"  [yellow]Guard rail: overriding upgrade→rest "
+                        f"(HP {hp}/{max_hp}={hp_ratio:.0%}, gap={gap:.3f} < {CONFIDENCE_MARGIN})[/yellow]"
+                    )
+
             # Build labeled scores for telemetry
             option_labels = ["Rest"]
             for di in upgrade_deck_indices:
@@ -2081,11 +2110,19 @@ class Runner:
                 "chosen": best_idx,
                 "options": [{"label": lbl, "score": round(s, 4)} for lbl, s in zip(option_labels, scores)],
             }
+            if overridden:
+                hs["guard_rail_override"] = True
+                hs["original_chosen"] = original_idx
+                hs["hp_ratio"] = round(hp_ratio, 3)
+                hs["score_gap"] = round(gap, 4)
 
             if best_idx == 0:
+                reason = f"Network: rest (score={scores[0]:.2f})"
+                if overridden:
+                    reason = f"Guard rail→rest (HP={hp_ratio:.0%}, gap={gap:.3f}, orig=smith)"
                 return Decision("choose_rest_option",
                                 game_rest_idx if game_rest_idx is not None else 0,
-                                f"Network: rest (score={scores[0]:.2f})",
+                                reason,
                                 network_value=nv, head_scores=hs,
                                 source="network_option_head")
             else:

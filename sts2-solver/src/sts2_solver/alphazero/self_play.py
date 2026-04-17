@@ -89,10 +89,10 @@ class OptionSample:
     option_cards: list[int]   # Card vocab indices (0 when N/A)
     chosen_idx: int           # Which option was picked
     value: float              # Run outcome value (assigned after run ends)
-    # Agreement-rate diagnostic (#10): shadow pick from the deterministic
-    # advisor computed at the same decision site. None when shadow logging
-    # is disabled (production training). Never used in loss — read-only
-    # telemetry consumed by tools/agreement_rate.py.
+    # Shadow pick from the deterministic advisor computed at the same
+    # decision site. Used in training loss (Approach 2: shadow advisor
+    # signal) to push the shadow's preferred option toward the run value,
+    # plus consumed by tools/agreement_rate.py for diagnostics.
     shadow_chosen_idx: int | None = None
 
 
@@ -602,6 +602,24 @@ def train_batch(
             target = torch.tensor([[sample.value]], dtype=torch.float32, device=device)
             chosen_score = scores[0, sample.chosen_idx].unsqueeze(0).unsqueeze(0)
             o_loss = 0.25 * F.mse_loss(chosen_score, target)
+
+            # ----------------------------------------------------------
+            # Approach 2: Shadow advisor signal
+            # When the shadow (heuristic) advisor disagrees with the
+            # network's choice, also push the shadow's preferred option
+            # toward the run outcome value.  This teaches the network
+            # what the heuristic *would* have scored, giving it data on
+            # options it might otherwise never evaluate.
+            # Weight (alpha=0.15) is low enough to let the network
+            # eventually override the heuristic with its own signal.
+            # ----------------------------------------------------------
+            SHADOW_ALPHA = 0.15
+            if (sample.shadow_chosen_idx is not None
+                    and sample.shadow_chosen_idx != sample.chosen_idx
+                    and sample.shadow_chosen_idx < scores.shape[1]):
+                shadow_score = scores[0, sample.shadow_chosen_idx].unsqueeze(0).unsqueeze(0)
+                shadow_loss = SHADOW_ALPHA * F.mse_loss(shadow_score, target)
+                o_loss = o_loss + shadow_loss
 
             if torch.isnan(o_loss):
                 nan_option += 1
