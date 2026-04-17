@@ -485,7 +485,9 @@ def poll_all(interval: float = 5.0):
 
     while True:
         now = time.time()
-        found_active = False
+        # Collect all versions with recent timestamps, then pick the
+        # highest version number so V13 wins over V12 when both are running.
+        recently_active: list[str] = []
         for ver, fname in VERSION_FILES.items():
             path = SCRIPT_DIR / fname
             if not path.exists():
@@ -493,9 +495,9 @@ def poll_all(interval: float = 5.0):
             try:
                 mtime = path.stat().st_mtime
                 if mtime == last_mtimes[ver]:
-                    # Even unchanged files: check if this ver is still active
-                    if ver == active_version and snapshots.get(ver, {}).get("timestamp", 0) > now - 30:
-                        found_active = True
+                    # File unchanged — still check if its snapshot is recent
+                    if snapshots.get(ver, {}).get("timestamp", 0) > now - 60:
+                        recently_active.append(ver)
                     continue
                 last_mtimes[ver] = mtime
 
@@ -504,10 +506,8 @@ def poll_all(interval: float = 5.0):
 
                 with lock:
                     snapshots[ver] = data
-                    # Track which version is actively training
-                    if data.get("timestamp", 0) > now - 30:
-                        active_version = ver
-                        found_active = True
+                    if data.get("timestamp", 0) > now - 60:
+                        recently_active.append(ver)
 
                 gen = data.get("generation", 0)
                 if gen != last_gens[ver]:
@@ -527,11 +527,19 @@ def poll_all(interval: float = 5.0):
             except Exception:
                 pass
 
-        # If no version had a recent timestamp, clear active_version
-        # so the JS falls back to the newest version instead of showing
-        # a stale "Active: V12" label.
-        if not found_active and active_version:
-            with lock:
+        # Pick the highest version number among recently active versions.
+        # This ensures V13 wins over V12 when both are running. If nothing
+        # is active, clear it so the JS falls back to the newest with data.
+        with lock:
+            if recently_active:
+                # Sort by version number descending, pick highest
+                def _ver_num(v: str) -> int:
+                    try:
+                        return int(v.lstrip("v"))
+                    except ValueError:
+                        return 0
+                active_version = max(recently_active, key=_ver_num)
+            else:
                 active_version = ""
 
         # Refresh boss data and live play logs every cycle
