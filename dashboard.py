@@ -484,6 +484,8 @@ def poll_all(interval: float = 5.0):
     save_counter = 0
 
     while True:
+        now = time.time()
+        found_active = False
         for ver, fname in VERSION_FILES.items():
             path = SCRIPT_DIR / fname
             if not path.exists():
@@ -491,6 +493,9 @@ def poll_all(interval: float = 5.0):
             try:
                 mtime = path.stat().st_mtime
                 if mtime == last_mtimes[ver]:
+                    # Even unchanged files: check if this ver is still active
+                    if ver == active_version and snapshots.get(ver, {}).get("timestamp", 0) > now - 30:
+                        found_active = True
                     continue
                 last_mtimes[ver] = mtime
 
@@ -500,8 +505,9 @@ def poll_all(interval: float = 5.0):
                 with lock:
                     snapshots[ver] = data
                     # Track which version is actively training
-                    if data.get("timestamp", 0) > time.time() - 30:
+                    if data.get("timestamp", 0) > now - 30:
                         active_version = ver
+                        found_active = True
 
                 gen = data.get("generation", 0)
                 if gen != last_gens[ver]:
@@ -520,6 +526,13 @@ def poll_all(interval: float = 5.0):
                             _save_history()
             except Exception:
                 pass
+
+        # If no version had a recent timestamp, clear active_version
+        # so the JS falls back to the newest version instead of showing
+        # a stale "Active: V12" label.
+        if not found_active and active_version:
+            with lock:
+                active_version = ""
 
         # Refresh boss data and live play logs every cycle
         _refresh_boss_data()
@@ -1203,10 +1216,18 @@ async function poll() {
       }
     }
 
-    let activeVer = d.active_version || 'v13';
+    // Pick active version: use server's active_version if set,
+    // otherwise find the newest version that has data.
+    let rawActiveVer = d.active_version || '';
+    if (!rawActiveVer) {
+      for (const v of [...VERSIONS].reverse()) {
+        if (v !== 'early' && snapsDisplay[v]) { rawActiveVer = v; break; }
+      }
+      if (!rawActiveVer) rawActiveVer = 'v13';
+    }
+    let activeVer = rawActiveVer;
     if (EARLY_SOURCES.includes(activeVer)) activeVer = 'early';
     const snap = snapsDisplay[activeVer]||snapsDisplay.v13||snapsDisplay.v12||snapsDisplay.v11||snapsDisplay.v10||snapsDisplay.v9||{};
-    const rawActiveVer = d.active_version||'v13';
 
     document.getElementById('active-label').innerHTML =
       `Active: <span class="${activeVer}c" style="font-weight:bold">${LABELS[activeVer]||activeVer}</span>`;
