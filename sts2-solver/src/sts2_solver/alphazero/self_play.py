@@ -866,6 +866,53 @@ def train_worker(
     print(f"Checkpoints: {save_path}", flush=True)
     print(f"Progress: {progress_path}", flush=True)
 
+    # --- Value head probes ---
+    # Capture real state tensors from gameplay and periodically probe
+    # the value head to see if predictions are spread and directional.
+    # Probes are captured opportunistically: we grab state tensors from
+    # the first few wins and losses, plus early/late floor states.
+    # Once captured, they're frozen and reused every PROBE_INTERVAL gens.
+    PROBE_INTERVAL = 10
+    _probe_states: dict[str, dict[str, torch.Tensor]] = {}  # label → state_tensors
+    _probe_log: list[dict] = []  # [{gen, label→value}, ...]
+    _probe_log_path = save_path / "value_probes.jsonl"
+
+    def _capture_probe(label: str, sample: "TrainingSample"):
+        """Capture a state tensor for probing if we don't have one yet."""
+        if label not in _probe_states:
+            _probe_states[label] = {
+                k: v.clone() for k, v in sample.state_tensors.items()
+            }
+
+    def _run_probes(gen_num: int):
+        """Probe value head on all captured states, log results."""
+        if not _probe_states:
+            return
+        network.eval()
+        entry = {"gen": gen_num}
+        with torch.no_grad():
+            for label, st in sorted(_probe_states.items()):
+                st_dev = {k: v.to("cpu") for k, v in st.items()}
+                hidden = network.encode_state(**st_dev)
+                value = network.value_head(hidden).item()
+                entry[label] = round(value, 4)
+        network.train()
+        _probe_log.append(entry)
+        # Write to JSONL
+        try:
+            with open(_probe_log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry) + "\n")
+        except Exception:
+            pass
+        # Print summary
+        vals = {k: v for k, v in entry.items() if k != "gen"}
+        spread = max(vals.values()) - min(vals.values()) if len(vals) > 1 else 0
+        print(
+            f"  [probes] {' | '.join(f'{k}={v:+.3f}' for k, v in sorted(vals.items()))} "
+            f"(spread={spread:.3f})",
+            flush=True,
+        )
+
     for gen in range(1, num_generations + 1):
         gen_t0 = time.time()
 
@@ -904,6 +951,29 @@ def train_worker(
                 option_buffer.add(os, is_win=is_win)
             for os in result.option_samples:
                 option_buffer.add(os, is_win=is_win)
+
+            # --- Capture value probes from real games ---
+            # We want ~6 diverse probes. Grab them opportunistically
+            # from the first game that matches each category.
+            try:
+                samples_list = result.samples
+                if samples_list:
+                    # Early game (first sample ≈ turn 1 of first combat)
+                    _capture_probe("early_turn", samples_list[0])
+                    # Mid game (middle sample)
+                    _capture_probe("mid_game", samples_list[len(samples_list) // 2])
+                    # Late game (last sample ≈ final turn)
+                    _capture_probe("late_game", samples_list[-1])
+                if is_win and samples_list:
+                    # A winning state (last turn of a winning run)
+                    _capture_probe("win_final", samples_list[-1])
+                    # A winning state early (how did the win start?)
+                    _capture_probe("win_early", samples_list[0])
+                elif not is_win and samples_list:
+                    # A losing state (last turn of a losing run)
+                    _capture_probe("lose_final", samples_list[-1])
+            except Exception:
+                pass  # never crash training for probes
 
             total_games += 1
             if result.outcome == "win":
@@ -975,6 +1045,13 @@ def train_worker(
                 )
             scheduler.step()
 
+        # --- Value head probes (every PROBE_INTERVAL gens) ---
+        if gen % PROBE_INTERVAL == 0 and _probe_states:
+            try:
+                _run_probes(cumulative_gen_offset + gen)
+            except Exception as _e:
+                print(f"  [probes] failed: {_e}", flush=True)
+
         gen_elapsed = time.time() - gen_t0
         total_elapsed = time.time() - t_start
         mins, secs = divmod(int(total_elapsed), 60)
@@ -1044,6 +1121,7 @@ def train_worker(
                 {"id": _rid, "count": _cnt}
                 for _rid, _cnt in relic_counts.most_common(20)
             ],
+            "value_probes": _probe_log[-1] if _probe_log else None,
             "status": f"Gen {gen}/{num_generations} complete",
             "timestamp": time.time(),
         }
