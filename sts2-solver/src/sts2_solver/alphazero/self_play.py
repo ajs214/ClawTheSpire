@@ -757,6 +757,7 @@ def train_worker(
     # Load latest checkpoint if available (warm start)
     # Filter out keys with shape mismatches (e.g. trunk input dim changed)
     import torch as _torch
+    cumulative_gen_offset = 0  # how many gens were completed in prior runs
     ckpts = sorted(save_path.glob("gen_*.pt"), key=lambda p: p.stat().st_mtime)
     if ckpts:
         ckpt = _torch.load(ckpts[-1], map_location="cpu", weights_only=True)
@@ -778,7 +779,51 @@ def train_worker(
         msg = f"Warm start from {ckpts[-1].name} ({len(compatible)}/{len(saved_state)} params)"
         if skipped:
             msg += f", skipped {len(skipped)} shape-mismatched"
+
+        # Restore optimizer state if available and model was fully compatible
+        if not skipped and "optimizer_state" in ckpt:
+            try:
+                optimizer.load_state_dict(ckpt["optimizer_state"])
+                msg += ", optimizer restored"
+            except Exception as _e:
+                msg += f", optimizer restore failed ({_e})"
+
+        # Cumulative generation tracking: figure out how many total gens
+        # have been trained so far.  Use the checkpoint's cumulative_gen
+        # field if present (new format), otherwise infer from the
+        # checkpoint filename (gen_NNNN.pt).
+        if "cumulative_gen" in ckpt:
+            cumulative_gen_offset = ckpt["cumulative_gen"]
+        else:
+            # Infer from filename: gen_0860.pt → 860 gens completed
+            try:
+                cumulative_gen_offset = int(ckpts[-1].stem.split("_")[1])
+            except (IndexError, ValueError):
+                cumulative_gen_offset = ckpt.get("generation", 0)
+        msg += f", cumulative gens so far: {cumulative_gen_offset}"
+
+        # Restore scheduler state: prefer saved state dict (exact),
+        # fall back to fast-forwarding by stepping N times.
+        if "scheduler_state" in ckpt:
+            try:
+                scheduler.load_state_dict(ckpt["scheduler_state"])
+                msg += f", scheduler restored, LR={scheduler.get_last_lr()[0]:.1e}"
+            except Exception as _e:
+                msg += f", scheduler restore failed ({_e}), fast-forwarding"
+                if cumulative_gen_offset > 0:
+                    for _ in range(cumulative_gen_offset):
+                        scheduler.step()
+                    msg += f", LR={scheduler.get_last_lr()[0]:.1e}"
+        elif cumulative_gen_offset > 0:
+            for _ in range(cumulative_gen_offset):
+                scheduler.step()
+            msg += f", LR fast-forwarded to {scheduler.get_last_lr()[0]:.1e}"
+
         print(msg, flush=True)
+
+    # Total planned generations across ALL runs (for progress-based schedules).
+    # This is the cumulative gens already done + the new budget.
+    total_planned_gens = cumulative_gen_offset + num_generations
 
     progress_path = Path(progress_file) if progress_file else _default_progress_path()
 
@@ -826,7 +871,10 @@ def train_worker(
 
         # --- Self-play: full Act 1 runs ---
         gen_wins = 0
-        progress = gen / num_generations
+        # Use cumulative progress for temperature and sim scaling so
+        # continuation runs don't re-do the "early exploration" phase.
+        cumulative_gen = cumulative_gen_offset + gen
+        progress = min(1.0, cumulative_gen / max(1, total_planned_gens))
         for game_num in range(games_per_generation):
             # Temperature: cosine decay, exploration → exploitation.
             # Stays above 0.5 for ~60% of training, floors at 0.2 late.
@@ -1016,12 +1064,14 @@ def train_worker(
             ckpt_path = save_path / f"gen_{gen:04d}.pt"
             torch.save({
                 "generation": gen,
+                "cumulative_gen": cumulative_gen_offset + gen,
                 "model_state": network.state_dict(),
                 "optimizer_state": optimizer.state_dict(),
+                "scheduler_state": scheduler.state_dict(),
                 "games_played": total_games,
                 "win_rate": total_wins / max(1, total_games),
             }, ckpt_path)
-            print(f"  Saved checkpoint: {ckpt_path.name}")
+            print(f"  Saved checkpoint: {ckpt_path.name} (cumulative gen {cumulative_gen_offset + gen})")
 
     print(f"Training complete! {total_games} games, {total_wins/max(1,total_games):.1%} win rate")
 

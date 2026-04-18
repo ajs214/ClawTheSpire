@@ -697,7 +697,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </div>
 
   <div class="charts">
-    <div class="chart-box full"><h2>Win Rate by Generation (Last 5 Versions)</h2><canvas id="winChart"></canvas></div>
+    <div class="chart-box full"><h2>Win Rate by Generation (All Lineages)</h2><canvas id="winChart"></canvas></div>
     <div class="chart-box full"><h2>Win Rate by Generation — Per Boss (Active Version)</h2><canvas id="genBossWrChart"></canvas></div>
   </div>
 
@@ -738,13 +738,22 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <div class="updated" id="updated"></div>
 
 <script>
-const COLORS = { early:'#6e7681', v5:'#bc8cff', v6:'#ff7b72', v7:'#ffa657', v8:'#2ea9e6', v9:'#39d353', v10:'#f0883e', v11:'#e05dff', v12:'#00d4aa', v13:'#ff6b9d' };
-const LABELS = { early:'Early (V1-V4)', v5:'V5', v6:'V6', v7:'V7', v8:'V8', v9:'V9', v10:'V10', v11:'V11', v12:'V12', v13:'V13' };
+const COLORS = { early:'#6e7681', v1:'#6e7681', v2:'#7c858d', v3:'#8a939a', v4:'#99a1a8', v5:'#bc8cff', v6:'#ff7b72', v7:'#ffa657', v8:'#2ea9e6', v9:'#39d353', v10:'#f0883e', v11:'#e05dff', v12:'#00d4aa', v13:'#ff6b9d' };
+const LABELS = { early:'Early (V1-V4)', v1:'V1', v2:'V2', v3:'V3', v4:'V4', v5:'V5', v6:'V6', v7:'V7', v8:'V8', v9:'V9', v10:'V10', v11:'V11', v12:'V12', v13:'V13' };
 const VERSIONS = ['early','v5','v6','v7','v8','v9','v10','v11','v12','v13'];
 const EARLY_SOURCES = ['v1','v2','v3','v4'];
-// Last 5 display versions for the win rate chart
+// Last 5 display versions for the win rate chart (legacy, kept for version table)
 const RECENT_VERSIONS = ['v9','v10','v11','v12','v13'];
 const BOSS_FLOOR = 17;
+
+// ---- Lineage definitions ----
+// Each lineage is a cold-start chain. Versions within a lineage are warm
+// continuations — their generation counts are stitched end-to-end.
+const LINEAGES = [
+  { id: 'L1', label: 'V2\u2013V11', versions: ['v2','v3','v4','v5','v6','v7','v8','v9','v10','v11'] },
+  { id: 'L2', label: 'V12',       versions: ['v12'] },
+  { id: 'L3', label: 'V13',       versions: ['v13'] },
+];
 
 const ARCH_COLORS = { poison:'#3fb950', shiv:'#d29922', sly:'#58a6ff', mixed:'#bc8cff', undecided:'#484f58', unknown:'#30363d' };
 const BOSS_CHART_COLORS = { 'OVERALL':'#f0f6fc', 'VANTOM_BOSS':'#58a6ff', 'THE_KIN_BOSS':'#d29922', 'CEREMONIAL_BEAST_BOSS':'#ff7b72' };
@@ -850,13 +859,9 @@ const baseOpts = {
 const pctOpts = JSON.parse(JSON.stringify(baseOpts));
 pctOpts.scales.y.ticks = {...pctOpts.scales.y.ticks, callback:function(v){return (v*100).toFixed(0)+'%';}};
 
-// Win rate chart — last 5 versions only
+// Win rate chart — lineage-based (one continuous line per cold start)
 const winChart = new Chart(document.getElementById('winChart'), {
-  type:'line', data:{labels:[],datasets:RECENT_VERSIONS.map(v=>({
-    label:LABELS[v], data:[], borderColor:COLORS[v],
-    borderWidth: v==='v13'?3.5:v==='v12'?3:v==='v11'?2.5:v==='v10'?2:1.5,
-    pointRadius:0, tension:0.3, spanGaps:true,
-  }))}, options:pctOpts,
+  type:'line', data:{labels:[],datasets:[]}, options:pctOpts,
 });
 
 // Per-boss WR chart
@@ -988,14 +993,73 @@ function updateVersionTable(snaps, histories) {
   }).join('');
 }
 
-function updateWinChart(histDisplay) {
+function buildLineageDatasets(rawHistories) {
+  // For each lineage, stitch all version histories end-to-end with
+  // cumulative generation offsets.  Each version becomes its own dataset
+  // (own color) but shares a continuous x-axis within its lineage.
+  // Adjacent segments overlap by 1 point so the line connects visually.
+  // Deduplicate each version's history: keep only the last entry per
+  // raw generation number (handles restarts that re-train same gens).
+  // Then chain versions end-to-end using max raw gen as the span.
+  function dedup(history) {
+    const byGen = {};
+    for (const pt of history) {
+      const g = pt.generation || 0;
+      byGen[g] = pt;  // last write wins
+    }
+    return Object.values(byGen).sort((a, b) => (a.generation||0) - (b.generation||0));
+  }
+
+  const datasets = [];
+  for (const lineage of LINEAGES) {
+    let offset = 0;
+    let segCount = 0;
+    for (let vi = 0; vi < lineage.versions.length; vi++) {
+      const ver = lineage.versions[vi];
+      const raw = rawHistories[ver] || [];
+      if (!raw.length) continue;
+      const cleaned = dedup(raw);
+      if (!cleaned.length) continue;
+      const maxRawGen = cleaned[cleaned.length - 1].generation || 0;
+      const points = cleaned.map(pt => ({
+        x: (pt.generation || 0) + offset,
+        y: pt.win_rate,
+      }));
+      // Bridge: connect to previous segment's last point
+      const bridgePoint = segCount > 0 && datasets.length > 0
+          && datasets[datasets.length - 1].data.length
+        ? [datasets[datasets.length - 1].data[datasets[datasets.length - 1].data.length - 1]]
+        : [];
+
+      const thinned = thin([...bridgePoint, ...points], 500);
+      const isNewest = vi === lineage.versions.length - 1;
+      const bw = isNewest ? 3 : 1.8;
+      const lbl = lineage.versions.length === 1
+        ? LABELS[ver]
+        : `${LABELS[ver]} (${lineage.label})`;
+      datasets.push({
+        label: lbl,
+        data: thinned,
+        borderColor: COLORS[ver],
+        borderWidth: bw,
+        pointRadius: 0,
+        tension: 0.3,
+        spanGaps: true,
+      });
+      offset += maxRawGen;
+      segCount++;
+    }
+  }
+  return datasets;
+}
+
+function updateWinChart(rawHistories) {
+  const datasets = buildLineageDatasets(rawHistories);
+  winChart.data.datasets = datasets;
   let maxGen = 0;
-  RECENT_VERSIONS.forEach((v, idx) => {
-    const stitched = stitchGenerations(histDisplay[v]||[]);
-    const h = thin(stitched, 400);
-    winChart.data.datasets[idx].data = h.map(pt=>({x:pt.generation, y:pt.win_rate}));
-    if (h.length) maxGen = Math.max(maxGen, h[h.length-1].generation||0);
-  });
+  for (const ds of datasets) {
+    if (ds.data.length) maxGen = Math.max(maxGen, ds.data[ds.data.length - 1].x || 0);
+  }
   winChart.options.scales.x.min = 0;
   winChart.options.scales.x.max = Math.max(maxGen, 50);
   winChart.update('none');
@@ -1255,7 +1319,7 @@ async function poll() {
 
     // Training tab
     updateVersionTable(snapsDisplay, histDisplay);
-    updateWinChart(histDisplay);
+    updateWinChart(d.history);
     updateGenBossWrChart(activeBoss.gen_wr||[]);
     updateGames(snap.recent_games||[], gameBossMap);
 
