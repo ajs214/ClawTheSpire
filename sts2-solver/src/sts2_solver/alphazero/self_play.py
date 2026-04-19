@@ -599,7 +599,7 @@ def train_batch(
     optimizer.zero_grad()
     option_valid = 0
     SHADOW_ALPHA = 0.15
-    RANK_BETA = 0.10       # weight for ranking loss on card picks
+    RANK_BETA = 0.20       # weight for ranking loss on card picks
     RANK_MARGIN = 0.05     # minimum desired score gap between chosen and alternatives
     for sample in (option_samples or []):
         try:
@@ -1090,7 +1090,7 @@ def train_worker(
         if len(replay_buffer) >= batch_size:
             for epoch in range(train_epochs):
                 batch = replay_buffer.sample(batch_size)
-                option_batch = option_buffer.sample(min(48, len(option_buffer))) if len(option_buffer) > 0 else []
+                option_batch = option_buffer.sample(min(128, len(option_buffer))) if len(option_buffer) > 0 else []
                 total_loss, v_loss, p_loss, o_loss, cp_loss, oo_loss = train_batch(
                     network, optimizer, batch,
                     option_samples=option_batch,
