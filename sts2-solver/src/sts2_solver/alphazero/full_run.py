@@ -656,7 +656,7 @@ def _network_pick_card(
         deck_card_ids = []
         for c in deck:
             base_id = c.id.rstrip("+")
-            deck_card_ids.append(vocabs.cards.get(base_id, 1))  # 1=UNK
+            deck_card_ids.append(vocabs.cards.get(base_id))  # UNK_IDX if missing
 
         # Shadow pick = what the organic heuristic would have chosen.
         # Now that the network makes the actual pick, this is a real
@@ -704,10 +704,11 @@ def _network_pick_card(
             deck_card_ids=deck_card_ids,
             pick_scores=_scores if not organic_warm_start else None,
         )
-    except Exception:
+    except Exception as _card_err:
         # On any failure, fall back to the organic picker with no
         # training sample. This keeps training runs from crashing on
         # edge cases the network hasn't seen.
+        print(f"  [card-pick] fallback: {_card_err}", flush=True)
         try:
             from ..card_picker import pick_card as organic_pick
             pick = organic_pick(offered, deck, floor, hp, max_hp, relics=relics)
