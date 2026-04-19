@@ -459,6 +459,10 @@ def _make_entry(data: dict) -> dict:
         "policy_loss": data.get("policy_loss", 0),
         "value_loss": data.get("value_loss", 0),
         "option_loss": data.get("option_loss", 0),
+        "card_pick_loss": data.get("card_pick_loss", 0),
+        "other_option_loss": data.get("other_option_loss", 0),
+        "card_pick_agreement": data.get("card_pick_agreement", 0),
+        "card_pick_score_spread": data.get("card_pick_score_spread", 0),
         "total_loss": data.get("total_loss", 0),
         "boss_reach": _compute_boss_reach(recent),
         "boss_fight_wr": boss_fight_wr,
@@ -664,6 +668,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <div class="section-label">Training — Last 10 Generations</div>
   <div class="grid" id="summary-recent-stats"></div>
 
+  <div class="section-label">Card Selector (card_eval_head)</div>
+  <div class="grid" id="summary-card-pick-stats"></div>
+
   <div class="section-label">Training — Boss Win Rates</div>
   <div class="panel" id="summary-boss-panel" style="margin-bottom:20px">
     <table>
@@ -691,7 +698,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <div class="panel">
     <h2>Version Comparison</h2>
     <table>
-      <thead><tr><th>Version</th><th>Gens</th><th>Games</th><th>Win Rate</th><th>Boss Reach</th><th>Boss-Fight WR</th><th>Policy Loss</th><th>Value Loss</th><th>Total Loss</th></tr></thead>
+      <thead><tr><th>Version</th><th>Gens</th><th>Games</th><th>Win Rate</th><th>Boss Reach</th><th>Boss-Fight WR</th><th>Card Agree</th><th>Card Spread</th><th>Policy Loss</th><th>Value Loss</th><th>Card Pick Loss</th><th>Total Loss</th></tr></thead>
       <tbody id="version-body"></tbody>
     </table>
   </div>
@@ -699,12 +706,13 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <div class="charts">
     <div class="chart-box full"><h2>Win Rate by Generation (All Lineages)</h2><canvas id="winChart"></canvas></div>
     <div class="chart-box full"><h2>Win Rate by Generation — Per Boss (Active Version)</h2><canvas id="genBossWrChart"></canvas></div>
+    <div class="chart-box full"><h2>Card Selector — Agreement & Score Spread (Active Version)</h2><canvas id="cardPickChart"></canvas></div>
   </div>
 
   <div class="panel">
     <h2>Recent Games (Active Version)</h2>
     <table>
-      <thead><tr><th>#</th><th>Encounter</th><th>Boss</th><th>Outcome</th><th>Floor</th><th>HP</th><th>Archetype</th><th></th></tr></thead>
+      <thead><tr><th>#</th><th>Encounter</th><th>Boss</th><th>Outcome</th><th>Floor</th><th>HP</th><th>Archetype</th><th>Picks</th><th>Agree</th><th>Spread</th><th></th></tr></thead>
       <tbody id="games-body"></tbody>
     </table>
   </div>
@@ -871,6 +879,20 @@ const genBossWrChart = new Chart(document.getElementById('genBossWrChart'), {
     scales:{...pctOpts.scales,x:{...pctOpts.scales.x,type:'linear',title:{display:true,text:'Generation',color:'#484f58'}}}},
 });
 
+// Card-pick dual-axis chart: agreement (left, %) + score spread (right, raw)
+const cardPickChart = new Chart(document.getElementById('cardPickChart'), {
+  type:'line', data:{labels:[],datasets:[]},
+  options:{
+    responsive:true, animation:{duration:300},
+    plugins:{legend:{labels:{color:'#8b949e',font:{size:11}}}},
+    scales:{
+      x:{type:'linear',title:{display:true,text:'Generation',color:'#484f58'},ticks:{color:'#484f58',maxTicksLimit:12},grid:{color:'#21262d'}},
+      yAgree:{position:'left',title:{display:true,text:'Agreement %',color:'#58a6ff'},ticks:{color:'#58a6ff',callback:function(v){return (v*100).toFixed(0)+'%';}},grid:{color:'#21262d'}},
+      ySpread:{position:'right',title:{display:true,text:'Score Spread',color:'#d29922'},ticks:{color:'#d29922'},grid:{drawOnChartArea:false}},
+    },
+  },
+});
+
 // ---- Update functions ----
 
 function updateSummaryTab(snap, activeVer, bossPerBoss, liveRuns, recentHistory) {
@@ -905,6 +927,22 @@ function updateSummaryTab(snap, activeVer, bossPerBoss, liveRuns, recentHistory)
       <div class="sub">Last 10 generations avg</div></div>
     <div class="card"><div class="label">Boss-Fight Win Rate</div><div class="value ${wrClass(l10bfwr)}">${(l10bfwr*100).toFixed(1)}%</div>
       <div class="sub">Last 10 generations avg</div></div>
+  `;
+
+  // Card-pick diagnostics
+  const cpAgree = snap.card_pick_agreement||0;
+  const cpSpread = snap.card_pick_score_spread||0;
+  const cpLoss = snap.card_pick_loss||0;
+  const ooLoss = snap.other_option_loss||0;
+  const cpTotal = snap.card_pick_total||0;
+  const agreeClass = cpAgree >= 0.6 ? 'good' : cpAgree >= 0.3 ? 'warn' : 'bad';
+  document.getElementById('summary-card-pick-stats').innerHTML = `
+    <div class="card"><div class="label">Shadow Agreement</div><div class="value ${agreeClass}">${(cpAgree*100).toFixed(1)}%</div>
+      <div class="sub">${cpTotal} card picks total</div></div>
+    <div class="card"><div class="label">Score Spread</div><div class="value">${cpSpread.toFixed(3)}</div>
+      <div class="sub">Best card vs skip (higher = more opinionated)</div></div>
+    <div class="card"><div class="label">Card Pick Loss</div><div class="value">${cpLoss.toFixed(4)}</div>
+      <div class="sub">vs Other Option Loss: ${ooLoss.toFixed(4)}</div></div>
   `;
 
   // Boss win rates — cumulative vs last 10 gens
@@ -986,8 +1024,11 @@ function updateVersionTable(snaps, histories) {
       <td>${((s.win_rate||0)*100).toFixed(1)}%</td>
       <td>${br.toFixed(0)}%</td>
       <td>${bfCell}</td>
+      <td>${s.card_pick_agreement!=null ? (s.card_pick_agreement*100).toFixed(0)+'%' : '-'}</td>
+      <td>${s.card_pick_score_spread!=null ? s.card_pick_score_spread.toFixed(3) : '-'}</td>
       <td>${s.policy_loss?.toFixed(4)||'-'}</td>
       <td>${s.value_loss?.toFixed(4)||'-'}</td>
+      <td>${s.card_pick_loss!=null ? s.card_pick_loss.toFixed(4) : '-'}</td>
       <td>${s.total_loss?.toFixed(4)||'-'}</td>
     </tr>`;
   }).join('');
@@ -1083,6 +1124,22 @@ function updateGenBossWrChart(genWrData) {
   genBossWrChart.update('none');
 }
 
+function updateCardPickChart(history) {
+  if (!history || !history.length) { cardPickChart.data.datasets=[]; cardPickChart.update('none'); return; }
+  // Thin to ~200 points
+  const thinned = thin(history, 200);
+  const agreeData = thinned.filter(h=>h.card_pick_agreement!=null).map(h=>({x:h.generation,y:h.card_pick_agreement}));
+  const spreadData = thinned.filter(h=>h.card_pick_score_spread!=null).map(h=>({x:h.generation,y:h.card_pick_score_spread}));
+  const cpLossData = thinned.filter(h=>h.card_pick_loss!=null&&h.card_pick_loss>0).map(h=>({x:h.generation,y:h.card_pick_loss}));
+  cardPickChart.data.datasets = [
+    {label:'Agreement Rate',data:agreeData,borderColor:'#58a6ff',borderWidth:2,pointRadius:0,tension:0.4,yAxisID:'yAgree'},
+    {label:'Score Spread',data:spreadData,borderColor:'#d29922',borderWidth:2,pointRadius:0,tension:0.4,yAxisID:'ySpread'},
+  ];
+  const maxGen = thinned[thinned.length-1].generation||50;
+  cardPickChart.options.scales.x.max = maxGen;
+  cardPickChart.update('none');
+}
+
 function updateGames(games, gameBossMap) {
   const body = document.getElementById('games-body');
   body.innerHTML = games.slice().reverse().map(g => {
@@ -1100,6 +1157,9 @@ function updateGames(games, gameBossMap) {
       <td style="color:${bossColor};font-size:0.8em">${bossName}</td>
       <td class="${cls}">${g.outcome}</td><td>${g.floor}</td><td>${g.hp}</td>
       <td><span style="color:${archColor};text-transform:capitalize">${arch}</span>${commit}</td>
+      <td style="font-size:0.8em">${g.card_picks!=null ? `${g.card_picks-g.card_skips}/${g.card_picks}` : '-'}</td>
+      <td style="font-size:0.8em">${g.card_picks ? `${g.card_agrees}/${g.card_picks} (${(g.card_agrees/g.card_picks*100).toFixed(0)}%)` : '-'}</td>
+      <td style="font-size:0.8em">${g.card_spread!=null ? g.card_spread.toFixed(3) : '-'}</td>
       <td><div class="bar" style="width:${pct}px;background:${barColor}"></div></td>
     </tr>`;
   }).join('');
@@ -1321,6 +1381,7 @@ async function poll() {
     updateVersionTable(snapsDisplay, histDisplay);
     updateWinChart(d.history);
     updateGenBossWrChart(activeBoss.gen_wr||[]);
+    updateCardPickChart(activeHistory);
     updateGames(snap.recent_games||[], gameBossMap);
 
     // Live tab

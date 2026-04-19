@@ -98,6 +98,9 @@ class OptionSample:
     # card_eval_head to encode deck composition context.  None for
     # non-card-pick decisions (rest, map, shop, events).
     deck_card_ids: list[int] | None = None
+    # Raw scores from network inference at pick time (card picks only).
+    # Used for score-spread diagnostics without re-running forward pass.
+    pick_scores: list[float] | None = None
 
 
 # Option type constants (indices into option_type_embed)
@@ -540,12 +543,14 @@ def train_batch(
     samples: list[TrainingSample],
     option_samples: list | None = None,
     device: str = "cpu",
-) -> tuple[float, float, float, float]:
-    """Train on a batch. Returns (total, value, policy, option) losses."""
+) -> tuple[float, float, float, float, float, float]:
+    """Train on a batch. Returns (total, value, policy, option, card_pick, other_option) losses."""
     network.train()
     value_losses = []
     policy_losses = []
     option_losses = []
+    card_pick_losses = []
+    other_option_losses = []
     nan_combat = nan_option = 0
 
     # --- Combat samples: accumulate gradients, step once ---
@@ -665,6 +670,10 @@ def train_batch(
                 nan_option += 1
                 continue
             option_losses.append(o_loss.item())
+            if sample.deck_card_ids is not None:
+                card_pick_losses.append(o_loss.item())
+            else:
+                other_option_losses.append(o_loss.item())
             n_opt = max(1, len(option_samples or []))
             (o_loss / n_opt).backward()
             option_valid += 1
@@ -682,7 +691,9 @@ def train_batch(
     avg_v = sum(value_losses) / max(1, len(value_losses))
     avg_p = sum(policy_losses) / max(1, len(policy_losses))
     avg_o = sum(option_losses) / max(1, len(option_losses))
-    return avg_v + avg_p + avg_o, avg_v, avg_p, avg_o
+    avg_cp = sum(card_pick_losses) / max(1, len(card_pick_losses))
+    avg_oo = sum(other_option_losses) / max(1, len(other_option_losses))
+    return avg_v + avg_p + avg_o, avg_v, avg_p, avg_o, avg_cp, avg_oo
 
 
 # ---------------------------------------------------------------------------
@@ -913,6 +924,14 @@ def train_worker(
             flush=True,
         )
 
+    # --- Card-pick diagnostics ---
+    # Agreement: how often the network's card pick matches the shadow heuristic
+    _card_pick_total = 0
+    _card_pick_agree = 0
+    # Score spread: avg gap between best-scored card and skip option
+    _card_pick_spread_sum = 0.0
+    _card_pick_spread_count = 0
+
     for gen in range(1, num_generations + 1):
         gen_t0 = time.time()
 
@@ -949,6 +968,20 @@ def train_worker(
                 replay_buffer.add(sample, is_win=is_win)
             for os in result.deck_samples:
                 option_buffer.add(os, is_win=is_win)
+                # Card-pick diagnostics
+                try:
+                    _card_pick_total += 1
+                    if (os.shadow_chosen_idx is not None
+                            and os.chosen_idx == os.shadow_chosen_idx):
+                        _card_pick_agree += 1
+                    # Score spread: best card score minus skip score
+                    if os.pick_scores and len(os.pick_scores) >= 2:
+                        skip_score = os.pick_scores[-1]  # last slot = skip
+                        best_card = max(os.pick_scores[:-1])  # best non-skip
+                        _card_pick_spread_sum += (best_card - skip_score)
+                        _card_pick_spread_count += 1
+                except Exception:
+                    pass
             for os in result.option_samples:
                 option_buffer.add(os, is_win=is_win)
 
@@ -1019,6 +1052,22 @@ def train_worker(
                 relic_counts[_rid] += 1
                 total_relics_seen += 1
 
+            # Per-game card-pick stats
+            _game_picks = len(result.deck_samples)
+            _game_agrees = sum(
+                1 for ds in result.deck_samples
+                if ds.shadow_chosen_idx is not None and ds.chosen_idx == ds.shadow_chosen_idx
+            )
+            _game_spreads = [
+                max(ds.pick_scores[:-1]) - ds.pick_scores[-1]
+                for ds in result.deck_samples
+                if ds.pick_scores and len(ds.pick_scores) >= 2
+            ]
+            _game_skips = sum(
+                1 for ds in result.deck_samples
+                if ds.chosen_idx == len(ds.option_types) - 1
+            )
+
             recent_games.append({
                 "num": total_games,
                 "encounter": f"Act1 ({result.combats_won}/{result.combats_fought})",
@@ -1028,17 +1077,21 @@ def train_worker(
                 "archetype": getattr(result, 'archetype', 'unknown'),
                 "commitment": round(getattr(result, 'archetype_commitment', 0.0), 2),
                 "relics": [r for r in _run_relics if r != "RING_OF_THE_SNAKE"],
+                "card_picks": _game_picks,
+                "card_agrees": _game_agrees,
+                "card_skips": _game_skips,
+                "card_spread": round(sum(_game_spreads) / max(1, len(_game_spreads)), 3) if _game_spreads else 0,
             })
             if len(recent_games) > 50:
                 recent_games = recent_games[-50:]
 
         # --- Training ---
-        v_loss = p_loss = o_loss = total_loss = 0.0
+        v_loss = p_loss = o_loss = total_loss = cp_loss = oo_loss = 0.0
         if len(replay_buffer) >= batch_size:
             for epoch in range(train_epochs):
                 batch = replay_buffer.sample(batch_size)
                 option_batch = option_buffer.sample(min(48, len(option_buffer))) if len(option_buffer) > 0 else []
-                total_loss, v_loss, p_loss, o_loss = train_batch(
+                total_loss, v_loss, p_loss, o_loss, cp_loss, oo_loss = train_batch(
                     network, optimizer, batch,
                     option_samples=option_batch,
                     device="cpu",
@@ -1104,6 +1157,13 @@ def train_worker(
             "value_loss": round(v_loss, 4),
             "policy_loss": round(p_loss, 4),
             "option_loss": round(o_loss, 4),
+            "card_pick_loss": round(cp_loss, 4),
+            "other_option_loss": round(oo_loss, 4),
+            "card_pick_agreement": round(_card_pick_agree / max(1, _card_pick_total), 4),
+            "card_pick_total": _card_pick_total,
+            "card_pick_score_spread": round(
+                _card_pick_spread_sum / max(1, _card_pick_spread_count), 4
+            ),
             "option_buffer_size": len(option_buffer),
             "lr": round(scheduler.get_last_lr()[0], 6),
             "mcts_sims": mcts_simulations,
@@ -1130,9 +1190,12 @@ def train_worker(
         # Console output (minimal for headless)
         win_pct = total_wins / max(1, total_games) * 100
         cur_lr = scheduler.get_last_lr()[0]
+        cp_agree_pct = _card_pick_agree / max(1, _card_pick_total) * 100
+        cp_spread = _card_pick_spread_sum / max(1, _card_pick_spread_count)
         print(
             f"Gen {gen:4d} | games={total_games} win={win_pct:.0f}% | "
-            f"loss={total_loss:.3f} (v={v_loss:.3f} p={p_loss:.3f} o={o_loss:.3f}) | "
+            f"loss={total_loss:.3f} (v={v_loss:.3f} p={p_loss:.3f} o={o_loss:.3f} cp={cp_loss:.3f}) | "
+            f"cards: agree={cp_agree_pct:.0f}% spread={cp_spread:.3f} | "
             f"lr={cur_lr:.1e} | {gen_elapsed:.1f}s",
             flush=True,
         )

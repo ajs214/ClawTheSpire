@@ -666,6 +666,7 @@ def _network_pick_card(
             offered, deck, hp, max_hp, floor, relics=relics,
         )
 
+        _scores = None  # populated in self-play mode for score-spread diagnostics
         if organic_warm_start:
             # Imitation mode: defer to the organic picker for the
             # actual choice. Useful for seeding a fresh network with
@@ -701,6 +702,7 @@ def _network_pick_card(
             value=0.0,  # Filled after run ends by _assign_run_values
             shadow_chosen_idx=shadow_idx,
             deck_card_ids=deck_card_ids,
+            pick_scores=_scores if not organic_warm_start else None,
         )
     except Exception:
         # On any failure, fall back to the organic picker with no
