@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# train-v13-continue-14hr.sh — 14-hour V13 continuation (3rd run)
+# train-v13-continue-10hr.sh — 9-hour V13 continuation
 #
-# Resumes from latest V13 checkpoint (~gen 1645+ total).
-# Same hyperparameters, updated simulator with v0.102/v0.103 patch fixes.
+# Resumes from latest V13 checkpoint.
+# Card_eval_head now training (Vocab.get fix), boosted option batch + rank beta.
 #
 # Usage:
-#   nohup bash ~/AJS_CTS/ClawTheSpire/train-v13-continue-14hr.sh > train-v13-continue-14hr.log 2>&1 &
-#   tail -f train-v13-continue-14hr.log
+#   nohup bash ~/AJS_CTS/ClawTheSpire/train-v13-continue-10hr.sh > train-v13-continue-10hr.log 2>&1 &
+#   tail -f train-v13-continue-10hr.log
 #
 # Dashboard (run in a separate terminal):
 #   bash ~/AJS_CTS/ClawTheSpire/start-dashboard.sh
@@ -51,8 +51,8 @@ mkdir -p "$SAVE_DIR"
 
 LATEST_CKPT=$(ls -t "$SAVE_DIR"/gen_*.pt 2>/dev/null | head -1)
 
-echo "=== STS2 AlphaZero Training V13 — 14 Hour Continuation ==="
-echo "  Duration cap:  14 hours (hard timeout)"
+echo "=== STS2 AlphaZero Training V13 — 9 Hour Continuation ==="
+echo "  Duration cap:  9 hours (hard timeout)"
 echo "  Gen budget:    2800"
 echo "  Games/gen:     10"
 echo "  MCTS sims:     600 base (progressive: 240→1080)"
@@ -62,11 +62,11 @@ echo "  Progress:      $PROGRESS_FILE"
 echo "  Boss log:      $BOSS_LOG_FILE"
 echo ""
 echo "Starting at $(date)"
-echo "Expected end:  $(date -v+14H 2>/dev/null || date -d '+14 hours' 2>/dev/null || echo '(14 hours from now)')"
+echo "Expected end:  $(date -v+9H 2>/dev/null || date -d '+9 hours' 2>/dev/null || echo '(9 hours from now)')"
 echo "-----------------------------------"
 
-# Pure-bash 14-hour watchdog — works without coreutils on macOS.
-TIMEOUT_SECS=$((14 * 3600))
+# Pure-bash 9-hour watchdog — works without coreutils on macOS.
+TIMEOUT_SECS=$((9 * 3600))
 
 python3 -m src.sts2_solver.alphazero.self_play train \
     --generations 2800 \
@@ -85,7 +85,7 @@ TRAIN_PID=$!
     sleep "$TIMEOUT_SECS"
     if kill -0 "$TRAIN_PID" 2>/dev/null; then
         echo ""
-        echo "!! 14-hour cap hit — sending SIGTERM to training pid $TRAIN_PID"
+        echo "!! 9-hour cap hit — sending SIGTERM to training pid $TRAIN_PID"
         kill -TERM "$TRAIN_PID" 2>/dev/null || true
         for _ in $(seq 1 30); do
             kill -0 "$TRAIN_PID" 2>/dev/null || exit 0
@@ -111,9 +111,9 @@ wait "$WATCHDOG_PID" 2>/dev/null || true
 
 echo ""
 if [ "$RC" -eq 143 ] || [ "$RC" -eq 137 ]; then
-    echo "=== V13 14-hour cap reached at $(date) (exit $RC) ==="
+    echo "=== V13 9-hour cap reached at $(date) (exit $RC) ==="
 elif [ "$RC" -eq 0 ]; then
-    echo "=== V13 gen budget exhausted before 14-hour cap at $(date) ==="
+    echo "=== V13 gen budget exhausted before 9-hour cap at $(date) ==="
 else
     echo "=== V13 training exited with code $RC at $(date) ==="
 fi
