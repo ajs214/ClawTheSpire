@@ -710,6 +710,14 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </div>
 
   <div class="panel">
+    <h2>Card Preferences (Active Version — Cumulative)</h2>
+    <table>
+      <thead><tr><th style="text-align:left">Card</th><th>Offered</th><th>Picked</th><th>Pick Rate</th><th>Skip Rate</th><th>Win Pick Rate</th><th></th></tr></thead>
+      <tbody id="card-stats-body"></tbody>
+    </table>
+  </div>
+
+  <div class="panel">
     <h2>Recent Games (Active Version)</h2>
     <table>
       <thead><tr><th>#</th><th>Encounter</th><th>Boss</th><th>Outcome</th><th>Floor</th><th>HP</th><th>Archetype</th><th>Picks</th><th>Agree</th><th>Spread</th><th></th></tr></thead>
@@ -1042,9 +1050,25 @@ function buildLineageDatasets(rawHistories) {
   // Deduplicate each version's history: keep only the last entry per
   // raw generation number (handles restarts that re-train same gens).
   // Then chain versions end-to-end using max raw gen as the span.
+  //
+  // x-axis normalization: each lineage's total gens are normalized to
+  // a 0–1 range so short lineages (V13 ~500 gens) are as visible as
+  // long ones (L1 ~6800 gens). The chart x-axis shows "Training %"
+  // rather than raw generation count.
   function dedup(history) {
+    // Find the last restart boundary: where gen drops back to a lower
+    // value (training was killed and restarted). Keep only from the
+    // last restart onward so stale high-gen entries from old runs don't
+    // extend the chart with outdated win rates.
+    let lastRestartIdx = 0;
+    for (let i = 1; i < history.length; i++) {
+      if ((history[i].generation||0) < (history[i-1].generation||0)) {
+        lastRestartIdx = i;
+      }
+    }
+    const recent = history.slice(lastRestartIdx);
     const byGen = {};
-    for (const pt of history) {
+    for (const pt of recent) {
       const g = pt.generation || 0;
       byGen[g] = pt;  // last write wins
     }
@@ -1055,6 +1079,16 @@ function buildLineageDatasets(rawHistories) {
   for (const lineage of LINEAGES) {
     let offset = 0;
     let segCount = 0;
+    // First pass: compute total gens for this lineage (for normalization)
+    let lineageTotalGens = 0;
+    for (const ver of lineage.versions) {
+      const raw = rawHistories[ver] || [];
+      if (!raw.length) continue;
+      const cleaned = dedup(raw);
+      if (cleaned.length) lineageTotalGens += cleaned[cleaned.length - 1].generation || 0;
+    }
+    if (lineageTotalGens === 0) continue;
+
     for (let vi = 0; vi < lineage.versions.length; vi++) {
       const ver = lineage.versions[vi];
       const raw = rawHistories[ver] || [];
@@ -1063,7 +1097,7 @@ function buildLineageDatasets(rawHistories) {
       if (!cleaned.length) continue;
       const maxRawGen = cleaned[cleaned.length - 1].generation || 0;
       const points = cleaned.map(pt => ({
-        x: (pt.generation || 0) + offset,
+        x: ((pt.generation || 0) + offset) / lineageTotalGens,
         y: pt.win_rate,
       }));
       // Bridge: connect to previous segment's last point
@@ -1075,8 +1109,9 @@ function buildLineageDatasets(rawHistories) {
       const thinned = thin([...bridgePoint, ...points], 500);
       const isNewest = vi === lineage.versions.length - 1;
       const bw = isNewest ? 3 : 1.8;
+      const genLabel = lineageTotalGens.toLocaleString() + ' gens';
       const lbl = lineage.versions.length === 1
-        ? LABELS[ver]
+        ? `${LABELS[ver]} (${genLabel})`
         : `${LABELS[ver]} (${lineage.label})`;
       datasets.push({
         label: lbl,
@@ -1097,12 +1132,10 @@ function buildLineageDatasets(rawHistories) {
 function updateWinChart(rawHistories) {
   const datasets = buildLineageDatasets(rawHistories);
   winChart.data.datasets = datasets;
-  let maxGen = 0;
-  for (const ds of datasets) {
-    if (ds.data.length) maxGen = Math.max(maxGen, ds.data[ds.data.length - 1].x || 0);
-  }
   winChart.options.scales.x.min = 0;
-  winChart.options.scales.x.max = Math.max(maxGen, 50);
+  winChart.options.scales.x.max = 1;
+  winChart.options.scales.x.title.text = 'Training Progress (normalized per lineage)';
+  winChart.options.scales.x.ticks.callback = function(v) { return (v*100).toFixed(0)+'%'; };
   winChart.update('none');
 }
 
@@ -1138,6 +1171,30 @@ function updateCardPickChart(history) {
   const maxGen = thinned[thinned.length-1].generation||50;
   cardPickChart.options.scales.x.max = maxGen;
   cardPickChart.update('none');
+}
+
+function updateCardStats(cardStats) {
+  const body = document.getElementById('card-stats-body');
+  if (!cardStats || !cardStats.length) {
+    body.innerHTML = '<tr><td colspan="7" style="text-align:center;color:#484f58">No card data yet</td></tr>';
+    return;
+  }
+  body.innerHTML = cardStats.map(c => {
+    const pickPct = (c.pick_rate*100).toFixed(1);
+    const skipPct = (c.skip_rate*100).toFixed(1);
+    const winPick = c.win_pick_rate!=null ? (c.win_pick_rate*100).toFixed(0)+'%' : '-';
+    const barW = Math.min(120, c.pick_rate*120);
+    const barColor = c.pick_rate > 0.6 ? '#3fb950' : c.pick_rate > 0.3 ? '#d29922' : '#f85149';
+    return `<tr>
+      <td style="text-align:left;font-family:monospace;font-size:0.85em">${c.card}</td>
+      <td>${c.offered}</td>
+      <td>${c.picked}</td>
+      <td>${pickPct}%</td>
+      <td>${skipPct}%</td>
+      <td>${winPick}</td>
+      <td><div class="bar" style="width:${barW}px;background:${barColor}"></div></td>
+    </tr>`;
+  }).join('');
 }
 
 function updateGames(games, gameBossMap) {
@@ -1382,6 +1439,7 @@ async function poll() {
     updateWinChart(d.history);
     updateGenBossWrChart(activeBoss.gen_wr||[]);
     updateCardPickChart(activeHistory);
+    updateCardStats(snap.card_stats||[]);
     updateGames(snap.recent_games||[], gameBossMap);
 
     // Live tab

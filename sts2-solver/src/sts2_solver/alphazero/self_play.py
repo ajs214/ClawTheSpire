@@ -704,6 +704,30 @@ def _default_progress_path() -> Path:
     return Path(__file__).resolve().parents[4] / "alphazero_progress.json"
 
 
+def _build_card_stats(
+    offered: dict[str, int],
+    picked: dict[str, int],
+    win_picked: dict[str, int],
+    top_n: int = 30,
+) -> list[dict]:
+    """Build per-card stats sorted by times offered (descending)."""
+    all_cards = sorted(offered.keys(), key=lambda c: offered[c], reverse=True)[:top_n]
+    result = []
+    for cname in all_cards:
+        o = offered[cname]
+        p = picked.get(cname, 0)
+        w = win_picked.get(cname, 0)
+        result.append({
+            "card": cname,
+            "offered": o,
+            "picked": p,
+            "pick_rate": round(p / max(1, o), 3),
+            "skip_rate": round(1 - p / max(1, o), 3),
+            "win_pick_rate": round(w / max(1, p), 3) if p > 0 else None,
+        })
+    return result
+
+
 def _write_progress(path: Path, stats: dict) -> None:
     """Atomically write progress to JSON file."""
     tmp = path.with_suffix(".tmp")
@@ -931,6 +955,10 @@ def train_worker(
     # Score spread: avg gap between best-scored card and skip option
     _card_pick_spread_sum = 0.0
     _card_pick_spread_count = 0
+    # Per-card tracking: how often each card is offered vs picked vs skipped
+    _card_offered: dict[str, int] = {}   # card_name → times offered
+    _card_picked: dict[str, int] = {}    # card_name → times picked
+    _card_win_picked: dict[str, int] = {}  # card_name → times picked in winning runs
 
     for gen in range(1, num_generations + 1):
         gen_t0 = time.time()
@@ -980,6 +1008,16 @@ def train_worker(
                         best_card = max(os.pick_scores[:-1])  # best non-skip
                         _card_pick_spread_sum += (best_card - skip_score)
                         _card_pick_spread_count += 1
+                    # Per-card offer/pick tracking
+                    num_cards = len(os.option_cards) - 1  # last slot = skip
+                    for ci in range(num_cards):
+                        vid = os.option_cards[ci]
+                        cname = vocabs.cards.idx_to_token.get(vid, f"UNK_{vid}")
+                        _card_offered[cname] = _card_offered.get(cname, 0) + 1
+                        if os.chosen_idx == ci:
+                            _card_picked[cname] = _card_picked.get(cname, 0) + 1
+                            if is_win:
+                                _card_win_picked[cname] = _card_win_picked.get(cname, 0) + 1
                 except Exception:
                     pass
             for os in result.option_samples:
@@ -1181,6 +1219,10 @@ def train_worker(
                 {"id": _rid, "count": _cnt}
                 for _rid, _cnt in relic_counts.most_common(20)
             ],
+            # Per-card pick tracking
+            "card_stats": _build_card_stats(
+                _card_offered, _card_picked, _card_win_picked, top_n=30
+            ),
             "value_probes": _probe_log[-1] if _probe_log else None,
             "status": f"Gen {gen}/{num_generations} complete",
             "timestamp": time.time(),

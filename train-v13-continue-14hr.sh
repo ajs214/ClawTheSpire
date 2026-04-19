@@ -25,8 +25,8 @@ mkdir -p "$SAVE_DIR"
 
 LATEST_CKPT=$(ls -t "$SAVE_DIR"/gen_*.pt 2>/dev/null | head -1)
 
-echo "=== STS2 AlphaZero Training V13 — 4 Hour Continuation ==="
-echo "  Duration cap:  4 hours (hard timeout)"
+echo "=== STS2 AlphaZero Training V13 — 14 Hour Continuation ==="
+echo "  Duration cap:  14 hours (hard timeout)"
 echo "  Gen budget:    2800"
 echo "  Games/gen:     10"
 echo "  MCTS sims:     600 base (progressive: 240→1080)"
@@ -36,11 +36,11 @@ echo "  Progress:      $PROGRESS_FILE"
 echo "  Boss log:      $BOSS_LOG_FILE"
 echo ""
 echo "Starting at $(date)"
-echo "Expected end:  $(date -v+4H 2>/dev/null || date -d '+4 hours' 2>/dev/null || echo '(4 hours from now)')"
+echo "Expected end:  $(date -v+14H 2>/dev/null || date -d '+14 hours' 2>/dev/null || echo '(14 hours from now)')"
 echo "-----------------------------------"
 
 # Pure-bash 14-hour watchdog — works without coreutils on macOS.
-TIMEOUT_SECS=$((4 * 3600))
+TIMEOUT_SECS=$((14 * 3600))
 
 python3 -m src.sts2_solver.alphazero.self_play train \
     --generations 2800 \
@@ -59,7 +59,7 @@ TRAIN_PID=$!
     sleep "$TIMEOUT_SECS"
     if kill -0 "$TRAIN_PID" 2>/dev/null; then
         echo ""
-        echo "!! 4-hour cap hit — sending SIGTERM to training pid $TRAIN_PID"
+        echo "!! 14-hour cap hit — sending SIGTERM to training pid $TRAIN_PID"
         kill -TERM "$TRAIN_PID" 2>/dev/null || true
         for _ in $(seq 1 30); do
             kill -0 "$TRAIN_PID" 2>/dev/null || exit 0
@@ -85,9 +85,9 @@ wait "$WATCHDOG_PID" 2>/dev/null || true
 
 echo ""
 if [ "$RC" -eq 143 ] || [ "$RC" -eq 137 ]; then
-    echo "=== V13 4-hour cap reached at $(date) (exit $RC) ==="
+    echo "=== V13 14-hour cap reached at $(date) (exit $RC) ==="
 elif [ "$RC" -eq 0 ]; then
-    echo "=== V13 gen budget exhausted before 4-hour cap at $(date) ==="
+    echo "=== V13 gen budget exhausted before 14-hour cap at $(date) ==="
 else
     echo "=== V13 training exited with code $RC at $(date) ==="
 fi
