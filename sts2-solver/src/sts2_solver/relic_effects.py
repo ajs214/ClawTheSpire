@@ -183,6 +183,7 @@ TURN_START: dict[str, list[dict]] = {
     "BOUND_PHYLACTERY":  [{"draw": 1}],  # Summon 1; proxy via extra draw
     "BRIMSTONE":         [{"strength": 1}],            # gain Strength; direct effect
     "EMOTION_CHIP":      [{"draw": 1}],                # conditional passive; proxy via draw
+    "PRISMATIC_GEM":     [{"energy": 1}],               # +1 energy per turn (card color part is OOC)
 
     "BLACK_BLOOD":       [],                            # end-of-combat only
 }
@@ -478,7 +479,7 @@ GLOBAL_DAMAGE_MULTIPLIERS: dict[str, float] = {
     "FUR_COAT":         1.03,
     "BIIIG_HUG":        1.01,
     "JEWELRY_BOX":      1.02,
-    "PRISMATIC_GEM":    1.03,
+    # PRISMATIC_GEM: moved to TURN_START with real energy effect
     "PAELS_CLAW":       1.02,
     "PAELS_EYE":        1.02,
     "PAELS_GROWTH":     1.02,
@@ -536,14 +537,14 @@ GLOBAL_DAMAGE_MULTIPLIERS: dict[str, float] = {
     "OLD_COIN":         1.01,
     "SIGNET_RING":      1.01,
     "GOLDEN_PEARL":     1.01,
-    "SNECKO_SKULL":     1.02,  # +1 poison on apply
+    # SNECKO_SKULL: moved to real implementation in effects.py (poison apply hook)
     "CALLING_BELL":     1.03,
     "CURSED_KEY":       0.99,  # curse drawback if it exists
     "FIDDLE":           1.02,
     "BIG_HAT":          1.01,
     "BOOK_REPAIR_KNIFE":1.01,
     "BOOKMARK":         1.01,
-    "BOOMING_CONCH":    1.01,
+    # BOOMING_CONCH: already in ELITE_ONLY_START — removed from proxy
     "BOWLING_BALL":     1.01,
     "BREAST_PLATE":     1.01,
     "DIVINE_RIGHT":     1.02,
@@ -574,7 +575,7 @@ GLOBAL_DAMAGE_MULTIPLIERS: dict[str, float] = {
     "METRONOME":        1.02,  # channel threshold; complex proxy
     "MINI_REGENT":      1.02,  # star spend bonus; exotic proxy
     "ORANGE_DOUGH":     1.03,  # free colorless cards on combat start
-    "PAPER_PHROG":      1.04,  # vulnerable damage amp; significant damage boost
+    # PAPER_PHROG: moved to real implementation in effects.py (1.75x Vulnerable)
     "POWER_CELL":       1.02,  # zero-cost cards on combat start
     "RED_SKULL":        1.02,  # strength when low HP; conditional proxy
     "REGALITE":         1.01,  # colorless card creation; small bonus
@@ -583,7 +584,7 @@ GLOBAL_DAMAGE_MULTIPLIERS: dict[str, float] = {
     "SELF_FORMING_CLAY":1.02,  # damage reduction; defensive proxy
     "SYMBIOTIC_VIRUS":  1.02,  # poison channel; damage mult proxy
     "UNDYING_SIGIL":    1.01,  # doom mechanic; defensive/niche proxy
-    "VAMBRACE":         1.01,  # first block doubling; already in FIRST_BLOCK_GAIN_DOUBLE
+    # VAMBRACE: already in FIRST_BLOCK_GAIN_DOUBLE — removed from proxy
     "VITRUVIAN_MINION": 1.03,  # double damage on minion cards
 }
 
@@ -1101,9 +1102,18 @@ def _damage_random(state: "CombatState", amount: int) -> None:
 # module.  Used by full_run.py to build the in-game drop pool from the
 # set of relics the training loop can actually reward the agent for.
 
+# Relics with real implementations in effects.py / combat_engine.py
+# (not in any table above, but handled by inline code).
+_INLINE_IMPLEMENTED_RELICS: set[str] = {
+    "SNECKO_SKULL",   # +1 Poison on apply (effects.py)
+    "PAPER_PHROG",    # 1.75x Vulnerable damage (effects.py)
+}
+
+
 def simulated_relic_ids() -> set[str]:
     """All relic IDs that this module models in some way (combat or OOC)."""
     ids: set[str] = set()
+    ids.update(_INLINE_IMPLEMENTED_RELICS)
     ids.update(START_OF_COMBAT.keys())
     ids.update(ELITE_ONLY_START.keys())
     ids.update(BOSS_ONLY_START.keys())

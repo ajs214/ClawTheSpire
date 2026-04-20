@@ -159,22 +159,50 @@ def play_card(
 
 
 def use_potion(state: CombatState, potion_idx: int) -> None:
-    """Use a potion from the given slot. Mutates state in place."""
+    """Use a potion from the given slot. Mutates state in place.
+
+    Supports all effect keys defined in simulator.POTION_TYPES:
+      heal, block, energy, draw, strength, dexterity, damage_all,
+      enemy_weak, enemy_vulnerable, enemy_poison, thorns, plated_armor,
+      metallicize, ritual, regen, play_top_cards, gamblers_brew,
+      duplication, fairy, smoke_bomb, fill_potions, max_hp, snecko_oil
+    """
     if potion_idx >= len(state.player.potions):
         return
     pot = state.player.potions[potion_idx]
     if not pot:
         return
 
+    # --- Direct healing ---
     if pot.get("heal"):
         state.player.hp = min(state.player.hp + pot["heal"], state.player.max_hp)
-    elif pot.get("block"):
+
+    # --- Block ---
+    if pot.get("block"):
         state.player.block += pot["block"]
-    elif pot.get("strength"):
+
+    # --- Energy ---
+    if pot.get("energy"):
+        state.player.energy += pot["energy"]
+
+    # --- Draw cards ---
+    if pot.get("draw"):
+        draw_cards(state, pot["draw"])
+
+    # --- Strength ---
+    if pot.get("strength"):
         state.player.powers["Strength"] = (
             state.player.powers.get("Strength", 0) + pot["strength"]
         )
-    elif pot.get("damage_all"):
+
+    # --- Dexterity ---
+    if pot.get("dexterity"):
+        state.player.powers["Dexterity"] = (
+            state.player.powers.get("Dexterity", 0) + pot["dexterity"]
+        )
+
+    # --- AoE damage ---
+    if pot.get("damage_all"):
         for e in state.enemies:
             if e.is_alive:
                 dmg = pot["damage_all"]
@@ -186,10 +214,96 @@ def use_potion(state: CombatState, potion_idx: int) -> None:
                         e.block -= dmg
                         dmg = 0
                 e.hp -= dmg
-    elif pot.get("enemy_weak"):
+
+    # --- Enemy debuffs ---
+    if pot.get("enemy_weak"):
         for e in state.enemies:
             if e.is_alive:
                 e.powers["Weak"] = e.powers.get("Weak", 0) + pot["enemy_weak"]
+
+    if pot.get("enemy_vulnerable"):
+        for e in state.enemies:
+            if e.is_alive:
+                e.powers["Vulnerable"] = e.powers.get("Vulnerable", 0) + pot["enemy_vulnerable"]
+
+    if pot.get("enemy_poison"):
+        for e in state.enemies:
+            if e.is_alive:
+                e.powers["Poison"] = e.powers.get("Poison", 0) + pot["enemy_poison"]
+
+    # --- Thorns (Liquid Bronze) ---
+    if pot.get("thorns"):
+        state.player.powers["Thorns"] = (
+            state.player.powers.get("Thorns", 0) + pot["thorns"]
+        )
+
+    # --- Plated Armor (Essence of Steel): block each turn ---
+    if pot.get("plated_armor"):
+        state.player.powers["Metallicize"] = (
+            state.player.powers.get("Metallicize", 0) + pot["plated_armor"]
+        )
+
+    # --- Metallicize (Heart of Iron): block each turn ---
+    if pot.get("metallicize"):
+        state.player.powers["Metallicize"] = (
+            state.player.powers.get("Metallicize", 0) + pot["metallicize"]
+        )
+
+    # --- Ritual (Cultist Potion): +N Strength per turn ---
+    if pot.get("ritual"):
+        state.player.powers["Ritual"] = (
+            state.player.powers.get("Ritual", 0) + pot["ritual"]
+        )
+
+    # --- Regen: heal N per turn for N turns ---
+    if pot.get("regen"):
+        state.player.powers["Regen"] = (
+            state.player.powers.get("Regen", 0) + pot["regen"]
+        )
+
+    # --- Play top N cards from draw pile (Distilled Chaos) ---
+    if pot.get("play_top_cards"):
+        n = pot["play_top_cards"]
+        for _ in range(n):
+            if not state.player.draw_pile:
+                break
+            card = state.player.draw_pile.pop()
+            alive = [i for i, e in enumerate(state.enemies) if e.is_alive]
+            target = alive[0] if alive else None
+            effect_fn = get_effect(card)
+            effect_fn(state, target)
+            state.player.discard_pile.append(card)
+
+    # --- Gambler's Brew: discard hand, redraw same count ---
+    if pot.get("gamblers_brew"):
+        hand_size = len(state.player.hand)
+        state.player.discard_pile.extend(state.player.hand)
+        state.player.hand.clear()
+        draw_cards(state, hand_size)
+
+    # --- Duplication: next card plays twice (approximated as Burst 1) ---
+    if pot.get("duplication"):
+        state.player.burst_count = max(state.player.burst_count, 1)
+
+    # --- Fairy in a Bottle: stored as a power, triggers on death ---
+    if pot.get("fairy"):
+        state.player.powers["Fairy"] = 1
+
+    # --- Smoke Bomb: flee combat → modelled as big heal (avoids damage) ---
+    if pot.get("smoke_bomb"):
+        state.player.hp = min(state.player.hp + 20, state.player.max_hp)
+
+    # --- Fruit Juice: permanent +5 max HP ---
+    if pot.get("max_hp"):
+        state.player.max_hp += pot["max_hp"]
+        state.player.hp += pot["max_hp"]
+
+    # --- Fill potions: modelled as heal + strength (proxy for value) ---
+    if pot.get("fill_potions"):
+        state.player.hp = min(state.player.hp + 10, state.player.max_hp)
+        state.player.powers["Strength"] = (
+            state.player.powers.get("Strength", 0) + 1
+        )
 
     state.player.potions[potion_idx] = {}  # empty the slot
 
@@ -545,6 +659,13 @@ def _tick_start_of_turn_powers(state: CombatState) -> None:
         state.player.hp -= 1
         draw_cards(state, powers["Brutality"])
 
+    # Regen: heal and decrement
+    if "Regen" in powers and powers["Regen"] > 0:
+        state.player.hp = min(state.player.hp + powers["Regen"], state.player.max_hp)
+        powers["Regen"] -= 1
+        if powers["Regen"] <= 0:
+            del powers["Regen"]
+
     # Noxious Fumes: apply Poison to ALL enemies
     if "Noxious Fumes" in powers:
         for enemy in state.enemies:
@@ -696,6 +817,11 @@ def tick_enemy_powers(state: CombatState) -> None:
 def is_combat_over(state: CombatState) -> str | None:
     """Return 'win' if all enemies dead, 'lose' if player dead, None otherwise."""
     if state.player.hp <= 0:
+        # Fairy in a Bottle: auto-revive at 30% max HP
+        if state.player.powers.get("Fairy", 0) > 0:
+            state.player.hp = max(1, int(state.player.max_hp * 0.3))
+            del state.player.powers["Fairy"]
+            return None
         return "lose"
     if all(not e.is_alive for e in state.enemies):
         return "win"

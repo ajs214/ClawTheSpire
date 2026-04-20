@@ -58,6 +58,7 @@ from ..simulator import (
     POTION_DROP_CHANCE,
     POTION_SLOTS,
     POTION_TYPES,
+    _random_potion,
     SHOP_CARD_REMOVE_COST,
     SHOP_CARD_COSTS,
     SHOP_POTION_COST,
@@ -1025,7 +1026,7 @@ def play_full_run(
             gold += rng.randint(*gold_range)
 
             if rng.random() < POTION_DROP_CHANCE and len(potions) < potion_slots_cap:
-                pot = rng.choice(POTION_TYPES)
+                pot = _random_potion(rng)
                 potions.append(dict(pot))
 
             # Elite relic drop — V7: deck-aware 1-of-3 pick from the
@@ -1283,7 +1284,7 @@ def play_full_run(
                     shop_costs.append(cost)
 
                 # Offer 2 random potions at the shop
-                shop_potions = [rng.choice(POTION_TYPES) for _ in range(2)]
+                shop_potions = [_random_potion(rng) for _ in range(2)]
 
                 # Offer up to 3 relics (parity fix from docs/shop_parity.md #18).
                 # Filter out already-owned relics, same as _simulate_shop.

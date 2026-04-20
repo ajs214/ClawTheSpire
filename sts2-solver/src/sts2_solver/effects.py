@@ -35,7 +35,9 @@ def calculate_attack_damage(base: int, state: CombatState, target: EnemyState) -
     if player.powers.get("Shrink", 0) < 0:
         raw = math.floor(raw * 0.7)
     if target.powers.get("Vulnerable", 0) > 0:
-        raw = math.floor(raw * 1.5)
+        # Paper Phrog: Vulnerable = 75% more damage instead of 50%
+        vuln_mult = 1.75 if "PAPER_PHROG" in state.relics else 1.5
+        raw = math.floor(raw * vuln_mult)
     # Double Damage: player deals double damage (e.g. from Twig Slime buff)
     if player.powers.get("Double Damage", 0) > 0:
         raw *= 2
@@ -158,11 +160,17 @@ def apply_power_to_enemy(state: CombatState, target_idx: int, power: str, amount
     enemy = state.enemies[target_idx]
     if not enemy.is_alive:
         return
+    # Snecko Skull: +1 Poison whenever Poison is applied
+    if power == "Poison" and "SNECKO_SKULL" in state.relics:
+        amount += 1
     enemy.powers[power] = enemy.powers.get(power, 0) + amount
 
 
 def apply_power_to_all_enemies(state: CombatState, power: str, amount: int) -> None:
     """Apply a power/debuff to all living enemies."""
+    # Snecko Skull: +1 Poison whenever Poison is applied
+    if power == "Poison" and "SNECKO_SKULL" in state.relics:
+        amount += 1
     for enemy in state.enemies:
         if enemy.is_alive:
             enemy.powers[power] = enemy.powers.get(power, 0) + amount

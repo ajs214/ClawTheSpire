@@ -665,25 +665,94 @@ ENEMY_MOVE_TABLES: dict[str, list[dict]] = {
 }
 
 
+# Boss/elite monster IDs that use weighted random intent selection.
+# Regular enemies keep deterministic cycling (simpler, still realistic).
+_WEIGHTED_INTENT_MONSTERS: set[str] = {
+    # Bosses
+    "CEREMONIAL_BEAST", "VANTOM", "KIN_FOLLOWER", "KIN_PRIEST",
+    "DOORMAKER", "DOOR", "WATERFALL_GIANT", "LAGAVULIN_MATRIARCH",
+    "KNOWLEDGE_DEMON", "CRUSHER", "ROCKET", "QUEEN",
+    "TORCH_HEAD_AMALGAM", "SOUL_FYSH", "TEST_SUBJECT", "THE_INSATIABLE",
+    # Elites
+    "BYGONE_EFFIGY", "BYRDONIS", "PHROG_PARASITE",
+    "DECIMILLIPEDE_SEGMENT", "ENTOMANCER", "SKULKING_COLONY",
+    "MECHA_KNIGHT", "INFESTED_PRISM", "TERROR_EEL",
+    "SOUL_NEXUS", "PHANTASMAL_GARDENER",
+    "FLAIL_KNIGHT", "MAGI_KNIGHT", "SPECTRAL_KNIGHT",
+}
+
+# Max times the same move index can repeat consecutively.
+_MAX_CONSECUTIVE = 2
+
+
 @dataclass
 class EnemyAI:
-    """Tracks move cycling for a single enemy instance."""
+    """Tracks move cycling for a single enemy instance.
+
+    Two modes:
+    - **cycle** (default): deterministic sequential cycling through move_table.
+    - **weighted**: weighted random selection from move_table with a
+      max-consecutive constraint to prevent unrealistic repetition.
+      Used for bosses and elites to produce more varied (realistic) play.
+    """
     monster_id: str
     move_table: list[dict]
     move_index: int = 0
+    mode: str = "cycle"  # "cycle" or "weighted"
+    recent_indices: list[int] = field(default_factory=list)
 
     def pick_intent(self) -> dict:
-        """Return the next intent dict.
-
-        Cycles through the hand-coded move table. For enemies without
-        a table, falls back to generic data-driven resolution.
-        """
+        """Return the next intent dict."""
         if not self.move_table:
             return {"type": "Attack", "damage": 8, "hits": 1}
 
+        if self.mode == "weighted" and len(self.move_table) > 1:
+            return self._pick_weighted()
+
+        # Default: deterministic cycling
         move = self.move_table[self.move_index % len(self.move_table)]
         self.move_index += 1
-        return dict(move)  # Copy so caller can mutate
+        return dict(move)
+
+    def _pick_weighted(self) -> dict:
+        """Weighted random move selection with max-consecutive constraint.
+
+        Each move gets a base weight of 1.0. The first move in the table
+        gets a slight boost on turn 1 (setup moves like buffs). Moves
+        that have been used consecutively get their weight reduced to
+        prevent unrealistic repetition.
+        """
+        n = len(self.move_table)
+        weights = [1.0] * n
+
+        # Slight boost for the "opener" move on turn 1
+        if self.move_index == 0 and n > 0:
+            weights[0] += 1.0
+
+        # Penalise moves that have been repeated consecutively
+        if self.recent_indices:
+            last_idx = self.recent_indices[-1]
+            consecutive_count = 0
+            for ri in reversed(self.recent_indices):
+                if ri == last_idx:
+                    consecutive_count += 1
+                else:
+                    break
+            if consecutive_count >= _MAX_CONSECUTIVE:
+                weights[last_idx] = 0.0
+
+        # Ensure at least one move is available
+        if sum(weights) <= 0:
+            weights = [1.0] * n
+
+        # Weighted random selection
+        chosen_idx = random.choices(range(n), weights=weights, k=1)[0]
+        self.recent_indices.append(chosen_idx)
+        # Keep history bounded
+        if len(self.recent_indices) > 10:
+            self.recent_indices = self.recent_indices[-10:]
+        self.move_index += 1
+        return dict(self.move_table[chosen_idx])
 
 
 def _create_enemy_ai(monster_id: str) -> EnemyAI:
@@ -692,9 +761,11 @@ def _create_enemy_ai(monster_id: str) -> EnemyAI:
 
     # Use hand-coded table if available
     if monster_id in ENEMY_MOVE_TABLES:
+        mode = "weighted" if monster_id in _WEIGHTED_INTENT_MONSTERS else "cycle"
         return EnemyAI(
             monster_id=monster_id,
             move_table=ENEMY_MOVE_TABLES[monster_id],
+            mode=mode,
         )
 
     # Fallback: build a simple table from monsters.json
@@ -1174,14 +1245,49 @@ def _pick_encounter(
 POTION_SLOTS = 3
 POTION_DROP_CHANCE = 0.40  # 40% chance to get a potion after combat
 
-# Simplified potion types and their effects
+# Potion types with rarity weighting.
+# Effect keys must match combat_engine.use_potion() dispatch.
 POTION_TYPES = [
-    {"name": "Blood Potion", "heal": 20},
-    {"name": "Block Potion", "block": 12},
-    {"name": "Strength Potion", "strength": 2},
-    {"name": "Fire Potion", "damage_all": 20},
-    {"name": "Weak Potion", "enemy_weak": 3},
+    # ── Common potions (weight ~3x) ──
+    {"name": "Blood Potion",      "rarity": "Common", "heal": 20},
+    {"name": "Block Potion",      "rarity": "Common", "block": 12},
+    {"name": "Energy Potion",     "rarity": "Common", "energy": 2},
+    {"name": "Swift Potion",      "rarity": "Common", "draw": 3},
+    {"name": "Fire Potion",       "rarity": "Common", "damage_all": 20},
+    {"name": "Explosive Potion",  "rarity": "Common", "damage_all": 10},  # weaker AoE
+    {"name": "Poison Potion",     "rarity": "Common", "enemy_poison": 6},
+    {"name": "Weak Potion",       "rarity": "Common", "enemy_weak": 3},
+    {"name": "Fear Potion",       "rarity": "Common", "enemy_vulnerable": 3},
+
+    # ── Uncommon potions (weight ~2x) ──
+    {"name": "Strength Potion",   "rarity": "Uncommon", "strength": 2},
+    {"name": "Dexterity Potion",  "rarity": "Uncommon", "dexterity": 2},
+    {"name": "Regen Potion",      "rarity": "Uncommon", "regen": 5},  # heal 5 per turn for 5 turns
+    {"name": "Essence of Steel",  "rarity": "Uncommon", "plated_armor": 4},  # 4 block per turn
+    {"name": "Distilled Chaos",   "rarity": "Uncommon", "play_top_cards": 3},  # play top 3 from draw pile
+    {"name": "Liquid Bronze",     "rarity": "Uncommon", "thorns": 3},
+    {"name": "Cultist Potion",    "rarity": "Uncommon", "ritual": 1},  # +1 Strength per turn
+    {"name": "Gambler's Brew",    "rarity": "Uncommon", "gamblers_brew": True},  # discard hand, redraw
+    {"name": "Snecko Oil",        "rarity": "Uncommon", "draw": 5},  # draw 5 (Confused ignored)
+    {"name": "Duplication Potion", "rarity": "Uncommon", "duplication": True},  # next card plays twice
+
+    # ── Rare potions (weight ~1x) ──
+    {"name": "Fairy in a Bottle", "rarity": "Rare", "fairy": True},  # auto-revive at 30% HP
+    {"name": "Smoke Bomb",        "rarity": "Rare", "smoke_bomb": True},  # flee combat (heal proxy)
+    {"name": "Entropic Brew",     "rarity": "Rare", "fill_potions": True},  # fill all potion slots
+    {"name": "Fruit Juice",       "rarity": "Rare", "max_hp": 5},  # permanent +5 max HP
+    {"name": "Heart of Iron",     "rarity": "Rare", "metallicize": 6},  # 6 block per turn
 ]
+
+_POTION_WEIGHTS = {"Common": 3, "Uncommon": 2, "Rare": 1}
+
+# Pre-compute weighted list for efficient sampling
+_POTION_WEIGHT_LIST = [_POTION_WEIGHTS.get(p.get("rarity", "Common"), 1) for p in POTION_TYPES]
+
+
+def _random_potion(rng: random.Random) -> dict:
+    """Pick a random potion using rarity-weighted selection."""
+    return rng.choices(POTION_TYPES, weights=_POTION_WEIGHT_LIST, k=1)[0]
 
 
 # ---------------------------------------------------------------------------
@@ -1343,13 +1449,18 @@ def simulate_combat(
 def _use_precombat_potions(
     state: CombatState, potions: list[dict],
 ) -> list[dict]:
-    """Use offensive potions at combat start (Strength, Fire, Weak)."""
+    """Use offensive potions at combat start (Strength, Fire, Weak, etc.)."""
     remaining = []
     for pot in potions:
         used = False
         if pot.get("strength"):
             state.player.powers["Strength"] = (
                 state.player.powers.get("Strength", 0) + pot["strength"]
+            )
+            used = True
+        elif pot.get("dexterity"):
+            state.player.powers["Dexterity"] = (
+                state.player.powers.get("Dexterity", 0) + pot["dexterity"]
             )
             used = True
         elif pot.get("damage_all"):
@@ -1361,6 +1472,36 @@ def _use_precombat_potions(
             for e in state.enemies:
                 if e.is_alive:
                     e.powers["Weak"] = e.powers.get("Weak", 0) + pot["enemy_weak"]
+            used = True
+        elif pot.get("enemy_vulnerable"):
+            for e in state.enemies:
+                if e.is_alive:
+                    e.powers["Vulnerable"] = e.powers.get("Vulnerable", 0) + pot["enemy_vulnerable"]
+            used = True
+        elif pot.get("enemy_poison"):
+            for e in state.enemies:
+                if e.is_alive:
+                    e.powers["Poison"] = e.powers.get("Poison", 0) + pot["enemy_poison"]
+            used = True
+        elif pot.get("thorns"):
+            state.player.powers["Thorns"] = (
+                state.player.powers.get("Thorns", 0) + pot["thorns"]
+            )
+            used = True
+        elif pot.get("ritual"):
+            state.player.powers["Ritual"] = (
+                state.player.powers.get("Ritual", 0) + pot["ritual"]
+            )
+            used = True
+        elif pot.get("metallicize"):
+            state.player.powers["Metallicize"] = (
+                state.player.powers.get("Metallicize", 0) + pot["metallicize"]
+            )
+            used = True
+        elif pot.get("plated_armor"):
+            state.player.powers["Metallicize"] = (
+                state.player.powers.get("Metallicize", 0) + pot["plated_armor"]
+            )
             used = True
         if not used:
             remaining.append(pot)
@@ -2524,7 +2665,7 @@ def _simulate_shop(
         if hp_ratio < 0.35:
             pot = {"name": "Blood Potion", "heal": 20}
         else:
-            pot = rng.choice(POTION_TYPES)
+            pot = _random_potion(rng)
         result["potions_bought"].append(pot)
         result["gold_delta"] -= SHOP_POTION_COST
         gold -= SHOP_POTION_COST
@@ -2775,7 +2916,7 @@ def simulate_act1(
 
             # Potion drop
             if rng.random() < POTION_DROP_CHANCE and len(potions) < POTION_SLOTS:
-                pot = rng.choice(POTION_TYPES)
+                pot = _random_potion(rng)
                 potions.append(dict(pot))
 
             # Card reward (not for boss — boss gives relic only)

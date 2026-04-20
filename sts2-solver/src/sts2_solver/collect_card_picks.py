@@ -36,6 +36,7 @@ from .simulator import (
     POTION_DROP_CHANCE,
     POTION_SLOTS,
     POTION_TYPES,
+    _random_potion,
     SHOP_CARD_REMOVE_COST,
     RunResult,
 )
@@ -129,7 +130,7 @@ def collect_one_run(
             gold += rng.randint(*gold_range)
 
             if rng.random() < POTION_DROP_CHANCE and len(potions) < POTION_SLOTS:
-                pot = rng.choice(POTION_TYPES)
+                pot = _random_potion(rng)
                 potions.append(dict(pot))
 
             if room_type != "boss":
