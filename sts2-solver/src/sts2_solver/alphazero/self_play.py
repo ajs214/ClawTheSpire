@@ -957,6 +957,7 @@ def train_worker(
     # Agreement: how often the network's card pick matches the shadow heuristic
     _card_pick_total = 0
     _card_pick_agree = 0
+    _card_skip_total = 0  # times network chose skip over all offered cards
     # Score spread: avg gap between best-scored card and skip option
     _card_pick_spread_sum = 0.0
     _card_pick_spread_count = 0
@@ -1004,6 +1005,9 @@ def train_worker(
                 # Card-pick diagnostics
                 try:
                     _card_pick_total += 1
+                    # Track skip rate: chosen_idx == last option means skip
+                    if os.chosen_idx == len(os.option_types) - 1:
+                        _card_skip_total += 1
                     if (os.shadow_chosen_idx is not None
                             and os.chosen_idx == os.shadow_chosen_idx):
                         _card_pick_agree += 1
@@ -1204,6 +1208,8 @@ def train_worker(
             "other_option_loss": round(oo_loss, 4),
             "card_pick_agreement": round(_card_pick_agree / max(1, _card_pick_total), 4),
             "card_pick_total": _card_pick_total,
+            "card_skip_total": _card_skip_total,
+            "card_skip_rate": round(_card_skip_total / max(1, _card_pick_total), 4),
             "card_pick_score_spread": round(
                 _card_pick_spread_sum / max(1, _card_pick_spread_count), 4
             ),

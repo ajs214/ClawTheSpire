@@ -464,6 +464,7 @@ def _make_entry(data: dict) -> dict:
         "card_pick_loss": data.get("card_pick_loss", 0),
         "other_option_loss": data.get("other_option_loss", 0),
         "card_pick_agreement": data.get("card_pick_agreement", 0),
+        "card_skip_rate": data.get("card_skip_rate", 0),
         "card_pick_score_spread": data.get("card_pick_score_spread", 0),
         "total_loss": data.get("total_loss", 0),
         "boss_reach": _compute_boss_reach(recent),
@@ -946,10 +947,15 @@ function updateSummaryTab(snap, activeVer, bossPerBoss, liveRuns, recentHistory)
   const cpLoss = snap.card_pick_loss||0;
   const ooLoss = snap.other_option_loss||0;
   const cpTotal = snap.card_pick_total||0;
+  const cpSkipRate = snap.card_skip_rate||0;
+  const cpSkipTotal = snap.card_skip_total||0;
   const agreeClass = cpAgree >= 0.6 ? 'good' : cpAgree >= 0.3 ? 'warn' : 'bad';
+  const skipClass = cpSkipRate <= 0.15 ? 'good' : cpSkipRate <= 0.4 ? 'warn' : 'bad';
   document.getElementById('summary-card-pick-stats').innerHTML = `
     <div class="card"><div class="label">Shadow Agreement</div><div class="value ${agreeClass}">${(cpAgree*100).toFixed(1)}%</div>
       <div class="sub">${cpTotal} card picks total</div></div>
+    <div class="card"><div class="label">Skip Rate</div><div class="value ${skipClass}">${(cpSkipRate*100).toFixed(1)}%</div>
+      <div class="sub">${cpSkipTotal} skips / ${cpTotal} offers</div></div>
     <div class="card"><div class="label">Score Spread</div><div class="value">${cpSpread.toFixed(3)}</div>
       <div class="sub">Best card vs skip (higher = more opinionated)</div></div>
     <div class="card"><div class="label">Card Pick Loss</div><div class="value">${cpLoss.toFixed(4)}</div>
@@ -1165,10 +1171,11 @@ function updateCardPickChart(history) {
   // Thin to ~200 points
   const thinned = thin(history, 200);
   const agreeData = thinned.filter(h=>h.card_pick_agreement!=null).map(h=>({x:h.generation,y:h.card_pick_agreement}));
+  const skipData = thinned.filter(h=>h.card_skip_rate!=null).map(h=>({x:h.generation,y:h.card_skip_rate}));
   const spreadData = thinned.filter(h=>h.card_pick_score_spread!=null).map(h=>({x:h.generation,y:h.card_pick_score_spread}));
-  const cpLossData = thinned.filter(h=>h.card_pick_loss!=null&&h.card_pick_loss>0).map(h=>({x:h.generation,y:h.card_pick_loss}));
   cardPickChart.data.datasets = [
     {label:'Agreement Rate',data:agreeData,borderColor:'#58a6ff',borderWidth:2,pointRadius:0,tension:0.4,yAxisID:'yAgree'},
+    {label:'Skip Rate',data:skipData,borderColor:'#f85149',borderWidth:2,pointRadius:0,tension:0.4,borderDash:[4,2],yAxisID:'yAgree'},
     {label:'Score Spread',data:spreadData,borderColor:'#d29922',borderWidth:2,pointRadius:0,tension:0.4,yAxisID:'ySpread'},
   ];
   const maxGen = thinned[thinned.length-1].generation||50;
