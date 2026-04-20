@@ -447,5 +447,16 @@ class STS2Network(nn.Module):
             scores = self.evaluate_card_picks(
                 hidden, deck_t, deck_mask, types_t, cards_t, opt_mask)
             scores_list = scores[0].tolist()
+
+            # Pick bonus: gently bias toward taking a card over skipping,
+            # scaled by how many cards have been drafted.  Fades to zero
+            # at 15+ drafted cards so the network can skip freely later.
+            n_drafted = len(deck_card_ids)  # base cards already filtered out
+            pick_bonus = max(0.0, 0.15 * (1.0 - n_drafted / 15.0))
+            if pick_bonus > 0 and len(scores_list) >= 2:
+                skip_idx = len(scores_list) - 1
+                best_card_idx = max(range(skip_idx), key=lambda i: scores_list[i])
+                scores_list[best_card_idx] += pick_bonus
+
             best_idx = max(range(len(scores_list)), key=lambda i: scores_list[i])
             return best_idx, scores_list

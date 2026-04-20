@@ -627,24 +627,29 @@ def train_batch(
                 chosen_score = scores[0, sample.chosen_idx].unsqueeze(0).unsqueeze(0)
                 o_loss = 0.25 * F.mse_loss(chosen_score, target)
 
-                # Ranking loss: chosen should beat alternatives (good run)
-                # or alternatives should beat chosen (bad run).
+                # Ranking loss: cards-vs-cards ONLY (skip excluded).
+                # This prevents the self-reinforcing skip collapse where
+                # 92% loss rate pushes all cards below skip.
                 num_opts = scores.shape[1]
-                if num_opts > 1:
+                skip_idx = num_opts - 1  # last option is always skip
+                if num_opts > 2 and sample.chosen_idx != skip_idx:
                     rank_loss = torch.tensor(0.0, device=device)
                     chosen_s = scores[0, sample.chosen_idx]
+                    n_compared = 0
                     for j in range(num_opts):
-                        if j == sample.chosen_idx:
+                        if j == sample.chosen_idx or j == skip_idx:
                             continue
                         other_s = scores[0, j]
                         if sample.value > 0.5:
-                            # Good run: chosen should score > alternative by margin
+                            # Good run: chosen card should score > other card by margin
                             rank_loss = rank_loss + F.relu(RANK_MARGIN - (chosen_s - other_s))
                         else:
-                            # Bad run: alternative should score > chosen by margin
+                            # Bad run: other card should score > chosen card by margin
                             rank_loss = rank_loss + F.relu(RANK_MARGIN - (other_s - chosen_s))
-                    rank_loss = rank_loss / (num_opts - 1)
-                    o_loss = o_loss + RANK_BETA * rank_loss
+                        n_compared += 1
+                    if n_compared > 0:
+                        rank_loss = rank_loss / n_compared
+                        o_loss = o_loss + RANK_BETA * rank_loss
 
             # ---- All other options: generic option_eval_head ----
             else:

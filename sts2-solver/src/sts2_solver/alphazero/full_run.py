@@ -652,10 +652,17 @@ def _network_pick_card(
             opt_cards.append(vocabs.cards.get(base_id))
         opt_cards.append(0)  # PAD for skip
 
-        # Build deck card vocab IDs for the dedicated card_eval_head
+        # Build deck card vocab IDs for the dedicated card_eval_head.
+        # Exclude unupgraded starter cards so the deck_summary reflects
+        # only drafted cards — otherwise 12 base cards drown out the
+        # signal from the 1-3 cards actually picked.
+        _BASE_CARD_IDS = {"STRIKE_SILENT", "DEFEND_SILENT", "NEUTRALIZE", "SURVIVOR"}
         deck_card_ids = []
         for c in deck:
             base_id = c.id.rstrip("+")
+            is_upgraded = c.id.endswith("+")
+            if base_id in _BASE_CARD_IDS and not is_upgraded:
+                continue  # skip unmodified starter card
             deck_card_ids.append(vocabs.cards.get(base_id))  # UNK_IDX if missing
 
         # Shadow pick = what the organic heuristic would have chosen.
