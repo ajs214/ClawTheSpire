@@ -872,7 +872,11 @@ def train_worker(
 
         # Restore scheduler state: prefer saved state dict (exact),
         # fall back to fast-forwarding by stepping N times.
-        if "scheduler_state" in ckpt:
+        # Skip scheduler restore when card_eval_head was migrated — the
+        # optimizer was reset so we want to start fresh with the CLI --lr.
+        if _card_head_migrated:
+            msg += f", scheduler reset (card_eval_head migrated), LR={scheduler.get_last_lr()[0]:.1e}"
+        elif "scheduler_state" in ckpt:
             try:
                 scheduler.load_state_dict(ckpt["scheduler_state"])
                 msg += f", scheduler restored, LR={scheduler.get_last_lr()[0]:.1e}"

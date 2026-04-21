@@ -67,15 +67,20 @@ BOSS_LOG_FILE="../alphazero_checkpoints_v15/boss_fights.jsonl"
 V14_DIR="../alphazero_checkpoints_v14"
 mkdir -p "$SAVE_DIR"
 
+# Wipe failed V15 checkpoints and re-seed from V14
 LATEST_V14=$(ls -t "$V14_DIR"/gen_*.pt 2>/dev/null | head -1)
-if [ -n "$LATEST_V14" ] && [ ! -f "$SAVE_DIR/gen_0000.pt" ]; then
-    echo "Seeding V15 from V14 checkpoint: $(basename "$LATEST_V14")"
+if [ -n "$LATEST_V14" ]; then
+    echo "Wiping failed V15 checkpoints and re-seeding from V14..."
+    rm -f "$SAVE_DIR"/gen_*.pt
+    rm -f "$SAVE_DIR"/run_logs.jsonl
+    rm -f "$SAVE_DIR"/boss_fights.jsonl
     cp "$LATEST_V14" "$SAVE_DIR/gen_0000.pt"
     # Also copy vocabs if they exist
     for f in "$V14_DIR"/*.json; do
         [ -f "$f" ] && cp "$f" "$SAVE_DIR/" 2>/dev/null || true
     done
     echo "  V14 checkpoint copied → V15 will auto-migrate card_eval_head weights (336→357)"
+    echo "  LR set to 1e-4 to prevent catastrophic forgetting with reset optimizer"
 fi
 
 echo "=== STS2 AlphaZero Training V15 — Real Relics, 18 Hours ==="
@@ -87,7 +92,7 @@ LATEST_CKPT=$(ls -t "$SAVE_DIR"/gen_*.pt 2>/dev/null | head -1)
 echo "  Start:         ${LATEST_CKPT:+Resuming from $(basename "$LATEST_CKPT")}${LATEST_CKPT:-FRESH (random weights)}"
 echo "  Batch size:    64"
 echo "  Epochs:        3"
-echo "  LR:            1e-3 (with decay)"
+echo "  LR:            1e-4 (reduced — optimizer reset needs gentle start)"
 echo "  Changes:       Real relic mechanics, relic-aware card_eval_head (357 dims)"
 echo "  Save dir:      $SAVE_DIR"
 echo "  Progress:      $PROGRESS_FILE"
@@ -105,7 +110,7 @@ python3 -m src.sts2_solver.alphazero.self_play train \
     --sims 500 \
     --batch-size 64 \
     --epochs 3 \
-    --lr 1e-3 \
+    --lr 1e-4 \
     --temperature 1.0 \
     --save-dir "$SAVE_DIR" \
     --progress-file "$PROGRESS_FILE" \
