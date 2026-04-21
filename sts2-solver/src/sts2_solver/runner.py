@@ -2333,6 +2333,8 @@ class Runner:
                 deck_card_ids.append(vocabs.cards.get(base_id, 1))  # 1=UNK
 
             with torch.no_grad():
+                # TODO: pass relic_ids, relic_mask, and synergy_features to pick_best_card
+                # for full relic-aware evaluation. For now, using backward-compatible defaults.
                 best_idx, scores = network.pick_best_card(
                     hidden, deck_card_ids, opt_types, opt_cards)
                 nv = network.value_head(hidden).item()

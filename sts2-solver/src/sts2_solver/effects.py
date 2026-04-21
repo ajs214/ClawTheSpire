@@ -116,6 +116,7 @@ def deal_damage(state: CombatState, target_idx: int, base_damage: int, hits: int
         if enemy.powers.get("Slow", 0) > 0 and per_hit > 0:
             slow_mult = 1.0 + 0.1 * max(0, state.cards_played_this_turn - 1)
             per_hit = math.floor(per_hit * slow_mult)
+        block_before = enemy.block
         if enemy.block > 0:
             if per_hit >= enemy.block:
                 per_hit -= enemy.block
@@ -123,6 +124,12 @@ def deal_damage(state: CombatState, target_idx: int, base_damage: int, hits: int
             else:
                 enemy.block -= per_hit
                 per_hit = 0
+        # Hand Drill: apply 2 Vulnerable if block was broken
+        if block_before > 0 and enemy.block == 0 and "HAND_DRILL" in state.relics:
+            enemy.powers["Vulnerable"] = enemy.powers.get("Vulnerable", 0) + 2
+        # The Boot: minimum 5 unblocked damage
+        if per_hit > 0 and per_hit < 5 and "THE_BOOT" in state.relics:
+            per_hit = 5
         # Slippery: caps damage to 1 per hit while stacks remain
         slippery = enemy.powers.get("Slippery", 0)
         if slippery > 0 and per_hit > 0:
@@ -160,6 +167,11 @@ def apply_power_to_enemy(state: CombatState, target_idx: int, power: str, amount
     enemy = state.enemies[target_idx]
     if not enemy.is_alive:
         return
+    # Unsettling Lamp: double debuff powers on first use per combat
+    if power in ("Weak", "Vulnerable", "Poison", "Frail", "Slow"):
+        if "UNSETTLING_LAMP" in state.relics and not state.player.powers.get("_unsettling_lamp_used"):
+            amount *= 2
+            state.player.powers["_unsettling_lamp_used"] = 1
     # Snecko Skull: +1 Poison whenever Poison is applied
     if power == "Poison" and "SNECKO_SKULL" in state.relics:
         amount += 1
@@ -168,6 +180,11 @@ def apply_power_to_enemy(state: CombatState, target_idx: int, power: str, amount
 
 def apply_power_to_all_enemies(state: CombatState, power: str, amount: int) -> None:
     """Apply a power/debuff to all living enemies."""
+    # Unsettling Lamp: double debuff powers on first use per combat
+    if power in ("Weak", "Vulnerable", "Poison", "Frail", "Slow"):
+        if "UNSETTLING_LAMP" in state.relics and not state.player.powers.get("_unsettling_lamp_used"):
+            amount *= 2
+            state.player.powers["_unsettling_lamp_used"] = 1
     # Snecko Skull: +1 Poison whenever Poison is applied
     if power == "Poison" and "SNECKO_SKULL" in state.relics:
         amount += 1
@@ -229,6 +246,9 @@ def gain_energy(state: CombatState, amount: int) -> None:
 
 def lose_hp(state: CombatState, amount: int) -> None:
     """Player loses HP (not blocked, e.g. Blood Wall self-damage)."""
+    # Tungsten Rod: reduce HP loss by 1 (minimum 0)
+    if "TUNGSTEN_ROD" in state.relics and amount > 0:
+        amount = max(0, amount - 1)
     state.player.hp -= amount
 
 

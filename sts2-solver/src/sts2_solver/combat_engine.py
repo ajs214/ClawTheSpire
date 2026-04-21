@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import math
 import random
 from typing import TYPE_CHECKING
@@ -68,6 +69,9 @@ def effective_cost(state: CombatState, card: Card) -> int:
     # Bullet Time: all cards free
     if state.player.all_cards_free:
         return 0
+    # Brilliant Scarf: 5th card each turn is free
+    if "BRILLIANT_SCARF" in state.relics and state.cards_played_this_turn >= 4:
+        return 0
     # Corruption: Skills cost 0
     if card.card_type == CardType.SKILL and state.player.powers.get("Corruption", 0) > 0:
         return 0
@@ -114,6 +118,8 @@ def play_card(
     # Deduct energy (store X value for X-cost cards before deducting)
     if card.is_x_cost:
         state.last_x_cost = state.player.energy
+        if "CHEMICAL_X" in state.relics:
+            state.last_x_cost += 2
     state.player.energy -= cost
 
     # Remove from hand
@@ -135,6 +141,11 @@ def play_card(
     effect_fn = get_effect(card, card_db)
     effect_fn(state, target_idx)
 
+    # THROWING_AXE: replay the effect once per turn
+    if "THROWING_AXE" in state.relics and not state.player.powers.get("_throwing_axe_used"):
+        state.player.powers["_throwing_axe_used"] = 1
+        effect_fn(state, target_idx)
+
     # --- Burst: Skills played with active burst are played again ---
     # FIXED: If Burst is active and this is a Skill, apply its effect again
     if card.card_type == CardType.SKILL and state.player.burst_count > 0:
@@ -154,8 +165,24 @@ def play_card(
     # --- Relic triggers on card play (dispatched through relic_effects) ---
     relic_effects.apply_card_play(state, card)
 
+    # MUSIC_BOX: first attack each turn creates ethereal copy in discard
+    if ("MUSIC_BOX" in state.relics and card.card_type == CardType.ATTACK
+            and not state.player.powers.get("_music_box_used")):
+        state.player.powers["_music_box_used"] = 1
+        ethereal_copy = copy.copy(card)
+        ethereal_copy.ethereal = True
+        state.player.discard_pile.append(ethereal_copy)
+
     # --- Move card to appropriate zone ---
     _move_card_after_play(state, card)
+
+    # HISTORY_COURSE: track last played attack/skill for replay next turn
+    if "HISTORY_COURSE" in state.relics and card.card_type in (CardType.ATTACK, CardType.SKILL):
+        state._history_course_last = card
+
+    # UNCEASING_TOP: draw 1 if hand is empty after playing
+    if "UNCEASING_TOP" in state.relics and not state.player.hand:
+        draw_cards(state, 1)
 
 
 def use_potion(state: CombatState, potion_idx: int) -> None:
@@ -305,11 +332,24 @@ def use_potion(state: CombatState, potion_idx: int) -> None:
             state.player.powers.get("Strength", 0) + 1
         )
 
+    # REPTILE_TRINKET: gain +3 Strength when using a potion
+    if "REPTILE_TRINKET" in state.relics:
+        state.player.powers["Strength"] = state.player.powers.get("Strength", 0) + 3
+
     state.player.potions[potion_idx] = {}  # empty the slot
 
 
 def _move_card_after_play(state: CombatState, card: Card) -> None:
     """Move a played card to the correct zone."""
+    # RAZOR_TOOTH: upgrade card for remainder of combat after playing it
+    if "RAZOR_TOOTH" in state.relics and not card.upgraded:
+        card.upgraded = True
+        # Bump stats approximately: +25% damage, +25% block
+        if card.damage and card.damage > 0:
+            card.damage = math.floor(card.damage * 1.25) + 1
+        if card.block and card.block > 0:
+            card.block = math.floor(card.block * 1.25) + 1
+
     should_exhaust = (
         card.exhausts
         or card.card_type == CardType.POWER
@@ -336,6 +376,14 @@ def _on_exhaust(state: CombatState) -> None:
     if fnp > 0:
         state.player.block += calculate_block_gain(fnp, state)
 
+    # BURNING_STICKS: first skill exhausted each combat → copy to hand
+    if "BURNING_STICKS" in state.relics and not state.player.powers.get("_burning_sticks_used"):
+        # Check if the exhausted card was a Skill
+        if state.player.exhaust_pile and state.player.exhaust_pile[-1].card_type == CardType.SKILL:
+            state.player.powers["_burning_sticks_used"] = 1
+            card_copy = copy.copy(state.player.exhaust_pile[-1])
+            state.player.hand.append(card_copy)
+
 
 # ---------------------------------------------------------------------------
 # Turn lifecycle
@@ -359,15 +407,24 @@ def start_turn(state: CombatState) -> None:
     state.discards_this_turn = 0  # Reset discard counter
 
     # Reset energy
-    state.player.energy = state.player.max_energy
+    if "ICE_CREAM" in state.relics:
+        state.player.energy = max(state.player.energy, 0) + state.player.max_energy
+    else:
+        state.player.energy = state.player.max_energy
     # Berserk: bonus energy
     berserk = state.player.powers.get("Berserk", 0)
     if berserk > 0:
         state.player.energy += berserk
+    # PAELS_TEARS: +2 energy if had unspent energy last turn
+    if state.player.powers.pop("_paels_tears_bonus", 0):
+        state.player.energy += 2
 
     # Remove block (unless Barricade)
     if state.player.powers.get("Barricade", 0) <= 0:
-        state.player.block = 0
+        if "STURDY_CLAMP" in state.relics:
+            state.player.block = min(state.player.block, 10)
+        else:
+            state.player.block = 0
 
     # Remove enemy block
     for enemy in state.enemies:
@@ -385,6 +442,7 @@ def start_turn(state: CombatState) -> None:
         "_LETTER_OPENER_count", "_KUSARIGAMA_count", "_RAINBOW_RING_count",
         "_kunai_count", "_fan_count", "_shuriken_count", "_letter_opener_count",
         "_rainbow_attack", "_rainbow_skill", "_rainbow_power",
+        "_music_box_used", "_damage_this_turn", "_throwing_axe_used",
     ):
         state.player.powers.pop(key, None)
 
@@ -398,6 +456,58 @@ def start_turn(state: CombatState) -> None:
         state.player.powers.pop("_art_of_war_eligible", None)
 
     relic_effects.apply_turn_start(state)
+
+    # RED_SKULL: +3 Strength when at half health or lower
+    if "RED_SKULL" in state.relics:
+        is_low = state.player.hp <= state.player.max_hp // 2
+        was_active = state.player.powers.get("_red_skull_active", 0)
+        if is_low and not was_active:
+            state.player.powers["Strength"] = state.player.powers.get("Strength", 0) + 3
+            state.player.powers["_red_skull_active"] = 1
+        elif not is_low and was_active:
+            state.player.powers["Strength"] = state.player.powers.get("Strength", 0) - 3
+            state.player.powers["_red_skull_active"] = 0
+
+    # MR_STRUGGLES: deal turn-number damage to all enemies
+    if "MR_STRUGGLES" in state.relics:
+        for e in state.enemies:
+            if e.is_alive:
+                e.hp -= state.turn
+
+    # POLLINOUS_CORE: every 4 turns, draw 2
+    if "POLLINOUS_CORE" in state.relics and state.turn % 4 == 0:
+        draw_cards(state, 2)
+
+    # HAPPY_FLOWER: every 3 turns, +1 energy
+    if "HAPPY_FLOWER" in state.relics and state.turn % 3 == 0:
+        state.player.energy += 1
+
+    # FAKE_HAPPY_FLOWER: every 5 turns, +1 energy
+    if "FAKE_HAPPY_FLOWER" in state.relics and state.turn % 5 == 0:
+        state.player.energy += 1
+
+    # CROSSBOW: add a random attack from draw pile to hand, free this turn
+    if "CROSSBOW" in state.relics and state.player.draw_pile:
+        attacks = [c for c in state.player.draw_pile if c.card_type == CardType.ATTACK]
+        if attacks:
+            chosen = random.choice(attacks)
+            state.player.draw_pile.remove(chosen)
+            chosen_copy = copy.copy(chosen)
+            chosen_copy.cost = 0
+            chosen_copy.ethereal = True
+            state.player.hand.append(chosen_copy)
+
+    # HISTORY_COURSE: replay last played attack/skill
+    if "HISTORY_COURSE" in state.relics and hasattr(state, '_history_course_last'):
+        last = state._history_course_last
+        if last is not None:
+            alive = [i for i, e in enumerate(state.enemies) if e.is_alive]
+            target = alive[0] if alive else None
+            try:
+                eff = get_effect(last)
+                eff(state, target)
+            except Exception:
+                pass
 
     # Clear turn-duration powers from previous turn
     for power_name in ("Rage", "OneTwoPunch"):
@@ -437,6 +547,16 @@ def end_turn(state: CombatState) -> None:
     # --- End-of-turn relic effects (dispatched through relic_effects) ---
     relic_effects.apply_end_of_turn(state)
 
+    # PAELS_TEARS: unspent energy → +2 next turn
+    if "PAELS_TEARS" in state.relics and state.player.energy > 0:
+        state.player.powers["_paels_tears_bonus"] = 1
+
+    # DIAMOND_DIADEM: ≤2 cards played → half incoming damage next turn
+    if "DIAMOND_DIADEM" in state.relics and state.cards_played_this_turn <= 2:
+        state.player.powers["_diamond_diadem_active"] = 1
+    else:
+        state.player.powers.pop("_diamond_diadem_active", None)
+
     # Art of War: track if no attacks were played (checked next start_turn).
     # Cross-turn state so kept inline rather than in the data table.
     if "ART_OF_WAR" in state.relics:
@@ -454,17 +574,29 @@ def end_turn(state: CombatState) -> None:
         state.player.hp -= constrict
 
     # Discard hand (except Retain)
-    remaining = []
-    for card in state.player.hand:
-        if card.retain:
-            remaining.append(card)
-        elif card.ethereal:
-            state.player.exhaust_pile.append(card)
-            _on_exhaust(state)
-        else:
-            state.player.discard_pile.append(card)
-            state.discards_this_turn += 1  # Track for Memento Mori
-    state.player.hand = remaining
+    if "RUNIC_PYRAMID" in state.relics:
+        # Hand persists — only exhaust Ethereal cards
+        remaining = []
+        for card in state.player.hand:
+            if card.ethereal:
+                state.player.exhaust_pile.append(card)
+                _on_exhaust(state)
+            else:
+                remaining.append(card)
+        state.player.hand = remaining
+    else:
+        # Normal discard
+        remaining = []
+        for card in state.player.hand:
+            if card.retain:
+                remaining.append(card)
+            elif card.ethereal:
+                state.player.exhaust_pile.append(card)
+                _on_exhaust(state)
+            else:
+                state.player.discard_pile.append(card)
+                state.discards_this_turn += 1  # Track for Memento Mori
+        state.player.hand = remaining
 
     # End-of-turn power ticks
     _tick_end_of_turn_powers(state)
@@ -592,7 +724,16 @@ def _enemy_attacks_player(state: CombatState, enemy: EnemyState) -> None:
             raw = 0
         # Weak on enemy reduces their damage
         if enemy.powers.get("Weak", 0) > 0:
-            raw = math.floor(raw * 0.75)
+            weak_mult = 0.60 if "PAPER_KRANE" in state.relics else 0.75
+            raw = math.floor(raw * weak_mult)
+        # Beating Remnant: cap damage at 20 per turn
+        if "BEATING_REMNANT" in state.relics:
+            taken = state.player.powers.get("_damage_this_turn", 0)
+            raw = min(raw, max(0, 20 - taken))
+            state.player.powers["_damage_this_turn"] = taken + raw
+        # Diamond Diadem: half damage if played ≤2 cards last turn
+        if state.player.powers.get("_diamond_diadem_active"):
+            raw = math.floor(raw * 0.5)
         # Vulnerable on player increases damage taken
         if state.player.powers.get("Vulnerable", 0) > 0:
             raw = math.floor(raw * 1.5)
@@ -613,6 +754,10 @@ def _enemy_attacks_player(state: CombatState, enemy: EnemyState) -> None:
             else:
                 state.player.block -= raw
                 raw = 0
+
+        # Tungsten Rod: reduce incoming damage by 1
+        if "TUNGSTEN_ROD" in state.relics and raw > 0:
+            raw = max(0, raw - 1)
 
         state.player.hp -= raw
 

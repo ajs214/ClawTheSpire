@@ -75,10 +75,10 @@ START_OF_COMBAT: dict[str, dict[str, int]] = {
     "TWISTED_FUNNEL":    {"poison_all": 4},
     "PETRIFIED_TOAD":    {},  # handled via GLOBAL_DAMAGE_MULTIPLIERS proxy
     # --- rares ---
-    "VEXING_PUZZLEBOX":  {},  # free random card; handled via GLOBAL_DAMAGE_MULTIPLIERS
+    "VEXING_PUZZLEBOX":  {"_marker": "vexing_puzzlebox"},  # free random card
     # --- shop ---
     "NINJA_SCROLL":      {"shivs_to_hand": 3},
-    "RINGING_TRIANGLE":  {},  # retain hand turn 1; multiplier proxy
+    "RINGING_TRIANGLE":  {"_marker": "ringing_triangle"},  # retain hand turn 1
     # --- event ---
     "FAKE_ANCHOR":       {"block": 4},
     "FAKE_BLOOD_VIAL":   {"heal": 1},
@@ -88,9 +88,9 @@ START_OF_COMBAT: dict[str, dict[str, int]] = {
     "ROYAL_POISON":      {"self_damage": 4},
     # --- ancient (boss) ---
     "DELICATE_FROND":    {},  # fill potion slots; handled via OOC potions
-    "CROSSBOW":          {},  # per-turn effect; lives in TURN_START
-    "JEWELED_MASK":      {},  # free power in hand; damage mult proxy
-    "CHOICES_PARADOX":   {},  # random card to hand; damage mult proxy
+    "CROSSBOW":          {"_marker": "crossbow"},    # free random attack
+    "JEWELED_MASK":      {"_marker": "jeweled_mask"},  # free power in hand
+    "CHOICES_PARADOX":   {"_marker": "choices_paradox"},  # random card to hand
     "RADIANT_PEARL":     {},  # luminesce to hand; damage mult proxy
     "NEOWS_TORMENT":     {},  # Neow's Fury in deck; damage mult proxy
     "STORYBOOK":         {},
@@ -113,7 +113,7 @@ ELITE_ONLY_START: dict[str, dict[str, int]] = {
 # Additional start-of-combat passives that only fire against bosses.
 BOSS_ONLY_START: dict[str, dict[str, int]] = {
     "PANTOGRAPH":  {"heal": 25},
-    "STONE_CRACKER": {},  # proxy via damage mult
+    "STONE_CRACKER": {"_marker": "stone_cracker"},  # upgrade 3 draw pile cards
 }
 
 
@@ -177,6 +177,9 @@ TURN_START: dict[str, list[dict]] = {
     "TOASTY_MITTENS":    [{"strength": 1}],             # exhaust top proxy → net +str only
     "HISTORY_COURSE":    [],  # proxy via GLOBAL_DAMAGE_MULTIPLIERS
     "POLLINOUS_CORE":    [{"_marker": "pollinous"}],
+    "HAPPY_FLOWER":      [{"_marker": "happy_flower"}],   # every 3 turns, +1 energy
+    "FAKE_HAPPY_FLOWER": [{"_marker": "fake_happy_flower"}], # every 5 turns, +1 energy
+    "RED_SKULL":         [{"_marker": "red_skull"}],       # +3 Str while HP <= 50%
     "SEAL_OF_GOLD":      [{"energy": 1}],  # spend-gold-for-energy proxy
 
     # --- missing rune-based relics (summon/strength/star proxies) ---
@@ -266,6 +269,14 @@ CARD_PLAY_TRIGGERS: dict[str, dict] = {
     "RAINBOW_RING":  {"match": "trifecta", "every": 1, "scope": "turn",
                       "effect": {"strength": 1, "dexterity": 1}},
 
+    # Per-combat card effects
+    "MUSIC_BOX":    {"match": "attack", "every": 1, "scope": "turn",
+                     "effect": {"_marker": "music_box"}},   # first attack → ethereal copy
+    "RAZOR_TOOTH":  {"match": "any", "every": 1, "scope": "always",
+                     "effect": {"_marker": "razor_tooth"}},  # upgrade card for rest of combat
+    "PAELS_LEGION": {"match": "any", "every": 1, "scope": "always",
+                     "effect": {"_marker": "paels_legion"}},  # double next block, sleeps 2 turns
+
     # --- missing "whenever" triggers ---
     "BONE_FLUTE":    {"match": "power",  "every": 1, "scope": "always",
                       "effect": {"block": 2}},  # Osty attack proxy
@@ -309,6 +320,7 @@ SHUFFLE_TRIGGERS: dict[str, dict] = {
 
 EXHAUST_TRIGGERS: dict[str, dict] = {
     "FORGOTTEN_SOUL":{"damage_random": 1},
+    "BURNING_STICKS": {"_marker": "burning_sticks"},  # first skill exhaust → copy to hand
 }
 
 
@@ -355,6 +367,8 @@ END_OF_TURN: dict[str, dict] = {
     "SCREAMING_FLAGON":{"if_empty_hand": {"damage_all": 20}},
     "POCKETWATCH":     {"if_played_at_most": (3, {"_marker": "pocketwatch_flag"})},
     "LUNAR_PASTRY":    {},  # gain Star at end-of-turn; proxy via GLOBAL_DAMAGE_MULTIPLIERS
+    "PAELS_TEARS":       {"_marker": "paels_tears"},  # unspent energy → +2 next turn
+    "DIAMOND_DIADEM":    {"_marker": "diamond_diadem"},  # ≤2 cards → half enemy damage
 }
 
 
@@ -385,21 +399,15 @@ END_OF_COMBAT: dict[str, dict] = {
 
 GLOBAL_DAMAGE_MULTIPLIERS: dict[str, float] = {
     # Upgrade-on-pickup / upgrade-at-combat-start
-    "BELLOWS":          1.04,
     "WHETSTONE":        1.03,
     "WAR_PAINT":        1.02,  # skill upgrade, mostly block
     "BONE_TEA":         1.03,
-    "FRAGRANT_MUSHROOM":1.03,
     "STONE_CRACKER":    1.06,
     "GNARLED_HAMMER":   1.03,
     "PUNCH_DAGGER":     1.03,
     "TRI_BOOMERANG":    1.03,
     "NUTRITIOUS_SOUP":  1.03,
-    "RAZOR_TOOTH":      1.04,  # per-combat upgrade of first attack/skill
-    "SAND_CASTLE":      1.05,
-    "YUMMY_COOKIE":     1.04,
     "ASTROLABE":        1.04,
-    "POMANDER":         1.02,
     "MYSTIC_LIGHTER":   1.03,  # enchanted attacks
     "KIFUDA":           1.02,
     "ELECTRIC_SHRYMP":  1.02,
@@ -407,7 +415,6 @@ GLOBAL_DAMAGE_MULTIPLIERS: dict[str, float] = {
     "GLITTER":          1.02,
     "WING_CHARM":       1.02,
     # Transform / reward improvers
-    "PANDORAS_BOX":     1.06,
     "EMPTY_CAGE":       1.03,
     "PRECISE_SCISSORS": 1.01,
     "PRECARIOUS_SHEARS":1.02,
@@ -416,16 +423,12 @@ GLOBAL_DAMAGE_MULTIPLIERS: dict[str, float] = {
     "ARCHAIC_TOOTH":    1.02,
     "TOUCH_OF_OROBAS":  1.02,
     # Free / bonus cards
-    "VEXING_PUZZLEBOX": 1.02,
-    "CHOICES_PARADOX":  1.02,
     "RADIANT_PEARL":    1.02,
     "NEOWS_TORMENT":    1.02,
     "STORYBOOK":        1.02,
     "TANXS_WHISTLE":    1.02,
-    "JEWELED_MASK":     1.03,
     "TOOLBOX":          1.02,
     "DOLLYS_MIRROR":    1.02,
-    "BING_BONG":        1.02,
     "BOOK_OF_FIVE_RINGS":1.01,
     "BYRDPIP":          1.02,
     # Rare / ancient reward cards
@@ -452,18 +455,9 @@ GLOBAL_DAMAGE_MULTIPLIERS: dict[str, float] = {
     "DRIFTWOOD":        1.02,
     "WONGOS_MYSTERY_TICKET":1.02,
     # First-turn / first-card / first-play
-    "RINGING_TRIANGLE": 1.02,
-    "THROWING_AXE":     1.05,
-    "MUSIC_BOX":        1.03,
-    "BURNING_STICKS":   1.03,
-    "UNSETTLING_LAMP":  1.03,
     # Per-combat card adds / enchants
-    "BRILLIANT_SCARF":  1.03,
-    "CHEMICAL_X":       1.03,
     "BIG_MUSHROOM":     1.02,
     # Stat padding proxies for cases where we can't fire the real effect
-    "HAPPY_FLOWER":     1.02,
-    "FAKE_HAPPY_FLOWER":1.01,
     "FAKE_STRIKE_DUMMY":1.01,
     "PETRIFIED_TOAD":   1.02,
     "HISTORY_COURSE":   1.05,
@@ -485,9 +479,7 @@ GLOBAL_DAMAGE_MULTIPLIERS: dict[str, float] = {
     "PAELS_GROWTH":     1.02,
     "PAELS_HORN":       1.01,
     "PAELS_WING":       1.02,
-    "PAELS_TEARS":      1.02,
     "PAELS_TOOTH":      1.02,
-    "PAELS_LEGION":     1.03,
     "NUTRITIOUS_OYSTER":1.01,
     "TEA_OF_DISCOURTESY":0.99,  # Daze drawback, tiny negative
     "DARKSTONE_PERIAPT":1.01,
@@ -503,7 +495,6 @@ GLOBAL_DAMAGE_MULTIPLIERS: dict[str, float] = {
     "DELICATE_FROND":   1.02,
     "FAKE_VENERABLE_TEA_SET":1.01,
     "VENERABLE_TEA_SET":1.02,
-    "FAKE_SNECKO_EYE":  0.98,  # permanent Confused drawback
     "WHITE_BEAST_STATUE":1.02,
     "LUCKY_FYSH":       1.01,  # gold per card add
     "BOWLER_HAT":       1.01,  # 20% more gold
@@ -522,18 +513,7 @@ GLOBAL_DAMAGE_MULTIPLIERS: dict[str, float] = {
     "PLANISPHERE":      1.01,
     "ETERNAL_FEATHER":  1.01,
     "LASTING_CANDY":    1.02,
-    "REPTILE_TRINKET":  1.02,  # +3 str per potion use
-    "FROZEN_EGG":       1.04,
-    "MOLTEN_EGG":       1.04,
-    "TOXIC_EGG":        1.04,
-    "GAMBLING_CHIP":    1.02,
-    "ICE_CREAM":        1.04,
     "POCKETWATCH":      1.03,
-    "UNCEASING_TOP":    1.02,
-    "STURDY_CLAMP":     1.03,
-    "LIZARD_TAIL":      1.02,  # life-save → proxy survival bonus
-    "BEATING_REMNANT":  1.02,
-    "PAPER_KRANE":      1.02,
     "OLD_COIN":         1.01,
     "SIGNET_RING":      1.01,
     "GOLDEN_PEARL":     1.01,
@@ -553,11 +533,8 @@ GLOBAL_DAMAGE_MULTIPLIERS: dict[str, float] = {
     # Final coverage fill — missing silent-pool relics
     "BELT_BUCKLE":      1.02,  # +2 Dex while no potions — proxy
     "CIRCLET":          1.00,  # joke relic, neutral
-    "GHOST_SEED":       1.01,  # Strikes/Defends gain Ethereal — small cycling
-    "HAND_DRILL":       1.03,  # break-block Vulnerable — small damage proxy
     "MEAT_CLEAVER":     1.02,  # rest-site cook — small healing/resource proxy
     "PRESERVED_FOG":    1.02,  # pickup removes 5 cards + Folly
-    "RUNIC_PYRAMID":    1.06,  # no discard hand — extremely strong in STS1, solid proxy
     "SCROLL_BOXES":     1.02,  # lose gold + card pack
     "SWORD_OF_STONE":   1.03,  # transforms after 5 elites
     "VAKUU_CARD_SELECTOR":1.00, # mystery — neutral
@@ -589,19 +566,11 @@ GLOBAL_DAMAGE_MULTIPLIERS: dict[str, float] = {
 }
 
 GLOBAL_BLOCK_MULTIPLIERS: dict[str, float] = {
-    "STURDY_CLAMP":     1.08,  # block persists
-    "ICE_CREAM":        1.05,  # energy conservation
-    "RINGING_TRIANGLE": 1.03,
-    "DIAMOND_DIADEM":   1.10,
     "TUNGSTEN_ROD":     1.04,
-    "PAPER_KRANE":      1.03,
     "FRESNEL_LENS":     1.02,
     "DIVINE_RIGHT":     1.04,
-    "BEATING_REMNANT":  1.03,
     "BIG_MUSHROOM":     1.02,
-    "LIZARD_TAIL":      1.01,
     "POCKETWATCH":      1.02,
-    "GAMBLING_CHIP":    1.02,
     "THE_ABACUS":       1.02,  # also triggers SHUFFLE_TRIGGERS
 }
 
@@ -609,10 +578,6 @@ GLOBAL_BLOCK_MULTIPLIERS: dict[str, float] = {
 # Keep very small — stacking is aggressive.
 INCOMING_DAMAGE_REDUCTION: dict[str, float] = {
     "TUNGSTEN_ROD":     0.97,
-    "DIAMOND_DIADEM":   0.95,
-    "BEATING_REMNANT":  0.95,
-    "PAPER_KRANE":      0.96,
-    "LIZARD_TAIL":      0.98,
     "THE_BOOT":         1.00,  # neutral but tracked
 }
 
@@ -1105,8 +1070,19 @@ def _damage_random(state: "CombatState", amount: int) -> None:
 # Relics with real implementations in effects.py / combat_engine.py
 # (not in any table above, but handled by inline code).
 _INLINE_IMPLEMENTED_RELICS: set[str] = {
-    "SNECKO_SKULL",   # +1 Poison on apply (effects.py)
-    "PAPER_PHROG",    # 1.75x Vulnerable damage (effects.py)
+    "SNECKO_SKULL", "PAPER_PHROG",
+    # V15: real combat implementations
+    "THE_BOOT", "HAND_DRILL", "UNSETTLING_LAMP", "TUNGSTEN_ROD",
+    "PAPER_KRANE", "ICE_CREAM", "RUNIC_PYRAMID", "STURDY_CLAMP",
+    "BEATING_REMNANT", "RED_SKULL", "REPTILE_TRINKET", "THROWING_AXE",
+    "BRILLIANT_SCARF", "CHEMICAL_X", "UNCEASING_TOP", "DIAMOND_DIADEM",
+    "FAKE_STRIKE_DUMMY", "FAKE_SNECKO_EYE", "GAMBLING_CHIP",
+    "MUSIC_BOX", "BURNING_STICKS", "RAZOR_TOOTH", "PAELS_TEARS",
+    "PAELS_LEGION", "LIZARD_TAIL", "BELLOWS", "STONE_CRACKER",
+    "RINGING_TRIANGLE", "FROZEN_EGG", "MOLTEN_EGG", "TOXIC_EGG",
+    "PANDORAS_BOX", "WHETSTONE", "WAR_PAINT", "SAND_CASTLE",
+    "YUMMY_COOKIE", "POMANDER", "FRAGRANT_MUSHROOM", "BING_BONG",
+    "GHOST_SEED", "VENERABLE_TEA_SET", "FAKE_VENERABLE_TEA_SET",
 }
 
 

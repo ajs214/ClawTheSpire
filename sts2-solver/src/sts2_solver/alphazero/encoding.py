@@ -260,6 +260,9 @@ class EncoderConfig:
 CARD_TYPE_MAP = {"Attack": 0, "Skill": 1, "Power": 2, "Status": 3, "Curse": 4}
 TARGET_TYPE_MAP = {"Self": 0, "AnyEnemy": 1, "AllEnemies": 2, "RandomEnemy": 3, "AnyAlly": 4}
 
+# Relic synergy features dimension
+RELIC_SYNERGY_DIM = 13
+
 
 def card_stats_vector(card) -> list[float]:
     """Extract numeric features from a Card object.
@@ -345,3 +348,45 @@ def power_indices_and_amounts(
             indices.append(0)  # PAD
             amounts.append(0.0)
     return indices, amounts
+
+
+def compute_relic_synergy_features(relics: set[str] | list[str]) -> list[float]:
+    """Compute hand-crafted relic synergy features for card evaluation.
+
+    Returns a fixed-size float vector (length RELIC_SYNERGY_DIM) encoding
+    which synergy-relevant relics the player owns.
+    """
+    r = set(relics) if not isinstance(relics, set) else relics
+    return [
+        # Poison amplification
+        float(bool(r & {"SNECKO_SKULL", "TWISTED_FUNNEL"})),
+        # Vulnerable amplification
+        float(bool(r & {"PAPER_PHROG", "BAG_OF_MARBLES", "HAND_DRILL"})),
+        # Weak amplification
+        float(bool(r & {"PAPER_KRANE", "RED_MASK"})),
+        # Attack-play counter relics (count)
+        float(len(r & {"KUNAI", "SHURIKEN", "ORNAMENTAL_FAN", "KUSARIGAMA", "NUNCHAKU"})),
+        # Skill-play counter relics (count)
+        float(len(r & {"LETTER_OPENER", "TUNING_FORK"})),
+        # Power synergy relics (count)
+        float(len(r & {"GAME_PIECE", "PERMAFROST", "MUMMIFIED_HAND", "LOST_WISP"})),
+        # Shiv synergy
+        float(bool(r & {"HELICAL_DART", "NINJA_SCROLL"})),
+        # Exhaust synergy (count)
+        float(len(r & {"CHARONS_ASHES", "JOSS_PAPER", "BURNING_STICKS", "FORGOTTEN_SOUL"})),
+        # Discard synergy
+        float(bool(r & {"TINGSHA", "TOUGH_BANDAGES"})),
+        # Energy surplus (count of energy-granting relics)
+        float(len(r & {"LANTERN", "PRISMATIC_GEM", "ICE_CREAM", "HAPPY_FLOWER",
+                        "CHANDELIER", "CANDELABRA", "PAELS_FLESH", "ECTOPLASM",
+                        "SOZU", "SPIKED_GAUNTLETS", "BLESSED_ANTLER", "VELVET_CHOKER",
+                        "BLOOD_SOAKED_ROSE", "PUMPKIN_CANDLE", "PHILOSOPHERS_STONE",
+                        "WHISPERING_EARRING", "BRILLIANT_SCARF"})),
+        # Draw surplus (count of draw-granting relics)
+        float(len(r & {"BAG_OF_PREPARATION", "RING_OF_THE_SNAKE", "SNECKO_EYE",
+                        "PAELS_BLOOD", "FIDDLE", "RING_OF_THE_DRAKE"})),
+        # Block persistence
+        float(bool(r & {"STURDY_CLAMP"})),
+        # Hand retention
+        float(bool(r & {"RUNIC_PYRAMID", "RINGING_TRIANGLE"})),
+    ]

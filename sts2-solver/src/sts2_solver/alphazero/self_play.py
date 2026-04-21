@@ -101,6 +101,10 @@ class OptionSample:
     # Raw scores from network inference at pick time (card picks only).
     # Used for score-spread diagnostics without re-running forward pass.
     pick_scores: list[float] | None = None
+    # Relic context for card_eval_head relic-aware training
+    relic_ids: list[int] | None = None
+    relic_mask: list[bool] | None = None
+    synergy_features: list[float] | None = None
 
 
 # Option type constants (indices into option_type_embed)
@@ -620,8 +624,18 @@ def train_batch(
                 deck_t = torch.tensor([deck_ids], dtype=torch.long, device=device)
                 deck_mask = torch.zeros(1, len(deck_ids), dtype=torch.bool, device=device)
 
+                # Build relic tensors for relic-aware card evaluation
+                relic_t = None
+                rmask_t = None
+                syn_t = None
+                if sample.relic_ids is not None:
+                    relic_t = torch.tensor([sample.relic_ids], dtype=torch.long, device=device)
+                    rmask_t = torch.tensor([sample.relic_mask], dtype=torch.bool, device=device) if sample.relic_mask else torch.zeros(1, len(sample.relic_ids), dtype=torch.bool, device=device)
+                if sample.synergy_features is not None:
+                    syn_t = torch.tensor([sample.synergy_features], dtype=torch.float32, device=device)
                 scores = network.evaluate_card_picks(
-                    hidden, deck_t, deck_mask, types_t, cards_t, opt_mask)
+                    hidden, deck_t, deck_mask, types_t, cards_t, opt_mask,
+                    relic_ids=relic_t, relic_mask=rmask_t, synergy_features=syn_t)
 
                 # Primary loss: MSE on chosen option's score → run value
                 chosen_score = scores[0, sample.chosen_idx].unsqueeze(0).unsqueeze(0)
@@ -802,7 +816,15 @@ def train_worker(
     if ckpts:
         ckpt = _torch.load(ckpts[-1], map_location="cpu", weights_only=True)
         saved_state = ckpt["model_state"]
+        # Migrate card_eval_head weights if input dim changed (V14→V15: 336→357)
+        card_head_key = "card_eval_head.0.weight"
         current_state = network.state_dict()
+        if (card_head_key in saved_state and card_head_key in current_state
+                and saved_state[card_head_key].shape[1] != current_state[card_head_key].shape[1]):
+            new_dim = current_state[card_head_key].shape[1]
+            old_dim = saved_state[card_head_key].shape[1]
+            saved_state = STS2Network.pad_card_eval_weights(saved_state, new_dim, old_dim)
+            print(f"  [checkpoint] Migrated card_eval_head weights: {old_dim}→{new_dim} dims", flush=True)
         compatible = {
             k: v for k, v in saved_state.items()
             if k in current_state and v.shape == current_state[k].shape
@@ -898,7 +920,9 @@ def train_worker(
     else:
         boss_log_path = save_path / "boss_fights.jsonl"
     boss_log_path.parent.mkdir(parents=True, exist_ok=True)
+    run_log_path = save_path / "run_logs.jsonl"
     print(f"Boss-fight log: {boss_log_path}", flush=True)
+    print(f"Run journey log: {run_log_path}", flush=True)
 
     sim_early = int(mcts_simulations * 0.4)
     sim_late = int(mcts_simulations * 1.8)
@@ -1090,6 +1114,29 @@ def train_worker(
                 except Exception as _e:
                     # Never crash training because of a log write.
                     print(f"[boss-log] write failed: {_e}", flush=True)
+
+            # Persist run journey log (every run, not just boss fights)
+            _run_log = getattr(result, "run_log", None)
+            if _run_log:
+                try:
+                    _rl_entry = {
+                        "gen": gen,
+                        "game_num": total_games,
+                        "run_outcome": result.outcome,
+                        "floor_reached": result.floor_reached,
+                        "final_hp": result.final_hp,
+                        "max_hp": result.max_hp,
+                        "final_deck": getattr(result, "final_deck", None),
+                        "final_relics": getattr(result, "final_relics", None),
+                        "archetype": getattr(result, "archetype", "unknown"),
+                        "archetype_commitment": round(
+                            getattr(result, "archetype_commitment", 0.0), 3),
+                        "journey": _run_log,
+                    }
+                    with open(run_log_path, "a", encoding="utf-8") as _rlf:
+                        _rlf.write(json.dumps(_rl_entry, default=str) + "\n")
+                except Exception as _e:
+                    print(f"[run-log] write failed: {_e}", flush=True)
 
             # V8: record relic pickups for this run (excluding the starter)
             _run_relics = getattr(result, "final_relics", None) or []

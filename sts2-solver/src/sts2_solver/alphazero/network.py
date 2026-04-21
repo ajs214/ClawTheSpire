@@ -46,6 +46,7 @@ from .encoding import (
     CARD_TYPE_MAP,
     TARGET_TYPE_MAP,
     PAD_IDX,
+    RELIC_SYNERGY_DIM,
 )
 
 if TYPE_CHECKING:
@@ -185,10 +186,10 @@ class STS2Network(nn.Module):
         # deck composition summary so the network can reason about synergy,
         # curve, and bloat when choosing which card to add (or skip).
         #
-        # Input: hidden(256) + deck_summary(32) + card_embed(32) + type_embed(16) = 336
-        # Two hidden layers (128→64) for modelling deck×card interactions.
+        # Input: hidden(256) + deck_summary(32) + relic_embed(8) + synergy_features(13) + card_embed(32) + type_embed(16) = 357
+        # Two hidden layers (128→64) for modelling deck×card×relic interactions.
         self.deck_summary_project = nn.Linear(cfg.card_embed_dim, cfg.card_embed_dim)
-        _card_head_input_dim = 256 + cfg.card_embed_dim + cfg.card_embed_dim + cfg.option_type_embed_dim  # 336
+        _card_head_input_dim = 256 + cfg.card_embed_dim + cfg.relic_embed_dim + RELIC_SYNERGY_DIM + cfg.card_embed_dim + cfg.option_type_embed_dim  # 357
         self.card_eval_head = nn.Sequential(
             nn.Linear(_card_head_input_dim, 128),
             nn.ReLU(),
@@ -395,14 +396,21 @@ class STS2Network(nn.Module):
 
     def evaluate_card_picks(
         self,
-        hidden: torch.Tensor,         # (batch, 256)
-        deck_card_ids: torch.Tensor,   # (batch, max_deck) — card vocab IDs in current deck
-        deck_mask: torch.Tensor,       # (batch, max_deck) — True = padded
-        option_types: torch.Tensor,    # (batch, num_options) — OPTION_CARD_REWARD / SKIP
-        option_cards: torch.Tensor,    # (batch, num_options) — card vocab IDs for each option
-        option_mask: torch.Tensor,     # (batch, num_options) — True = invalid/padded
+        hidden: torch.Tensor,          # (batch, 256)
+        deck_card_ids: torch.Tensor,    # (batch, max_deck)
+        deck_mask: torch.Tensor,        # (batch, max_deck)
+        option_types: torch.Tensor,     # (batch, num_options)
+        option_cards: torch.Tensor,     # (batch, num_options)
+        option_mask: torch.Tensor,      # (batch, num_options)
+        relic_ids: torch.Tensor | None = None,    # (batch, max_relics)
+        relic_mask: torch.Tensor | None = None,   # (batch, max_relics)
+        synergy_features: torch.Tensor | None = None,  # (batch, RELIC_SYNERGY_DIM)
     ) -> torch.Tensor:
-        """Score card-pick options with deck-composition awareness.
+        """Score card-pick options with deck-composition and relic-synergy awareness.
+
+        NOTE: Callers should pass relic_ids/relic_mask/synergy_features for
+        relic-aware card evaluation. If omitted, zeros are used (backward compatible).
+        See encoding.compute_relic_synergy_features() for the synergy vector.
 
         Returns (batch, num_options) unbounded scores.
         """
@@ -415,8 +423,23 @@ class STS2Network(nn.Module):
         hidden_exp = hidden.unsqueeze(1).expand(-1, num_opts, -1)            # (B, N, 256)
         deck_exp = deck_summary.unsqueeze(1).expand(-1, num_opts, -1)        # (B, N, 32)
 
-        # [hidden(256) + deck_summary(32) + card_embed(32) + type_embed(16)] = 336
-        combined = torch.cat([hidden_exp, deck_exp, card_embeds, type_embeds], dim=-1)
+        # Relic context: mean-pooled relic embeddings + synergy features
+        if relic_ids is not None and relic_mask is not None:
+            r_embeds = self.relic_embed(relic_ids)
+            r_valid = (~relic_mask).unsqueeze(-1).float()
+            r_count = r_valid.sum(dim=1).clamp(min=1)
+            relic_vec = (r_embeds * r_valid).sum(dim=1) / r_count  # (B, 8)
+        else:
+            relic_vec = torch.zeros(batch, self.config.relic_embed_dim, device=hidden.device)
+
+        if synergy_features is None:
+            synergy_features = torch.zeros(batch, RELIC_SYNERGY_DIM, device=hidden.device)
+
+        relic_context = torch.cat([relic_vec, synergy_features], dim=-1)  # (B, 8+13=21)
+        relic_exp = relic_context.unsqueeze(1).expand(-1, num_opts, -1)   # (B, N, 21)
+
+        # [hidden(256) + deck_summary(32) + relic_context(21) + card_embed(32) + type_embed(16)] = 357
+        combined = torch.cat([hidden_exp, deck_exp, relic_exp, card_embeds, type_embeds], dim=-1)
         scores = self.card_eval_head(combined).squeeze(-1)                   # (B, N)
 
         scores = scores.masked_fill(option_mask, -1e9)
@@ -424,12 +447,15 @@ class STS2Network(nn.Module):
 
     def pick_best_card(
         self,
-        hidden: torch.Tensor,       # (1, 256)
-        deck_card_ids: list[int],    # card vocab IDs currently in deck
+        hidden: torch.Tensor,
+        deck_card_ids: list[int],
         option_types: list[int],
         option_cards: list[int],
+        relic_ids: list[int] | None = None,
+        relic_mask: list[bool] | None = None,
+        synergy_features: list[float] | None = None,
     ) -> tuple[int, list[float]]:
-        """Pick the highest-scoring card option (deck-aware). Returns (best_index, all_scores)."""
+        """Pick the highest-scoring card option (deck and relic-aware). Returns (best_index, all_scores)."""
         with torch.no_grad():
             device = hidden.device
             types_t = torch.tensor([option_types], dtype=torch.long, device=device)
@@ -444,8 +470,19 @@ class STS2Network(nn.Module):
                 deck_t = torch.zeros(1, 1, dtype=torch.long, device=device)
                 deck_mask = torch.ones(1, 1, dtype=torch.bool, device=device)
 
+            # Build relic tensors
+            if relic_ids is not None:
+                relic_t = torch.tensor([relic_ids], dtype=torch.long, device=device)
+                rmask_t = torch.tensor([relic_mask], dtype=torch.bool, device=device) if relic_mask else torch.zeros(1, len(relic_ids), dtype=torch.bool, device=device)
+            else:
+                relic_t = None
+                rmask_t = None
+
+            syn_t = torch.tensor([synergy_features], dtype=torch.float32, device=device) if synergy_features else None
+
             scores = self.evaluate_card_picks(
-                hidden, deck_t, deck_mask, types_t, cards_t, opt_mask)
+                hidden, deck_t, deck_mask, types_t, cards_t, opt_mask,
+                relic_ids=relic_t, relic_mask=rmask_t, synergy_features=syn_t)
             scores_list = scores[0].tolist()
 
             # Pick bonus: gently bias toward taking a card over skipping,
@@ -460,3 +497,20 @@ class STS2Network(nn.Module):
 
             best_idx = max(range(len(scores_list)), key=lambda i: scores_list[i])
             return best_idx, scores_list
+
+    @staticmethod
+    def pad_card_eval_weights(old_state_dict: dict, new_input_dim: int, old_input_dim: int = 336) -> dict:
+        """Pad card_eval_head weights to accommodate new relic features.
+
+        Copies old weights and zero-initializes new feature columns,
+        preserving all previously learned behavior.
+        """
+        import copy
+        state = copy.deepcopy(old_state_dict)
+        key = "card_eval_head.0.weight"  # First linear layer
+        if key in state and state[key].shape[1] == old_input_dim:
+            old_w = state[key]
+            new_w = torch.zeros(old_w.shape[0], new_input_dim, device=old_w.device, dtype=old_w.dtype)
+            new_w[:, :old_input_dim] = old_w
+            state[key] = new_w
+        return state
