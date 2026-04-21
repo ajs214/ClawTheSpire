@@ -819,11 +819,13 @@ def train_worker(
         # Migrate card_eval_head weights if input dim changed (V14→V15: 336→357)
         card_head_key = "card_eval_head.0.weight"
         current_state = network.state_dict()
+        _card_head_migrated = False
         if (card_head_key in saved_state and card_head_key in current_state
                 and saved_state[card_head_key].shape[1] != current_state[card_head_key].shape[1]):
             new_dim = current_state[card_head_key].shape[1]
             old_dim = saved_state[card_head_key].shape[1]
             saved_state = STS2Network.pad_card_eval_weights(saved_state, new_dim, old_dim)
+            _card_head_migrated = True
             print(f"  [checkpoint] Migrated card_eval_head weights: {old_dim}→{new_dim} dims", flush=True)
         compatible = {
             k: v for k, v in saved_state.items()
@@ -842,13 +844,17 @@ def train_worker(
         if skipped:
             msg += f", skipped {len(skipped)} shape-mismatched"
 
-        # Restore optimizer state if available and model was fully compatible
-        if not skipped and "optimizer_state" in ckpt:
+        # Restore optimizer state if available and model was fully compatible.
+        # Skip if card_eval_head was migrated — optimizer momentum buffers have
+        # the old dimensions and will cause a shape mismatch at step().
+        if not skipped and not _card_head_migrated and "optimizer_state" in ckpt:
             try:
                 optimizer.load_state_dict(ckpt["optimizer_state"])
                 msg += ", optimizer restored"
             except Exception as _e:
                 msg += f", optimizer restore failed ({_e})"
+        elif _card_head_migrated and "optimizer_state" in ckpt:
+            msg += ", optimizer reset (card_eval_head migrated)"
 
         # Cumulative generation tracking: figure out how many total gens
         # have been trained so far.  Use the checkpoint's cumulative_gen
