@@ -170,7 +170,7 @@ def play_card(
             and not state.player.powers.get("_music_box_used")):
         state.player.powers["_music_box_used"] = 1
         ethereal_copy = copy.copy(card)
-        ethereal_copy.ethereal = True
+        ethereal_copy.keywords = card.keywords | frozenset({"Ethereal"})
         state.player.discard_pile.append(ethereal_copy)
 
     # --- Move card to appropriate zone ---
@@ -494,7 +494,7 @@ def start_turn(state: CombatState) -> None:
             state.player.draw_pile.remove(chosen)
             chosen_copy = copy.copy(chosen)
             chosen_copy.cost = 0
-            chosen_copy.ethereal = True
+            chosen_copy.keywords = chosen.keywords | frozenset({"Ethereal"})
             state.player.hand.append(chosen_copy)
 
     # HISTORY_COURSE: replay last played attack/skill

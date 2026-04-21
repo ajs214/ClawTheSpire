@@ -380,9 +380,8 @@ def _apply_relic_ooc_effects(
         # Strikes and Defends gain Ethereal
         for c in deck:
             if "Strike" in c.name or "Defend" in c.name:
-                # Set ethereal flag on card instance
-                if not hasattr(c, '_ethereal'):
-                    c._ethereal = True
+                if "Ethereal" not in c.keywords:
+                    c.keywords = c.keywords | frozenset({"Ethereal"})
 
     return hp, max_hp
 
@@ -491,10 +490,7 @@ def mcts_combat(
             chosen = random.choice(state.player.draw_pile)
             state.player.draw_pile.remove(chosen)
             free_copy = copy.copy(chosen)
-            # Set retain by adding to keywords
-            if not hasattr(free_copy, '_retain'):
-                # Store retain flag on card instance
-                free_copy._retain = True
+            free_copy.keywords = chosen.keywords | frozenset({"Retain"})
             state.player.hand.append(free_copy)
 
         # GAMBLING_CHIP: discard hand and redraw
