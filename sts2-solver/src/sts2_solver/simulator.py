@@ -20,6 +20,7 @@ import random
 import statistics
 import sys
 import time
+import copy
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -870,7 +871,7 @@ def _build_card_pool(card_db: CardDB, character_color: str) -> dict[str, list[Ca
         if color not in (character_color, "colorless"):
             continue
         if rarity in pools:
-            pools[rarity].append(card)
+            pools[rarity].append(copy.copy(card))
 
     return pools
 
@@ -898,7 +899,7 @@ def _offer_card_rewards(
             continue
         card = random.choice(pool)
         if card.id not in deck_ids and card.id not in {c.id for c in offered}:
-            offered.append(card)
+            offered.append(copy.copy(card))
     return offered
 
 
@@ -2059,7 +2060,7 @@ def _neow_bless_upgrade_random(hp, max_hp, gold, deck, card_db, rng):
         upgraded = card_db.get_upgraded(deck[idx].id)
         if upgraded is not None:
             c["cards_removed"] = [idx]
-            c["cards_added"] = [upgraded]
+            c["cards_added"] = [copy.copy(upgraded)]
     return c
 
 
@@ -2788,26 +2789,26 @@ def simulate_act1(
         card_id = _normalize_card_id(raw_id)
         card = card_db.get(card_id)
         if card:
-            deck.append(card)
+            deck.append(copy.copy(card))
         else:
             # Try direct lookup
             card = card_db.get(raw_id)
             if card:
-                deck.append(card)
+                deck.append(copy.copy(card))
 
     if not deck:
         # Fallback: hardcode Ironclad starter
         for _ in range(5):
             c = card_db.get("STRIKE_IRONCLAD")
             if c:
-                deck.append(c)
+                deck.append(copy.copy(c))
         for _ in range(4):
             c = card_db.get("DEFEND_IRONCLAD")
             if c:
-                deck.append(c)
+                deck.append(copy.copy(c))
         c = card_db.get("BASH")
         if c:
-            deck.append(c)
+            deck.append(copy.copy(c))
 
     # Card pools for rewards
     char_color = char_data.get("color", "red")
@@ -2971,7 +2972,7 @@ def simulate_act1(
                     upgraded = card_db.get_upgraded(deck[idx].id)
                     if upgraded:
                         old_name = deck[idx].name
-                        deck[idx] = upgraded
+                        deck[idx] = copy.copy(upgraded)
                         result.upgrades_done += 1
                         if verbose:
                             print(f"    Smith: upgraded {old_name}")

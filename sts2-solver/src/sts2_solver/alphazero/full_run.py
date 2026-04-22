@@ -1014,7 +1014,7 @@ def play_full_run(
         card_id = _normalize_card_id(raw_id)
         card = card_db.get(card_id) or card_db.get(raw_id)
         if card:
-            deck.append(card)
+            deck.append(copy.copy(card))
 
     if not deck:
         # Fallback: Silent starter
@@ -1022,7 +1022,7 @@ def play_full_run(
                             ("NEUTRALIZE", 1), ("SURVIVOR", 1)]:
             c = card_db.get(name)
             if c:
-                deck.extend([c] * count)
+                deck.extend([copy.copy(c) for _ in range(count)])
 
     # Card pools
     char_color = char_data.get("color", "green")
@@ -1474,7 +1474,7 @@ def play_full_run(
                         _smithed_card = deck[di].id
                         upgraded = card_db.get_upgraded(deck[di].id)
                         if upgraded:
-                            deck[di] = upgraded
+                            deck[di] = copy.copy(upgraded)
                     run_log.append({
                         "floor": floor_num, "type": "rest",
                         "action": "smith", "card_upgraded": _smithed_card,
@@ -1502,7 +1502,7 @@ def play_full_run(
                     if idx is not None and idx < len(deck):
                         upgraded = card_db.get_upgraded(deck[idx].id)
                         if upgraded:
-                            deck[idx] = upgraded
+                            deck[idx] = copy.copy(upgraded)
                     run_log.append({
                         "floor": floor_num, "type": "rest",
                         "action": "smith", "card_upgraded": _smithed_card,
