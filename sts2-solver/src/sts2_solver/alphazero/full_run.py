@@ -1433,19 +1433,26 @@ def play_full_run(
                 )
 
                 # ----------------------------------------------------------
-                # Approach 3: Exploration forcing for REST
-                # With some probability, override the network's choice to
-                # REST when the shadow advisor also recommends rest.
-                # This ensures the training buffer gets episodes where the
-                # agent healed at low HP, so the value signal can propagate
-                # back to the REST option score.
-                # Exploration rate of 20% gives meaningful coverage without
-                # dominating the training signal.
+                # Approach 3: HP-aware exploration forcing for REST
+                # Override the network to REST when the shadow recommends it.
+                # Rate scales with how damaged the player is:
+                #   - Below 40% HP: 40% chance (critical — need healing data)
+                #   - 40-60% HP:    25% chance (gray zone — need both outcomes)
+                #   - Above 60% HP: 10% chance (light exploration)
+                # This ensures the training buffer has episodes where the
+                # agent healed at different HP thresholds, so the value
+                # signal teaches correct rest-vs-smith tradeoffs.
                 # ----------------------------------------------------------
-                REST_EXPLORE_RATE = 0.20
+                hp_ratio = hp / max(1, max_hp)
+                if hp_ratio < 0.4:
+                    rest_explore_rate = 0.40
+                elif hp_ratio < 0.6:
+                    rest_explore_rate = 0.25
+                else:
+                    rest_explore_rate = 0.10
                 if (best_idx != 0
                         and shadow_idx == 0
-                        and rng.random() < REST_EXPLORE_RATE):
+                        and rng.random() < rest_explore_rate):
                     best_idx = 0  # force REST for exploration
 
                 option_samples.append(OptionSample(
@@ -1989,10 +1996,34 @@ def _assign_run_values(
             if penalty > 0:
                 sample.value = max(-1.0, sample.value - penalty)
 
-    # Deck change and option samples get the full run value
+    # Deck change and option samples get a run value with HP preservation bonus.
+    #
+    # The base run_value is binary-ish (+1 win, scaled loss). But for NON-combat
+    # decisions (rest/map/shop/card picks), we want the agent to learn that
+    # arriving at the boss with more HP is better. A rest-site heal that lets
+    # you enter the boss at 55/70 HP instead of 25/70 should score higher even
+    # if both runs ultimately lost.
+    #
+    # HP preservation bonus: for runs that reached the boss floor (floor >= 16),
+    # add up to +0.15 for arriving with full HP, 0 at half HP, -0.15 at low HP.
+    # This is on top of run_value, so a loss-at-boss with good HP management
+    # gets a less negative value than a loss-at-boss with poor HP management.
+    hp_preservation = 0.0
+    if floor_reached >= total_floors - 1 and max_hp > 0:
+        # Boss was reached — reward HP at boss entry
+        boss_floor = max(sorted_floors) if sorted_floors else floor_reached
+        if boss_floor in combat_hp_data:
+            boss_entry_hp = combat_hp_data[boss_floor][0]  # hp_before boss
+        else:
+            boss_entry_hp = final_hp
+        hp_ratio = boss_entry_hp / max(1, max_hp)
+        hp_preservation = (hp_ratio - 0.5) * 0.3  # [-0.15, +0.15]
+
+    option_value = max(-1.0, min(1.0, run_value + hp_preservation))
+
     if deck_change_samples:
         for sample in deck_change_samples:
-            sample.value = run_value
+            sample.value = option_value
     if option_samples:
         for sample in option_samples:
-            sample.value = run_value
+            sample.value = option_value
