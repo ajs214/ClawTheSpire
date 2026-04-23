@@ -44,6 +44,7 @@ if TYPE_CHECKING:
 
 # Maps card_id -> factory that takes (Card, CardDB | None) and returns CardEffect
 _custom_effects: dict[str, Callable[[Card, CardDB | None], CardEffect]] = {}
+_warned_cards: set[str] = set()  # One-time warning guard for missing implementations
 
 
 def register(card_id: str):
@@ -63,23 +64,21 @@ def get_effect(card: Card, card_db: CardDB | None = None) -> CardEffect:
     if base_id in _custom_effects:
         return _custom_effects[base_id](card, card_db)
 
-    # Log candidates for missing custom implementations
-    # (complex Attack/Skill cards that likely need custom logic)
+    # Log truly complex cards that likely need custom implementations.
+    # Standard patterns handled fine by generate_card_effect:
+    #   - damage + 1 power (e.g., Neutralize: 3 dmg + 1 Weak)
+    #   - block + draw (e.g., Backflip: 5 block + 2 draw)
+    # Only flag cards with 2+ powers or spawns — and only once per card.
     from .constants import CardType
     if card.card_type in (CardType.ATTACK, CardType.SKILL):
-        # Count complex fields that suggest custom logic is needed
-        has_complex_vars = False
-        if card.damage is not None or card.block is not None:
-            # Check if there are more effects than just Damage/Block
-            if card.powers_applied or card.cards_draw or card.energy_gain or card.hp_loss:
-                has_complex_vars = True
-            # Also flag if spawns_cards or has 2+ powers
-            if card.spawns_cards or len(card.powers_applied or []) >= 2:
-                has_complex_vars = True
-
-        if has_complex_vars:
+        is_complex = (
+            card.spawns_cards
+            or len(card.powers_applied or []) >= 2
+        )
+        if is_complex and card.id not in _warned_cards:
+            _warned_cards.add(card.id)
             print(f"[card_registry] Missing custom implementation for {card.card_type.name} '{card.id}' "
-                  f"(complex fields: powers={len(card.powers_applied or [])}, spawns={bool(card.spawns_cards)})")
+                  f"(powers={len(card.powers_applied or [])}, spawns={bool(card.spawns_cards)})")
 
     return generate_card_effect(card)
 
