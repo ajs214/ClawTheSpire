@@ -473,6 +473,7 @@ def _make_entry(data: dict) -> dict:
         "boss_fight_wr": boss_fight_wr,
         "boss_fights_reached": data.get("boss_fights_reached", 0),
         "boss_fights_won": data.get("boss_fights_won", 0),
+        "games_per_gen": data.get("games_per_gen", 8),
         "buffer_size": data.get("buffer_size", 0),
         "lr": data.get("lr", 0),
         "gen_time": data.get("gen_time", 0),
@@ -667,8 +668,11 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <!-- ==================== SUMMARY TAB ==================== -->
 <div class="tab-panel active" id="tab-summary">
 
-  <div class="section-label">Training — Current Version</div>
-  <div class="grid" id="summary-training-stats"></div>
+  <div class="section-label" id="summary-version-label">Training — Whole Version</div>
+  <div class="grid" id="summary-version-stats"></div>
+
+  <div class="section-label">Training — Current Run</div>
+  <div class="grid" id="summary-run-stats"></div>
 
   <div class="section-label">Training — Last 10 Generations</div>
   <div class="grid" id="summary-recent-stats"></div>
@@ -910,38 +914,105 @@ const cardPickChart = new Chart(document.getElementById('cardPickChart'), {
 
 // ---- Update functions ----
 
+function computeVersionStats(history, snap) {
+  // Compute whole-version stats by summing per-gen wins across all runs.
+  // Detect run boundaries where games_played drops (new run started).
+  let totalGames = 0, totalWins = 0, totalBossReached = 0, totalBossWon = 0;
+  let prevGamesPlayed = 0;
+  for (const h of history) {
+    const gp = h.games_played || 0;
+    const gpg = h.games_per_gen || 8;
+    // Detect run boundary: games_played dropped significantly
+    if (gp < prevGamesPlayed * 0.5 && prevGamesPlayed > 50) {
+      // Previous run ended at prevGamesPlayed; stats already accumulated
+    }
+    prevGamesPlayed = gp;
+    // Per-gen contribution
+    const genGames = gpg;
+    const genWins = (h.gen_win_rate || 0) * genGames;
+    totalGames += genGames;
+    totalWins += genWins;
+  }
+  // Boss fight stats: use boss_fights_reached/won from the latest history entry
+  // across run boundaries. Since these are per-run cumulative, we need to detect
+  // run boundaries and sum the peaks.
+  let bfReached = 0, bfWon = 0, prevBfR = 0, prevBfW = 0;
+  for (const h of history) {
+    const r = h.boss_fights_reached || 0;
+    const w = h.boss_fights_won || 0;
+    if (r < prevBfR * 0.5 && prevBfR > 5) {
+      // Run boundary — bank previous run's totals
+      bfReached += prevBfR;
+      bfWon += prevBfW;
+    }
+    prevBfR = r;
+    prevBfW = w;
+  }
+  // Add current run's values (from snapshot, which is most up-to-date)
+  bfReached += (snap.boss_fights_reached || prevBfR || 0);
+  bfWon += (snap.boss_fights_won || prevBfW || 0);
+
+  const wr = totalGames ? totalWins / totalGames : 0;
+  const bfWr = bfReached ? bfWon / bfReached : 0;
+  return { totalGames, totalWins, wr, bfReached, bfWon, bfWr };
+}
+
 function updateSummaryTab(snap, activeVer, bossPerBoss, liveRuns, recentHistory) {
-  // Training stats — current version cumulative
-  const wr = snap.win_rate||0;
-  const bfWr = snap.boss_fight_win_rate||0;
-  const bfReached = snap.boss_fights_reached||0;
-  const bfWon = snap.boss_fights_won||0;
+  // === Section 1: Whole Version (all runs combined) ===
+  const vs = computeVersionStats(recentHistory, snap);
+  document.getElementById('summary-version-label').textContent =
+    `Training \u2014 Whole Version (${LABELS[activeVer]||activeVer})`;
+  document.getElementById('summary-version-stats').innerHTML = `
+    <div class="card"><div class="label">Act 1 Win Rate</div><div class="value ${wrClass(vs.wr)}">${(vs.wr*100).toFixed(1)}%</div>
+      <div class="sub">${vs.totalWins.toFixed(0)} wins / ${vs.totalGames} games</div></div>
+    <div class="card"><div class="label">Boss-Fight Win Rate</div><div class="value ${wrClass(vs.bfWr)}">${(vs.bfWr*100).toFixed(1)}%</div>
+      <div class="sub">${vs.bfWon}/${vs.bfReached} boss fights won</div></div>
+    <div class="card"><div class="label">Total Generations</div><div class="value" style="color:#58a6ff">${recentHistory.length}</div>
+      <div class="sub">across all runs</div></div>
+  `;
+
+  // === Section 2: Current Run ===
+  const runWr = snap.win_rate||0;
+  const runBfWr = snap.boss_fight_win_rate||0;
+  const runBfReached = snap.boss_fights_reached||0;
+  const runBfWon = snap.boss_fights_won||0;
+  const runGames = snap.run_games_played||snap.games_played||0;
   const recent = snap.recent_games||[];
   const reachedBoss = recent.filter(g=>g.floor>=BOSS_FLOOR);
   const bossReach = recent.length ? reachedBoss.length/recent.length : 0;
 
-  document.getElementById('summary-training-stats').innerHTML = `
-    <div class="card"><div class="label">Act 1 Win Rate</div><div class="value ${wrClass(wr)}">${(wr*100).toFixed(1)}%</div>
-      <div class="sub">${LABELS[activeVer]||activeVer} cumulative</div></div>
+  document.getElementById('summary-run-stats').innerHTML = `
+    <div class="card"><div class="label">Act 1 Win Rate</div><div class="value ${wrClass(runWr)}">${(runWr*100).toFixed(1)}%</div>
+      <div class="sub">${runGames} games this run</div></div>
     <div class="card"><div class="label">Boss Reach Rate</div><div class="value ${bossReach>=0.6?'good':bossReach>=0.2?'warn':'bad'}">${(bossReach*100).toFixed(0)}%</div>
-      <div class="sub">Last ${recent.length} games</div></div>
-    <div class="card"><div class="label">Boss-Fight Win Rate</div><div class="value ${wrClass(bfWr)}">${(bfWr*100).toFixed(1)}%</div>
-      <div class="sub">${bfWon}/${bfReached} boss fights won</div></div>
+      <div class="sub">last ${recent.length} games</div></div>
+    <div class="card"><div class="label">Boss-Fight Win Rate</div><div class="value ${wrClass(runBfWr)}">${(runBfWr*100).toFixed(1)}%</div>
+      <div class="sub">${runBfWon}/${runBfReached} boss fights this run</div></div>
   `;
 
-  // Last 10 gens stats
+  // === Section 3: Last 10 Generations ===
   const last10 = recentHistory.slice(-10);
-  const l10wr = last10.length ? last10.reduce((s,h)=>s+(h.win_rate||0),0)/last10.length : 0;
-  const l10bfwr = last10.length ? last10.reduce((s,h)=>s+(h.boss_fight_wr||0),0)/last10.length : 0;
+  // Use gen_win_rate (per-generation win rate) — NOT cumulative win_rate
+  const l10wr = last10.length ? last10.reduce((s,h)=>s+(h.gen_win_rate||0),0)/last10.length : 0;
   const l10br = last10.length ? last10.reduce((s,h)=>s+(h.boss_reach||0),0)/last10.length : 0;
+  // For boss-fight WR over last 10 gens: compute from per-gen boss stats
+  let l10bfR = 0, l10bfW = 0;
+  for (let i = 1; i < last10.length; i++) {
+    // Delta in boss fights between consecutive gens (within same run)
+    const dr = (last10[i].boss_fights_reached||0) - (last10[i-1].boss_fights_reached||0);
+    const dw = (last10[i].boss_fights_won||0) - (last10[i-1].boss_fights_won||0);
+    if (dr >= 0) { l10bfR += dr; l10bfW += dw; }
+    // If dr < 0, run boundary — skip that delta
+  }
+  const l10bfwr = l10bfR ? l10bfW / l10bfR : 0;
 
   document.getElementById('summary-recent-stats').innerHTML = `
     <div class="card"><div class="label">Act 1 Win Rate</div><div class="value ${wrClass(l10wr)}">${(l10wr*100).toFixed(1)}%</div>
-      <div class="sub">Last 10 generations avg</div></div>
+      <div class="sub">avg of last ${last10.length} gens</div></div>
     <div class="card"><div class="label">Boss Reach Rate</div><div class="value ${l10br>=0.6?'good':l10br>=0.2?'warn':'bad'}">${(l10br*100).toFixed(0)}%</div>
-      <div class="sub">Last 10 generations avg</div></div>
+      <div class="sub">avg of last ${last10.length} gens</div></div>
     <div class="card"><div class="label">Boss-Fight Win Rate</div><div class="value ${wrClass(l10bfwr)}">${(l10bfwr*100).toFixed(1)}%</div>
-      <div class="sub">Last 10 generations avg</div></div>
+      <div class="sub">${l10bfW}/${l10bfR} in last ${last10.length} gens</div></div>
   `;
 
   // Card-pick diagnostics
@@ -1413,6 +1484,7 @@ async function poll() {
       histDisplay[v] = d.history[v] || [];
       if (d.snapshots[v]) {
         const copy = Object.assign({}, d.snapshots[v]);
+        copy.run_games_played = d.snapshots[v].games_played||0;
         copy.games_played = computeTotalGames(d.history[v]||[], d.snapshots[v].games_played||0);
         snapsDisplay[v] = copy;
       }
