@@ -1032,6 +1032,9 @@ def play_full_run(
     # picked across this run. Used for decaying exploration (Option D).
     _card_explore_counts: dict[str, int] = {}  # card_id → times picked in this run
 
+    # Shop removal counter: cost escalates 75 → 100 → 125 → ... per removal
+    _removals_done: int = 0
+
     # Card pools
     char_color = char_data.get("color", "green")
     color_map = {"red": "ironclad", "green": "silent", "blue": "defect",
@@ -1705,15 +1708,19 @@ def play_full_run(
                 # Apply OOC relic effects
                 hp, max_hp = _apply_relic_ooc_effects(
                     granted, deck, card_db, hp, max_hp)
-                run_log.append({
-                    "floor": floor_num, "type": "treasure",
-                    "relic": granted,
-                    "offered": offered,
-                    "deck_size": len(deck),
-                    "deck_cards": [c.id for c in deck],
-                    "hp": hp,
-                    "max_hp": max_hp,
-                })
+            # Treasure gold reward (real game gives ~50-75 gold per chest)
+            treasure_gold = rng.randint(50, 75)
+            gold += treasure_gold
+            run_log.append({
+                "floor": floor_num, "type": "treasure",
+                "relic": granted,
+                "offered": offered if granted else [],
+                "gold_earned": treasure_gold,
+                "deck_size": len(deck),
+                "deck_cards": [c.id for c in deck],
+                "hp": hp,
+                "max_hp": max_hp,
+            })
 
         elif room_type == "shop":
             # Network-driven multi-step shop
@@ -1759,7 +1766,9 @@ def play_full_run(
                     actions = []  # ("remove", di) | ("buy", si, cost) | ("potion", pi) | ("relic", ri) | ("leave",)
 
                     # Remove options (Strike/Defend only)
-                    if gold >= SHOP_CARD_REMOVE_COST:
+                    # Cost escalates: 75, 100, 125, ... per removal this run
+                    _current_remove_cost = SHOP_CARD_REMOVE_COST + _removals_done * 25
+                    if gold >= _current_remove_cost:
                         for di, card in enumerate(deck):
                             if card.name in ("Strike", "Defend") and not card.upgraded:
                                 opt_types.append(OPTION_SHOP_REMOVE)
@@ -1820,9 +1829,10 @@ def play_full_run(
                     if action[0] == "leave":
                         break
                     elif action[0] == "remove":
-                        _shop_actions.append({"action": "remove", "card": deck[action[1]].id, "cost": SHOP_CARD_REMOVE_COST})
+                        _shop_actions.append({"action": "remove", "card": deck[action[1]].id, "cost": _current_remove_cost})
                         deck.pop(action[1])
-                        gold -= SHOP_CARD_REMOVE_COST
+                        gold -= _current_remove_cost
+                        _removals_done += 1
                     elif action[0] == "relic":
                         rname = shop_relics[action[1]]
                         shop_relics[action[1]] = None  # sold out

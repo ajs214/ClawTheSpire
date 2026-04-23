@@ -2372,7 +2372,9 @@ def _rest_site_decision(
 # Shop simulation — archetype-aware, multi-step
 # ---------------------------------------------------------------------------
 
-SHOP_CARD_REMOVE_COST = 75
+SHOP_CARD_REMOVE_BASE_COST = 75   # First removal costs 75
+SHOP_CARD_REMOVE_COST_STEP = 25   # Each subsequent removal costs +25 more
+SHOP_CARD_REMOVE_COST = 75        # Legacy alias (initial cost)
 SHOP_CARD_COSTS = {"Common": 50, "Uncommon": 75, "Rare": 150}
 SHOP_POTION_COST = 50  # Flat cost for any potion
 SHOP_RELIC_COST = 150   # Simplified flat relic price
@@ -2588,6 +2590,7 @@ def _simulate_shop(
     max_hp: int = 70,
     character: str = "SILENT",
     potions: list[dict] | None = None,
+    removals_done: int = 0,
     relics: frozenset[str] | set[str] | None = None,
 ) -> dict:
     """Simulate a shop visit with relic-first purchasing.
@@ -2673,9 +2676,11 @@ def _simulate_shop(
 
     # --- Step 3: Remove the weakest card in the deck ---
     # Demoted from step 1 (V6): still valuable for pruning the starter
-    # strikes/defends, but it's the cheapest action (75g) and can wait
+    # strikes/defends, but it's the cheapest action (75g base) and can wait
     # until the bigger-impact purchases are locked in.
-    if gold >= SHOP_CARD_REMOVE_COST and len(deck) >= 8:
+    # Cost escalates: 75, 100, 125, ... (+25 per removal done this run).
+    remove_cost = SHOP_CARD_REMOVE_BASE_COST + removals_done * SHOP_CARD_REMOVE_COST_STEP
+    if gold >= remove_cost and len(deck) >= 8:
         scored = [
             (i, c, _score_card_for_removal(c, deck, floor, hp, max_hp))
             for i, c in enumerate(deck)
@@ -2686,8 +2691,9 @@ def _simulate_shop(
         is_basic = worst_card.name in ("Strike", "Defend") and not worst_card.upgraded
         if worst_score < 0.25 or is_basic:
             result["cards_removed"].append(worst_idx)
-            result["gold_delta"] -= SHOP_CARD_REMOVE_COST
-            gold -= SHOP_CARD_REMOVE_COST
+            result["gold_delta"] -= remove_cost
+            result["removals_done"] = removals_done + 1
+            gold -= remove_cost
 
     # --- Step 4: Buy a card (archetype-aware, using organic scorer) ---
     if gold >= 50:
@@ -3017,11 +3023,8 @@ def simulate_act1(
                     print(f"    Event: {eid} (HP: {hp}/{max_hp})")
 
         elif room_type == "treasure":
-            # Treasure chest: single guaranteed relic drop from the
-            # standard pool (Common / Uncommon / Rare).  Real STS sometimes
-            # also gives gold or a potion; we keep it relic-only so the
-            # room's whole purpose is mechanically captured as "adds a
-            # relic to the set".
+            # Treasure chest: relic drop + gold reward (matches real game).
+            # Gold ranges from 50-75 for a standard chest.
             granted = _grant_relic_from_pool(
                 _get_standard_relic_pool(), deck, relics, rng,
             )
@@ -3029,6 +3032,8 @@ def simulate_act1(
                 relics.add(granted)
                 if verbose:
                     print(f"    Treasure: {granted}")
+            # Treasure gold reward (real game gives ~50-75 gold per chest)
+            gold += rng.randint(50, 75)
 
         elif room_type == "shop":
             shop_result = _simulate_shop(
