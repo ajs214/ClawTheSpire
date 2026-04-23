@@ -79,8 +79,18 @@ def enumerate_actions(state: CombatState) -> list[Action]:
     for i, pot in enumerate(state.player.potions):
         if not pot:
             continue
-        # All current potion types are self-target or AoE (no single-enemy target)
-        actions.append(Action("use_potion", potion_idx=i))
+        # Most potion types are self-target or AoE. If a potion has
+        # targeting requirements, generate per-enemy actions (similar to cards).
+        # Currently no potions require targeting, but this supports future ones.
+        requires_target = pot.get("requires_target", False)
+        if requires_target:
+            # Generate one action per alive enemy
+            for enemy_idx in range(len(state.enemies)):
+                if state.enemies[enemy_idx].is_alive:
+                    actions.append(Action("use_potion", potion_idx=i, target_idx=enemy_idx))
+        else:
+            # Self-target or AoE — no target selection needed
+            actions.append(Action("use_potion", potion_idx=i))
 
     actions.append(END_TURN)
     return actions

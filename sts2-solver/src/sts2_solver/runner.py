@@ -110,7 +110,7 @@ class Runner:
 
         # TUI state
         self._status_text = "[dim]Starting...[/dim]"
-        self._solver_text = "[dim]No combat yet[/dim]"
+        self._solver_text = "[dim]Waiting for combat...[/dim]"
         self._advisor_text = "[dim]No decisions yet[/dim]"
         self._log: deque[str] = deque(maxlen=MAX_LOG_LINES)
         self._live: Live | None = None
@@ -404,6 +404,18 @@ class Runner:
                         self._log_action(f"  [red]Pack select failed: {e}[/red]")
                 return False
 
+        # Chest screen: open it first, then choose_treasure_relic handles relic pick
+        if screen == "CHEST" and "open_chest" in actions:
+            self._log_action("[dim]auto: open_chest[/dim]")
+            if not self.dry_run:
+                try:
+                    self._execute_with_retry("open_chest")
+                    self.action_count += 1
+                    time.sleep(0.5)
+                except Exception as e:
+                    self._log_action(f"[red]Failed to open chest: {e}[/red]")
+            return False
+
         if not actions:
             return False
 
@@ -690,6 +702,29 @@ class Runner:
                 best_idx = e.get("index", 0)
         return best_idx
 
+    # NOTE on potion heuristics divergence (Issue 10):
+    # The runner's _should_use_potion() and simulator's _use_precombat_potions() +
+    # _use_emergency_potion() have slightly different logic:
+    #
+    # RUNNER (live play):
+    #   - Before any cards: pre-check if potion should be used (this method)
+    #   - During turn: within the main MCTS loop (actions.py generates use_potion
+    #     actions that MCTS evaluates)
+    #   - Heuristic: save potions for boss, use aggressively in boss fights
+    #   - Survival thresholds: 35% HP (boss) / none explicit for non-boss
+    #
+    # SIMULATOR (training):
+    #   - Boss fights: dump ALL offensive potions immediately at combat start
+    #     (_use_precombat_potions), then heal if HP < 40%
+    #   - Non-boss: only emergency heal if HP < 25% per turn
+    #   - Non-boss: never dump offensive potions pre-combat
+    #
+    # KEY ALIGNMENT (as of this session):
+    # Both now use potions during the main MCTS loop (runner has use_potion
+    # actions in enumerate_actions, simulator loads potions into player state).
+    # The pre-combat dump in simulator happens before MCTS runs, approximating
+    # a "boss start bonus." The heuristics are similar enough for live play.
+
     def _should_use_potion(self, gs: dict) -> tuple[int, int | None] | None:
         """Decide whether to use a potion this turn. Returns (slot, target) or None.
 
@@ -831,7 +866,7 @@ class Runner:
             try:
                 n_actions = len(_enum_actions(sim))
                 sims = scale_simulations(200, n_actions)
-                action, policy, root_value = self._mcts.search(
+                action, policy, root_value, _actions = self._mcts.search(
                     sim, num_simulations=sims, temperature=0.15,
                 )
             except Exception:
@@ -953,6 +988,67 @@ class Runner:
 
         return END_TURN
 
+    def _format_mcts_analysis(
+        self, actions, policy, hand, root_value, chosen_action,
+        solve_ms, total_sims, cards_played, enemy_str, turn, player,
+    ) -> str:
+        """Format MCTS results into a human-readable solver panel."""
+        win_pct = max(0, min(100, root_value * 100))
+
+        # Build ranked list of action options with policy weights
+        options = []
+        for i, (act, prob) in enumerate(zip(actions, policy)):
+            if act.action_type == "end_turn":
+                name = "End Turn"
+            elif act.action_type == "use_potion":
+                name = f"Use Potion (slot {act.potion_idx})"
+            elif act.card_idx is not None and act.card_idx < len(hand):
+                card = hand[act.card_idx]
+                cname = f"{card.name}+" if card.upgraded else card.name
+                if act.target_idx is not None:
+                    name = f"{cname} → enemy {act.target_idx}"
+                else:
+                    name = cname
+            else:
+                name = str(act)
+            is_chosen = (act == chosen_action)
+            options.append((name, prob, is_chosen))
+
+        # Sort by policy weight descending
+        options.sort(key=lambda x: x[1], reverse=True)
+
+        # Header
+        hp = player.get("current_hp", "?")
+        max_hp = player.get("max_hp", "?")
+        energy = player.get("energy", "?")
+        lines = [
+            f"[bold]Turn {turn}[/bold] | HP {hp}/{max_hp} | Energy {energy}",
+            f"vs: {enemy_str}",
+            f"Win chance: [{'green' if win_pct > 50 else 'yellow' if win_pct > 20 else 'red'}]{win_pct:.0f}%[/{'green' if win_pct > 50 else 'yellow' if win_pct > 20 else 'red'}] | {total_sims} sims ({solve_ms:.0f}ms)",
+            "",
+        ]
+
+        # Show top options with bar visualization
+        for name, prob, is_chosen in options[:6]:
+            pct = prob * 100
+            bar_len = int(pct / 5)  # 20 chars = 100%
+            bar = "█" * bar_len + "░" * max(0, 20 - bar_len)
+            marker = " ◄" if is_chosen else ""
+            if is_chosen:
+                lines.append(f"[green]{bar} {pct:4.0f}% {name}{marker}[/green]")
+            elif pct >= 5:
+                lines.append(f"[dim]{bar} {pct:4.0f}% {name}[/dim]")
+            elif pct > 0:
+                lines.append(f"[dim]{'░' * 20} {pct:4.1f}% {name}[/dim]")
+
+        # Summary of what's been played this turn
+        if cards_played:
+            played_str = " → ".join(cards_played)
+            lines.append("")
+            lines.append(f"Played: [green]{played_str}[/green]")
+
+        return "\n".join(lines)
+
     def _handle_combat(self) -> None:
         gs = self.game_state
         combat = gs.get("combat") or {}
@@ -1017,6 +1113,18 @@ class Runner:
             ) + ("..." if len(planned_sequence) > 5 else "")
             self._log_action(f"  [dim]Turn plan: {plan_str}[/dim]")
 
+        # Update solver panel with combat state
+        hand_names = ", ".join(c.get("name", "?") for c in (player.get("hand") or []))
+        hp = player.get('current_hp', '?')
+        max_hp = player.get('max_hp', '?')
+        energy = player.get('energy', '?')
+        self._solver_text = (
+            f"[bold]Turn {turn}[/bold] | HP {hp}/{max_hp} | Energy {energy}\n"
+            f"Hand: {hand_names}\n"
+            f"vs: {enemy_str}\n\n"
+            f"[dim]Thinking...[/dim]"
+        )
+
         while len(cards_played) < max_cards:
             # Build combat state and run MCTS
             try:
@@ -1027,7 +1135,7 @@ class Runner:
                 from .actions import enumerate_actions as _enum_actions
                 _n_actions = len(_enum_actions(sim_state))
                 _sims = scale_simulations(200, _n_actions)
-                first_action, policy, root_value = self._mcts.search(
+                first_action, policy, root_value, mcts_actions = self._mcts.search(
                     sim_state, num_simulations=_sims, temperature=0.15,
                 )
                 solve_ms = (time.perf_counter() - t0) * 1000
@@ -1046,6 +1154,13 @@ class Runner:
                     affordable = _affordable_play_actions(_enum_actions(sim_state), sim_state)
                     if affordable and random.random() < 0.50:
                         first_action = random.choice(affordable)
+
+                # Update solver panel with MCTS analysis
+                self._solver_text = self._format_mcts_analysis(
+                    mcts_actions, policy, hand, root_value, first_action,
+                    solve_ms, total_states, cards_played, enemy_str, turn, player,
+                )
+                self._refresh()
 
                 # V11: Compare MCTS pick to planned sequence for diagnostics
                 if plan_idx < len(planned_sequence):
@@ -1086,15 +1201,7 @@ class Runner:
 
             # If MCTS says end turn, we're done
             if first_action.action_type == "end_turn":
-                hand_str = ", ".join(c.name for c in hand)
-                self._solver_text = (
-                    f"[bold]Turn {turn}[/bold] | "
-                    f"HP {player.get('current_hp', '?')}/{player.get('max_hp', '?')} | "
-                    f"Energy {player.get('energy', '?')}\n"
-                    f"Hand: {hand_str}\n"
-                    f"vs: {enemy_str}\n\n"
-                    f"MCTS: end turn ({solve_ms:.0f}ms)"
-                )
+                # Final solver panel already updated by _format_mcts_analysis above
                 break
 
             # Handle potion usage from MCTS
@@ -1461,15 +1568,47 @@ class Runner:
         )
 
         # discard_potion as sole action: game is forcing a potion discard
-        # (e.g. potions full after a reward). Just discard slot 0.
+        # (e.g. potions full after picking up a new one). Find the first
+        # occupied slot to discard. Prefer slots marked can_discard, but
+        # fall back to any occupied slot since the game state may not set
+        # can_discard=true on this screen.
         if actions == ["discard_potion"]:
-            self._log_action("  [dim]auto: discard_potion (slot 0)[/dim]")
-            if not self.dry_run:
-                try:
-                    self._execute_with_retry("discard_potion", option_index=0)
-                    self.action_count += 1
-                except Exception as e:
-                    self._log_action(f"  [red]Failed to discard potion: {e}[/red]")
+            potions = run.get("potions", [])
+            discard_idx = None
+            fallback_idx = None
+            for p in potions:
+                if p.get("occupied"):
+                    if fallback_idx is None:
+                        fallback_idx = p.get("index", 0)
+                    if p.get("can_discard"):
+                        discard_idx = p.get("index", 0)
+                        break
+            if discard_idx is None:
+                discard_idx = fallback_idx
+            if discard_idx is not None:
+                pot_name = ""
+                for p in potions:
+                    if p.get("index") == discard_idx:
+                        pot_name = f" ({p.get('name', '?')})"
+                        break
+                self._log_action(f"  [dim]auto: discard_potion (slot {discard_idx}{pot_name})[/dim]")
+                if not self.dry_run:
+                    try:
+                        self._execute_with_retry("discard_potion", option_index=discard_idx)
+                        self.action_count += 1
+                    except Exception as e:
+                        # If this slot can't be discarded, try the next occupied slot
+                        self._log_action(f"  [yellow]Slot {discard_idx} not discardable, trying next[/yellow]")
+                        for p in potions:
+                            if p.get("occupied") and p.get("index") != discard_idx:
+                                try:
+                                    self._execute_with_retry("discard_potion", option_index=p["index"])
+                                    self.action_count += 1
+                                    break
+                                except Exception:
+                                    continue
+            else:
+                self._log_action("  [yellow]No occupied potion slots — skipping[/yellow]")
             return
 
         # Reward screen: collect_rewards_and_proceed auto-picks the first

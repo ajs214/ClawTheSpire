@@ -34,6 +34,8 @@ for i in $(seq 1 10); do
         echo "  Game $i exited with code $RC"
     fi
     echo ""
+    # Give the game time to transition back to main menu
+    sleep 5
 done
 
 echo "=== 10 Games Complete at $(date) ==="

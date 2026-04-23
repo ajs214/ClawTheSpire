@@ -597,7 +597,7 @@ def mcts_combat(
             action_card_ids, action_features, action_mask = encode_actions(actions, state, vocabs, config)
 
             scaled_sims = scale_simulations(mcts_simulations, len(actions), is_boss=is_boss)
-            action, policy, _root_value = mcts.search(
+            action, policy, _root_value, _mcts_actions = mcts.search(
                 state, num_simulations=scaled_sims,
                 temperature=temperature,
             )

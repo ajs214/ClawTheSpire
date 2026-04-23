@@ -32,6 +32,40 @@ from .enemy_predict import annotate_predictions
 from .models import Card, CombatState, EnemyState, PlayerState
 
 
+def _parse_potions(raw_potions: list) -> list[dict]:
+    """Parse potions from raw game state.
+
+    Classifies potions by keyword matching and returns a list of dicts.
+    Unknown potions are logged and included as generic entries (with just 'name').
+    Empty slots return empty dicts.
+    """
+    potions: list[dict] = []
+    for idx, p in enumerate(raw_potions):
+        if not p.get("occupied"):
+            potions.append({})
+            continue
+        name = (p.get("name") or "").lower()
+        pot: dict = {"name": p.get("name", "?")}
+        # Classify by keywords (matches simulator POTION_TYPES)
+        if any(k in name for k in ("blood", "heal", "fairy", "fruit", "regen")):
+            pot["heal"] = 20
+        elif any(k in name for k in ("block", "ghost", "shield", "iron", "armor")):
+            pot["block"] = 12
+        elif "strength" in name or "flex" in name:
+            pot["strength"] = 2
+        elif any(k in name for k in ("fire", "explosive", "attack")):
+            pot["damage_all"] = 20
+        elif "weak" in name or "fear" in name:
+            pot["enemy_weak"] = 3
+        else:
+            # Unknown potion — log and treat as generic (occupies slot)
+            print(f"[bridge] Unknown potion: '{p.get('name')}' at slot {idx} — treating as generic")
+            potions.append(pot)  # Add generic entry so MCTS knows slot is occupied
+            continue
+        potions.append(pot)
+    return potions
+
+
 def state_from_mcp(raw: dict, card_db: CardDB,
                    move_indices: dict[tuple[int, str], int] | None = None) -> CombatState:
     """Convert an MCP game state dict into a CombatState.
@@ -112,31 +146,7 @@ def state_from_mcp(raw: dict, card_db: CardDB,
 
     # Parse potions from run state
     potions_raw = run.get("potions") or []
-    potions = []
-    for p in potions_raw:
-        if not p.get("occupied"):
-            potions.append({})
-            continue
-        name = (p.get("name") or "").lower()
-        desc = (p.get("description") or "").lower()
-        pot: dict = {"name": p.get("name", "?")}
-        # Classify by keywords (matches simulator POTION_TYPES)
-        if any(k in name for k in ("blood", "heal", "fairy", "fruit", "regen")):
-            pot["heal"] = 20
-        elif any(k in name for k in ("block", "ghost", "shield", "iron", "armor")):
-            pot["block"] = 12
-        elif "strength" in name or "flex" in name:
-            pot["strength"] = 2
-        elif any(k in name for k in ("fire", "explosive", "attack")):
-            pot["damage_all"] = 20
-        elif "weak" in name or "fear" in name:
-            pot["enemy_weak"] = 3
-        else:
-            # Unknown potion — skip (empty slot from network's perspective)
-            potions.append({})
-            continue
-        potions.append(pot)
-    player.potions = potions
+    player.potions = _parse_potions(potions_raw)
 
     gold = run.get("gold", 0)
 
@@ -203,28 +213,7 @@ def _noncombat_state_from_mcp(raw: dict, card_db: CardDB) -> CombatState:
     player.exhaust_pile = []
     # Parse potions (same logic as combat path)
     potions_raw = run.get("potions") or []
-    potions: list[dict] = []
-    for p in potions_raw:
-        if not p.get("occupied"):
-            potions.append({})
-            continue
-        name = (p.get("name") or "").lower()
-        pot: dict = {"name": p.get("name", "?")}
-        if any(k in name for k in ("blood", "heal", "fairy", "fruit", "regen")):
-            pot["heal"] = 20
-        elif any(k in name for k in ("block", "ghost", "shield", "iron", "armor")):
-            pot["block"] = 12
-        elif "strength" in name or "flex" in name:
-            pot["strength"] = 2
-        elif any(k in name for k in ("fire", "explosive", "attack")):
-            pot["damage_all"] = 20
-        elif "weak" in name or "fear" in name:
-            pot["enemy_weak"] = 3
-        else:
-            potions.append({})
-            continue
-        potions.append(pot)
-    player.potions = potions
+    player.potions = _parse_potions(potions_raw)
 
     return CombatState(
         player=player,
@@ -555,6 +544,10 @@ def action_to_mcp(action: Action) -> dict:
     }
     if action.target_idx is not None:
         result["target_index"] = action.target_idx
+    else:
+        # Game API requires target_index for all cards including AoE.
+        # Default to enemy 0 when the solver doesn't specify a target.
+        result["target_index"] = 0
     return result
 
 
@@ -629,6 +622,7 @@ def _card_from_runtime(raw: dict, card_db: CardDB) -> Card:
     try:
         target = TargetType(target_str)
     except ValueError:
+        print(f"[bridge] Unknown target_type '{target_str}' for card {card_id}, defaulting to SELF")
         target = TargetType.SELF
 
     card_type_str = raw.get("card_type", "Skill")
@@ -697,6 +691,15 @@ def _enemy_from_runtime(raw: dict) -> EnemyState:
             intent_effects["debuff"] = True
         if "status" in it:
             intent_type = intent_type or "StatusCard"
+
+    # Validate intent_type against known values
+    known_intent_types = {"Attack", "Defend", "Buff", "Debuff", "StatusCard", "Unknown"}
+    if intent_type is not None and intent_type not in known_intent_types:
+        print(f"[bridge] Unknown intent_type '{intent_type}' for enemy {raw.get('name', 'UNKNOWN')}, raw data: {intents}")
+
+    # Log multi-hit intents for verification
+    if intent_hits > 1:
+        print(f"[bridge] Multi-hit intent: {raw.get('name', 'UNKNOWN')} - {intent_type} x{intent_hits} (damage={intent_damage}), raw: {intents}")
 
     return EnemyState(
         id=raw.get("enemy_id") or raw.get("id", ""),

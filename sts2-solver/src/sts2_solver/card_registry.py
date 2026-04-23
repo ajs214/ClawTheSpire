@@ -62,6 +62,25 @@ def get_effect(card: Card, card_db: CardDB | None = None) -> CardEffect:
     base_id = card.id.rstrip("+")  # Handle upgraded IDs
     if base_id in _custom_effects:
         return _custom_effects[base_id](card, card_db)
+
+    # Log candidates for missing custom implementations
+    # (complex Attack/Skill cards that likely need custom logic)
+    from .constants import CardType
+    if card.card_type in (CardType.ATTACK, CardType.SKILL):
+        # Count complex fields that suggest custom logic is needed
+        has_complex_vars = False
+        if card.damage is not None or card.block is not None:
+            # Check if there are more effects than just Damage/Block
+            if card.powers_applied or card.cards_draw or card.energy_gain or card.hp_loss:
+                has_complex_vars = True
+            # Also flag if spawns_cards or has 2+ powers
+            if card.spawns_cards or len(card.powers_applied or []) >= 2:
+                has_complex_vars = True
+
+        if has_complex_vars:
+            print(f"[card_registry] Missing custom implementation for {card.card_type.name} '{card.id}' "
+                  f"(complex fields: powers={len(card.powers_applied or [])}, spawns={bool(card.spawns_cards)})")
+
     return generate_card_effect(card)
 
 

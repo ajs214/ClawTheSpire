@@ -7,7 +7,7 @@ card plays, end-of-turn, and enemy phases.
 
 Usage:
     mcts = MCTS(network, vocabs, config)
-    action, policy, root_value = mcts.search(state, num_simulations=100)
+    action, policy, root_value, actions = mcts.search(state, num_simulations=100)
 
 Each simulation:
     1. SELECT:   Walk tree via PUCT (balances exploitation + exploration)
@@ -280,7 +280,7 @@ class MCTS:
         num_simulations: int = 100,
         temperature: float = 1.0,
         time_limit_ms: float | None = None,
-    ) -> tuple[Action, list[float], float]:
+    ) -> tuple[Action, list[float], float, list[Action]]:
         """Run MCTS from the given state.
 
         Returns:
@@ -293,7 +293,7 @@ class MCTS:
         self._expand(root)
 
         if root.is_terminal or not root.legal_actions:
-            return END_TURN, [1.0], root.terminal_value if root.is_terminal else 0.0
+            return END_TURN, [1.0], root.terminal_value if root.is_terminal else 0.0, [END_TURN]
 
         deadline = None
         if time_limit_ms is not None:
@@ -345,7 +345,7 @@ class MCTS:
             import random
             action_idx = random.choices(range(len(actions)), weights=policy, k=1)[0]
 
-        return actions[action_idx], policy, root.value
+        return actions[action_idx], policy, root.value, actions
 
     def _select(self, root: Node) -> Node:
         """Walk tree from root to a leaf using PUCT selection."""

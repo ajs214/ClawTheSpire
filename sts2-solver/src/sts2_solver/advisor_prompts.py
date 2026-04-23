@@ -675,7 +675,11 @@ def detect_screen_type(available_actions: list[str]) -> str:
     if "choose_rest_option" in actions_set:
         return "rest"
     if "choose_treasure_relic" in actions_set:
-        return "boss_relic"
+        return "treasure"
+    if "choose_bundle" in actions_set:
+        return "bundle"
+    if "open_chest" in actions_set:
+        return "chest"
 
     # Check for auto-actions
     for action in available_actions:
