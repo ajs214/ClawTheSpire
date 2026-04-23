@@ -2366,7 +2366,7 @@ class Runner:
                     organic_decision = decide_card_reward(gs, self.game_data)
                     if organic_decision is not None:
                         overridden = True
-                        organic_reason = organic_decision.reason
+                        organic_reason = organic_decision.reasoning
                         # Map the organic decision back to our action list
                         organic_action = organic_decision.action
                         organic_opt_idx = organic_decision.option_index
