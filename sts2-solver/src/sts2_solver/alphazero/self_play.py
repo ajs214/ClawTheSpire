@@ -605,6 +605,21 @@ def train_batch(
     SHADOW_ALPHA = 0.15
     RANK_BETA = 0.20       # weight for ranking loss on card picks
     RANK_MARGIN = 0.05     # minimum desired score gap between chosen and alternatives
+    # Empirical card lift: deck-win-rate relative to baseline (>1 = above avg).
+    # Used to boost ranking loss for win-correlated cards so the network
+    # gets stronger gradient toward picking proven winners.
+    _CARD_LIFT = {
+        "COORDINATE": 3.3, "JACKPOT": 2.9, "DARK_SHACKLES": 2.4,
+        "VOLLEY": 1.97, "NOXIOUS_FUMES": 1.86, "PIERCING_WAIL": 1.83,
+        "BOUNCING_FLASK": 1.73, "ANTICIPATE": 1.68, "EXPOSE": 1.67,
+        "AUTOMATION": 1.67, "SUCKER_PUNCH": 1.66, "THRUMMING_HATCHET": 1.62,
+        "OMNISLICE": 1.61, "PRECISE_CUT": 1.58, "EXPERTISE": 1.57,
+        "FINESSE": 1.48, "DEADLY_POISON": 1.47, "BLADE_DANCE": 1.46,
+        "PANIC_BUTTON": 1.44, "DAGGER_SPRAY": 1.41, "LEADING_STRIKE": 1.38,
+        "HIDDEN_DAGGERS": 1.37, "BACKSTAB": 1.37, "DAGGER_THROW": 1.35,
+        "DEFLECT": 1.29, "CLOAK_AND_DAGGER": 1.22, "DODGE_AND_ROLL": 1.2,
+        "SNAKEBITE": 1.11, "RICOCHET": 1.1, "POISONED_STAB": 1.07,
+    }
     for sample in (option_samples or []):
         try:
             state_tensors = {k: v.to(device) for k, v in sample.state_tensors.items()}
@@ -644,9 +659,20 @@ def train_batch(
                 # Ranking loss: cards-vs-cards ONLY (skip excluded).
                 # This prevents the self-reinforcing skip collapse where
                 # 92% loss rate pushes all cards below skip.
+                #
+                # Empirical boost: cards with high deck-win-rate lift get
+                # a stronger ranking signal (up to 2x RANK_BETA), pushing
+                # the network harder toward picking proven winners.
                 num_opts = scores.shape[1]
                 skip_idx = num_opts - 1  # last option is always skip
                 if num_opts > 2 and sample.chosen_idx != skip_idx:
+                    # Look up empirical lift for the chosen card
+                    chosen_card_vid = sample.option_cards[sample.chosen_idx]
+                    chosen_card_name = vocabs.cards.idx_to_token.get(chosen_card_vid, "")
+                    card_lift = _CARD_LIFT.get(chosen_card_name, 1.0)
+                    # Boost beta: 1.0x at lift=1.0, up to 2.0x at lift=2.0+
+                    boosted_beta = RANK_BETA * min(2.0, max(0.5, card_lift))
+
                     rank_loss = torch.tensor(0.0, device=device)
                     chosen_s = scores[0, sample.chosen_idx]
                     n_compared = 0
@@ -663,7 +689,7 @@ def train_batch(
                         n_compared += 1
                     if n_compared > 0:
                         rank_loss = rank_loss / n_compared
-                        o_loss = o_loss + RANK_BETA * rank_loss
+                        o_loss = o_loss + boosted_beta * rank_loss
 
             # ---- All other options: generic option_eval_head ----
             else:

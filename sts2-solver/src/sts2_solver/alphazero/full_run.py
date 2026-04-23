@@ -1028,6 +1028,10 @@ def play_full_run(
             if c:
                 deck.extend([copy.copy(c) for _ in range(count)])
 
+    # Card exploration tracking: count how many times each card has been
+    # picked across this run. Used for decaying exploration (Option D).
+    _card_explore_counts: dict[str, int] = {}  # card_id → times picked in this run
+
     # Card pools
     char_color = char_data.get("color", "green")
     color_map = {"red": "ironclad", "green": "silent", "blue": "defect",
@@ -1346,6 +1350,46 @@ def play_full_run(
                     mcts, vocabs, config, card_db,
                     relics=frozenset(relics),
                 )
+
+                # ----------------------------------------------------------
+                # Decaying exploration for underpicked cards (Option D).
+                # If the network picked a card, sometimes override to an
+                # alternative that has high empirical win correlation but
+                # few picks so far. Exploration rate decays as the card
+                # accumulates picks: rate = 0.3 / sqrt(1 + times_picked).
+                # At 0 picks: 30%, at 4 picks: 13%, at 9 picks: 10%,
+                # at 25 picks: 6%, at 100 picks: 3%.
+                # ----------------------------------------------------------
+                _EXPLORE_CARD_LIFT = {
+                    "BLADE_DANCE": 1.46, "HIDDEN_DAGGERS": 1.37,
+                    "DAGGER_THROW": 1.35, "LEADING_STRIKE": 1.38,
+                    "PANIC_BUTTON": 1.44, "CLOAK_AND_DAGGER": 1.22,
+                    "SUCKER_PUNCH": 1.66, "DARK_SHACKLES": 2.4,
+                    "BOUNCING_FLASK": 1.73, "EXPOSE": 1.67,
+                    "PRECISE_CUT": 1.58, "BACKSTAB": 1.37,
+                }
+                if pick is not None and offered and rng.random() < 0.3:
+                    # Find underexplored high-lift alternatives
+                    explore_candidates = []
+                    for i, card in enumerate(offered):
+                        if card.id == (pick.id if pick else ""):
+                            continue
+                        lift = _EXPLORE_CARD_LIFT.get(card.id, 0)
+                        if lift >= 1.2:
+                            picks_so_far = _card_explore_counts.get(card.id, 0)
+                            explore_rate = 0.3 / (1 + picks_so_far) ** 0.5
+                            if rng.random() < explore_rate:
+                                explore_candidates.append((card, i))
+                    if explore_candidates:
+                        explore_card, explore_idx = rng.choice(explore_candidates)
+                        pick = explore_card
+                        if deck_sample is not None:
+                            deck_sample.chosen_idx = explore_idx
+
+                # Track picks for exploration decay
+                if pick is not None:
+                    _card_explore_counts[pick.id] = _card_explore_counts.get(pick.id, 0) + 1
+
                 run_log.append({
                     "floor": floor_num, "type": "card_reward",
                     "offered": [c.id for c in offered],
