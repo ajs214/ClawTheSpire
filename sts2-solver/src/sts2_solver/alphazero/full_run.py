@@ -142,19 +142,22 @@ def _pick_best_relic(
     owned: set[str],
     rng: random.Random,
     sample_size: int = 3,
-) -> str | None:
+) -> tuple[str | None, list[str]]:
     """Draw up to ``sample_size`` relics from ``pool`` and return the
-    one that scores highest against the current deck.
+    one that scores highest against the current deck, plus the full set
+    of offered options.
 
     Mirrors the in-game 1-of-3 drop choice the player would see, and
     uses :func:`relic_synergy.score_relic_for_deck` so the pick is
     deck-aware (prefers Kunai for shiv decks, Art of War for heavy
-    skill decks, etc).  Returns ``None`` if the pool is empty or the
-    player already owns everything.
+    skill decks, etc).  Returns ``(None, [])`` if the pool is empty or
+    the player already owns everything.  Otherwise returns
+    ``(best_relic_id, offered_list)`` where ``offered_list`` includes
+    the picked relic and all alternatives offered.
     """
     eligible = [r for r in pool if r not in owned]
     if not eligible:
-        return None
+        return None, []
     sample = rng.sample(eligible, min(sample_size, len(eligible)))
     try:
         from ..relic_synergy import score_relic_for_deck
@@ -164,11 +167,12 @@ def _pick_best_relic(
             score = score_relic_for_deck(display, deck)
             if score > best_score:
                 best_id, best_score = rid, score
-        return best_id
+        return best_id, sample
     except Exception:
         # If scoring blows up for any reason, fall back to a random
         # pick so we never silently drop a relic grant.
-        return rng.choice(sample)
+        chosen = rng.choice(sample)
+        return chosen, sample
 
 
 # Character starter relics
@@ -1148,7 +1152,7 @@ def play_full_run(
                 else:
                     deck.append(card)
             if _c.get("grants_relic"):
-                granted = _pick_best_relic(
+                granted, offered = _pick_best_relic(
                     IMPLEMENTED_RELIC_POOL, deck, relics, rng,
                 )
                 if granted is not None:
@@ -1313,7 +1317,7 @@ def play_full_run(
             # implemented-effects pool.  Previously this was a uniform
             # rng.choice over the same pool which ignored deck shape.
             if room_type == "elite":
-                granted = _pick_best_relic(
+                granted, offered = _pick_best_relic(
                     IMPLEMENTED_RELIC_POOL, deck, relics, rng,
                 )
                 if granted is not None:
@@ -1328,6 +1332,11 @@ def play_full_run(
                     run_log.append({
                         "floor": floor_num, "type": "relic_reward",
                         "source": "elite", "relic": granted,
+                        "offered": offered,
+                        "deck_size": len(deck),
+                        "deck_cards": [c.id for c in deck],
+                        "hp": hp,
+                        "max_hp": max_hp,
                     })
 
             if room_type != "boss":
@@ -1362,7 +1371,7 @@ def play_full_run(
                     deck_change_samples.append(deck_sample)
 
             if room_type == "boss":
-                granted = _pick_best_relic(
+                granted, offered = _pick_best_relic(
                     IMPLEMENTED_RELIC_POOL, deck, relics, rng,
                 )
                 if granted is not None:
@@ -1377,6 +1386,11 @@ def play_full_run(
                     run_log.append({
                         "floor": floor_num, "type": "relic_reward",
                         "source": "boss", "relic": granted,
+                        "offered": offered,
+                        "deck_size": len(deck),
+                        "deck_cards": [c.id for c in deck],
+                        "hp": hp,
+                        "max_hp": max_hp,
                     })
                 _assign_run_values(combat_samples_by_floor, floor_reached,
                                    len(room_sequence), hp, max_hp,
@@ -1604,12 +1618,14 @@ def play_full_run(
                         deck.append(card)
                 # V7: relic reward if event option grants a relic.
                 _event_relic = None
+                _event_relic_offered = []
                 if changes.get("grants_relic"):
-                    granted = _pick_best_relic(
+                    granted, offered = _pick_best_relic(
                         IMPLEMENTED_RELIC_POOL, deck, relics, rng,
                     )
                     if granted is not None:
                         _event_relic = granted
+                        _event_relic_offered = offered
                         hp, max_hp, gold, potion_slots_cap = _grant_relic(
                             relics, granted,
                             hp=hp, max_hp=max_hp, gold=gold,
@@ -1628,11 +1644,12 @@ def play_full_run(
                     "cards_removed": changes.get("cards_removed", []),
                     "cards_added": [c.id if hasattr(c, 'id') else str(c) for c in changes.get("cards_added", [])],
                     "relic_granted": _event_relic,
+                    "relic_offered": _event_relic_offered,
                     "hp_after": hp, "max_hp": max_hp, "gold": gold,
                 })
 
         elif room_type == "treasure":
-            granted = _pick_best_relic(
+            granted, offered = _pick_best_relic(
                 IMPLEMENTED_RELIC_POOL, deck, relics, rng,
             )
             if granted is not None:
@@ -1647,6 +1664,11 @@ def play_full_run(
                 run_log.append({
                     "floor": floor_num, "type": "treasure",
                     "relic": granted,
+                    "offered": offered,
+                    "deck_size": len(deck),
+                    "deck_cards": [c.id for c in deck],
+                    "hp": hp,
+                    "max_hp": max_hp,
                 })
 
         elif room_type == "shop":
