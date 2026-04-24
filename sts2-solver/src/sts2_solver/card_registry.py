@@ -816,6 +816,116 @@ def _fan_of_knives(card: Card, card_db: CardDB | None) -> CardEffect:
     return effect
 
 
+@register("HIDDEN_DAGGERS")
+def _hidden_daggers(card: Card, card_db: CardDB | None) -> CardEffect:
+    """Discard 2 cards. Add 2 Shivs to your hand."""
+    shiv_count = 2 if not card.upgraded else 2
+
+    def effect(state: CombatState, target_idx: int | None = None) -> None:
+        # Discard up to 2 cards from hand
+        hand_size = len(state.player.hand)
+        discard_count = min(2, hand_size)
+        for _ in range(discard_count):
+            if state.player.hand:
+                # Discard first card (or we could randomize, but first is simpler)
+                card_to_discard = state.player.hand.pop(0)
+                state.player.discard_pile.append(card_to_discard)
+                state.discards_this_turn += 1
+        # Add 2 Shivs to hand
+        for _ in range(shiv_count):
+            add_card_to_hand(state, _make_shiv())
+    return effect
+
+
+@register("FLECHETTES")
+def _flechettes(card: Card, card_db: CardDB | None) -> CardEffect:
+    """Deal 5 damage for each Skill in your hand."""
+    dmg_per_skill = 5 if not card.upgraded else 7
+
+    def effect(state: CombatState, target_idx: int | None = None) -> None:
+        if target_idx is not None:
+            # Count Skill cards in hand
+            skill_count = sum(1 for c in state.player.hand if c.card_type == CardType.SKILL)
+            total_damage = dmg_per_skill * skill_count
+            if total_damage > 0:
+                deal_damage(state, target_idx, total_damage)
+    return effect
+
+
+@register("DODGE_AND_ROLL")
+def _dodge_and_roll(card: Card, card_db: CardDB | None) -> CardEffect:
+    """Gain 4 Block. Next turn, gain 4 Block."""
+    block_val = 4 if not card.upgraded else 6
+
+    def effect(state: CombatState, target_idx: int | None = None) -> None:
+        # Gain block now
+        gain_block(state, block_val)
+        # Apply power to gain block next turn
+        # The combat engine may not trigger this yet, but we record it
+        apply_power_to_player(state, "DodgeAndRoll", block_val)
+    return effect
+
+
+@register("PREDATOR")
+def _predator(card: Card, card_db: CardDB | None) -> CardEffect:
+    """Deal 15 damage. Draw 2 additional cards next turn."""
+    dmg = 15 if not card.upgraded else 20
+
+    def effect(state: CombatState, target_idx: int | None = None) -> None:
+        if target_idx is not None:
+            deal_damage(state, target_idx, dmg)
+        # Apply power to draw 2 cards next turn
+        apply_power_to_player(state, "DrawCardNextTurn", 2)
+    return effect
+
+
+@register("BLUR")
+def _blur(card: Card, card_db: CardDB | None) -> CardEffect:
+    """Gain 5 Block. Block is not removed at the start of your next turn."""
+    block_val = 5 if not card.upgraded else 8
+
+    def effect(state: CombatState, target_idx: int | None = None) -> None:
+        gain_block(state, block_val)
+        # Apply Blur power to prevent block loss next turn
+        apply_power_to_player(state, "Blur", 1)
+    return effect
+
+
+@register("SHADOW_STEP")
+def _shadow_step(card: Card, card_db: CardDB | None) -> CardEffect:
+    """Discard your hand. Your Attacks deal double damage next turn."""
+    def effect(state: CombatState, target_idx: int | None = None) -> None:
+        # Discard all cards in hand
+        hand_cards = list(state.player.hand)
+        hand_size = len(hand_cards)
+        for card_in_hand in hand_cards:
+            state.player.hand.remove(card_in_hand)
+            state.player.discard_pile.append(card_in_hand)
+            state.discards_this_turn += 1
+        # Apply DoubleDamage power for next turn
+        apply_power_to_player(state, "DoubleDamage", 1)
+    return effect
+
+
+@register("HAND_TRICK")
+def _hand_trick(card: Card, card_db: CardDB | None) -> CardEffect:
+    """Gain 7 Block. A random Skill in your hand gains Sly."""
+    block_val = 7 if not card.upgraded else 10
+
+    def effect(state: CombatState, target_idx: int | None = None) -> None:
+        gain_block(state, block_val)
+        # Find all Skills in hand
+        skills_in_hand = [c for c in state.player.hand if c.card_type == CardType.SKILL]
+        if skills_in_hand:
+            # Pick a random Skill and add Sly effect
+            # NOTE: Sly keyword implementation is complex and requires engine changes.
+            # For now, we just gain the block. In the future, we should:
+            # - Mark a random Skill with Sly
+            # - Engine should trigger Sly effect when that Skill is discarded
+            pass
+    return effect
+
+
 # ---------------------------------------------------------------------------
 # Custom Neutral card implementations
 # ---------------------------------------------------------------------------

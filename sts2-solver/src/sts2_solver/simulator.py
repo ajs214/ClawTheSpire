@@ -254,8 +254,8 @@ ENEMY_MOVE_TABLES: dict[str, list[dict]] = {
 
     # ── New weak encounters ──
     "CORPSE_SLUG": [
-        {"type": "Attack", "damage": 5, "hits": 2},                # Whip Slap x2
-        {"type": "Attack", "damage": 10, "hits": 1},               # Glomp
+        {"type": "Attack", "damage": 3, "hits": 2},                # Whip Slap x2
+        {"type": "Attack", "damage": 8, "hits": 1},                # Glomp
         {"type": "Debuff", "player_frail": 1},                     # Goop
     ],
     "EXOSKELETON": [
@@ -264,40 +264,40 @@ ENEMY_MOVE_TABLES: dict[str, list[dict]] = {
         {"type": "Buff", "self_strength": 2},                       # Enrage
     ],
     "SCROLL_OF_BITING": [
-        {"type": "Attack", "damage": 10, "hits": 1},               # Chomp
-        {"type": "Attack", "damage": 4, "hits": 3},                # Chew x3
+        {"type": "Attack", "damage": 14, "hits": 1},               # Chomp
+        {"type": "Attack", "damage": 5, "hits": 3},                # Chew x3
         {"type": "Buff", "self_strength": 3},                       # More Teeth
     ],
     "SEAPUNK": [
-        {"type": "Attack", "damage": 9, "hits": 1},                # Sea Kick
-        {"type": "Attack", "damage": 6, "hits": 2},                # Spinning Kick x2
+        {"type": "Attack", "damage": 11, "hits": 1},               # Sea Kick
+        {"type": "Attack", "damage": 2, "hits": 2},                # Spinning Kick x2
         {"type": "Debuff", "player_weak": 1, "self_block": 6},    # Bubble Burp
     ],
     "SLUDGE_SPINNER": [
         {"type": "Debuff", "player_frail": 1, "player_weak": 1},  # Oil Spray
-        {"type": "Attack", "damage": 12, "hits": 1},               # Slam
+        {"type": "Attack", "damage": 8, "hits": 1},                # Slam
         {"type": "Buff", "self_strength": 2},                       # Rage
     ],
     "TUNNELER": [
-        {"type": "Attack", "damage": 8, "hits": 1},                # Bite
+        {"type": "Attack", "damage": 13, "hits": 1},               # Bite
         {"type": "Defend", "block": 10},                            # Burrow (digs down)
         {"type": "Attack", "damage": 14, "hits": 1},               # Below Move (emerges)
         {"type": "Debuff", "player_weak": 1},                      # Dizzy
     ],
     "TOADPOLE": [
-        {"type": "Attack", "damage": 6, "hits": 1},                # Spike Spit
-        {"type": "Attack", "damage": 3, "hits": 3},                # Whirl x3
+        {"type": "Attack", "damage": 3, "hits": 1},                # Spike Spit
+        {"type": "Attack", "damage": 7, "hits": 3},                # Whirl x3
         {"type": "Buff", "self_strength": 2, "self_block": 4},    # Spiken
     ],
     "THIEVING_HOPPER": [
         {"type": "Attack", "damage": 6, "hits": 1},                # Thievery (steals gold)
-        {"type": "Attack", "damage": 8, "hits": 1},                # Nab
-        {"type": "Attack", "damage": 4, "hits": 3},                # Hat Trick x3
+        {"type": "Attack", "damage": 14, "hits": 1},               # Nab
+        {"type": "Attack", "damage": 21, "hits": 3},               # Hat Trick x3
         {"type": "Defend", "block": 8},                             # Flutter
     ],
     "DEVOTED_SCULPTOR": [
         {"type": "Buff", "self_strength": 4},                       # Forbidden Incantation
-        {"type": "Attack", "damage": 16, "hits": 1},               # Savage
+        {"type": "Attack", "damage": 12, "hits": 1},               # Savage
     ],
     "WRIGGLER": [
         {"type": "Attack", "damage": 7, "hits": 1},                # Nasty Bite
@@ -327,14 +327,14 @@ ENEMY_MOVE_TABLES: dict[str, list[dict]] = {
         {"type": "Debuff", "player_frail": 2, "damage": 5},       # Toxic Spit
     ],
     "TWO_TAILED_RAT": [
-        {"type": "Attack", "damage": 5, "hits": 2},                # Scratch x2
-        {"type": "Attack", "damage": 8, "hits": 1, "player_frail": 1},  # Disease Bite
+        {"type": "Attack", "damage": 8, "hits": 2},                # Scratch x2
+        {"type": "Attack", "damage": 6, "hits": 1, "player_frail": 1},  # Disease Bite
         {"type": "Debuff", "player_weak": 1},                      # Screech
     ],
     "PUNCH_CONSTRUCT": [
         {"type": "Buff", "self_strength": 3},                       # Ready (charge up)
-        {"type": "Attack", "damage": 18, "hits": 1},               # Strong Punch
-        {"type": "Attack", "damage": 6, "hits": 3},                # Fast Punch x3
+        {"type": "Attack", "damage": 14, "hits": 1},               # Strong Punch
+        {"type": "Attack", "damage": 5, "hits": 3},                # Fast Punch x3
     ],
     "FROG_KNIGHT": [
         {"type": "Buff", "self_strength": 2, "self_block": 8},    # For the Queen
@@ -343,8 +343,8 @@ ENEMY_MOVE_TABLES: dict[str, list[dict]] = {
         {"type": "Attack", "damage": 35, "hits": 1},               # Beetle Charge
     ],
     "FOSSIL_STALKER": [
-        {"type": "Attack", "damage": 10, "hits": 1},               # Tackle
-        {"type": "Debuff", "player_vulnerable": 2, "damage": 6},  # Latch
+        {"type": "Attack", "damage": 9, "hits": 1},                # Tackle
+        {"type": "Debuff", "player_vulnerable": 2, "damage": 12},  # Latch
         {"type": "Attack", "damage": 4, "hits": 4},                # Lash x4
     ],
     "SPINY_TOAD": [
@@ -355,10 +355,10 @@ ENEMY_MOVE_TABLES: dict[str, list[dict]] = {
     "LIVING_FOG": [
         {"type": "Debuff", "player_frail": 1, "player_weak": 1},  # Advanced Gas
         {"type": "Buff", "self_strength": 3},                       # Bloat
-        {"type": "Attack", "damage": 18, "hits": 1},               # Super Gas Blast
+        {"type": "Attack", "damage": 8, "hits": 1},                # Super Gas Blast
     ],
     "GAS_BOMB": [
-        {"type": "Attack", "damage": 20, "hits": 1},               # Explode (dies after)
+        {"type": "Attack", "damage": 8, "hits": 1},                # Explode (dies after)
     ],
     "LOUSE_PROGENITOR": [
         {"type": "Attack", "damage": 8, "hits": 2},                # Web Cannon x2
@@ -367,46 +367,46 @@ ENEMY_MOVE_TABLES: dict[str, list[dict]] = {
     ],
     "HUNTER_KILLER": [
         {"type": "Debuff", "player_vulnerable": 2},                # Tenderizing Goop
-        {"type": "Attack", "damage": 12, "hits": 1},               # Bite
-        {"type": "Attack", "damage": 5, "hits": 3},                # Puncture x3
+        {"type": "Attack", "damage": 17, "hits": 1},               # Bite
+        {"type": "Attack", "damage": 7, "hits": 3},                # Puncture x3
     ],
     "FABRICATOR": [
         {"type": "Buff", "self_strength": 2, "self_block": 6},    # Fabricate
-        {"type": "Attack", "damage": 10, "hits": 1},               # Fabricating Strike
-        {"type": "Attack", "damage": 22, "hits": 1},               # Disintegrate
+        {"type": "Attack", "damage": 18, "hits": 1},               # Fabricating Strike
+        {"type": "Attack", "damage": 11, "hits": 1},               # Disintegrate
     ],
     "CALCIFIED_CULTIST": [
         {"type": "Buff", "self_strength": 2},                       # Ritual
         {"type": "Attack", "damage": 10, "hits": 1},               # Smash
-        {"type": "Attack", "damage": 6, "hits": 2},                # Dark Strike x2
+        {"type": "Attack", "damage": 9, "hits": 2},                # Dark Strike x2
     ],
     "DAMP_CULTIST": [
         {"type": "Debuff", "player_weak": 2},                      # Hex
-        {"type": "Attack", "damage": 8, "hits": 1},                # Chop
+        {"type": "Attack", "damage": 1, "hits": 1},                # Chop
         {"type": "Buff", "all_strength": 1},                        # Incantation
     ],
     "OWL_MAGISTRATE": [
         {"type": "Debuff", "player_frail": 2, "player_weak": 1},  # Judgement
-        {"type": "Attack", "damage": 10, "hits": 2},               # Talon Strike x2
+        {"type": "Attack", "damage": 4, "hits": 2},                # Talon Strike x2
         {"type": "Buff", "self_strength": 3, "self_block": 8},    # Roost
     ],
     "SLIMED_BERSERKER": [
-        {"type": "Attack", "damage": 7, "hits": 1},                # Slime Attack
+        {"type": "Attack", "damage": 30, "hits": 1},               # Slime Attack
         {"type": "Buff", "self_strength": 4},                       # Rage
         {"type": "Attack", "damage": 5, "hits": 3},                # Flurry x3
     ],
     "MYTE": [
-        {"type": "Attack", "damage": 4, "hits": 1},                # Nibble
+        {"type": "Attack", "damage": 13, "hits": 1},               # Nibble
         {"type": "Buff", "self_strength": 1},                       # Swarm
     ],
     "AXEBOT": [
         {"type": "Attack", "damage": 5, "hits": 1, "self_block": 5},   # Axe Swing (One-Two)
-        {"type": "Attack", "damage": 8, "hits": 1},                     # Hammer Uppercut
-        {"type": "Buff", "self_strength": 2},                            # Sharpen
+        {"type": "Attack", "damage": 8, "hits": 1},                    # Hammer Uppercut
+        {"type": "Buff", "self_strength": 2},                           # Sharpen
     ],
     "GLOBE_HEAD": [
         {"type": "Attack", "damage": 6, "hits": 1},                # Thunder Strike
-        {"type": "Debuff", "player_vulnerable": 1, "damage": 13}, # Shocking Slap
+        {"type": "Debuff", "player_vulnerable": 1, "damage": 13},  # Shocking Slap
         {"type": "Attack", "damage": 16, "hits": 1},               # Galvanic Burst
     ],
     "HAUNTED_SHIP": [
@@ -420,17 +420,17 @@ ENEMY_MOVE_TABLES: dict[str, list[dict]] = {
         {"type": "Attack", "damage": 10, "hits": 1},               # Jet
     ],
     "THE_LOST": [
-        {"type": "Attack", "damage": 6, "hits": 2},                # Slash x2
+        {"type": "Attack", "damage": 4, "hits": 2},                # Slash x2
         {"type": "Debuff", "player_frail": 1},                     # Haunt
     ],
     "THE_FORGOTTEN": [
-        {"type": "Attack", "damage": 12, "hits": 1},               # Crush
+        {"type": "Attack", "damage": 15, "hits": 1},               # Crush
         {"type": "Buff", "self_strength": 2, "self_block": 6},    # Remember
     ],
     "THE_OBSCURA": [
         {"type": "Debuff", "player_weak": 2, "player_frail": 1},  # Obscure
-        {"type": "Attack", "damage": 9, "hits": 2},                # Shadow Strike x2
-        {"type": "Attack", "damage": 16, "hits": 1},               # Void Blast
+        {"type": "Attack", "damage": 10, "hits": 2},               # Shadow Strike x2
+        {"type": "Attack", "damage": 6, "hits": 1},                # Void Blast
     ],
     "OVICOPTER": [
         {"type": "Attack", "damage": 16, "hits": 1},               # Smash
@@ -455,44 +455,44 @@ ENEMY_MOVE_TABLES: dict[str, list[dict]] = {
         {"type": "Attack", "damage": 20, "hits": 1},               # Devour
     ],
     "SKULKING_COLONY": [
-        {"type": "Attack", "damage": 4, "hits": 5},                # Swarm x5
+        {"type": "Attack", "damage": 16, "hits": 5},               # Swarm x5
         {"type": "Buff", "self_strength": 3, "self_block": 10},   # Regroup
-        {"type": "Attack", "damage": 18, "hits": 1},               # Colony Crush
+        {"type": "Attack", "damage": 6, "hits": 1},                # Colony Crush
         {"type": "Debuff", "player_weak": 2, "player_frail": 1},  # Overwhelm
     ],
     "MECHA_KNIGHT": [
-        {"type": "Attack", "damage": 12, "hits": 1, "self_block": 8},  # Shield Bash
-        {"type": "Attack", "damage": 8, "hits": 3},                     # Triple Strike x3
-        {"type": "Buff", "self_strength": 4},                            # Overclock
-        {"type": "Attack", "damage": 25, "hits": 1},                    # Mega Slash
+        {"type": "Attack", "damage": 25, "hits": 1, "self_block": 8},  # Shield Bash
+        {"type": "Attack", "damage": 8, "hits": 3},                    # Triple Strike x3
+        {"type": "Buff", "self_strength": 4},                           # Overclock
+        {"type": "Attack", "damage": 35, "hits": 1},                   # Mega Slash
     ],
     "INFESTED_PRISM": [
-        {"type": "Attack", "damage": 6, "hits": 3},                # Refracted Beam x3
+        {"type": "Attack", "damage": 22, "hits": 3},               # Refracted Beam x3
         {"type": "Debuff", "player_vulnerable": 2, "player_weak": 1},  # Prismatic Haze
-        {"type": "Attack", "damage": 20, "hits": 1},               # Overcharge
+        {"type": "Attack", "damage": 16, "hits": 1},               # Overcharge
         {"type": "Buff", "self_strength": 3, "self_block": 12},   # Crystal Shell
     ],
     "TERROR_EEL": [
-        {"type": "Attack", "damage": 5, "hits": 4},                # Electric Bite x4
+        {"type": "Attack", "damage": 17, "hits": 4},               # Electric Bite x4
         {"type": "Debuff", "player_frail": 2, "player_vulnerable": 2},  # Terrify
         {"type": "Attack", "damage": 22, "hits": 1},               # Thunder Slam
         {"type": "Buff", "self_strength": 4},                       # Charge Up
     ],
     "SOUL_NEXUS": [
         {"type": "Debuff", "player_weak": 3},                      # Soul Drain
-        {"type": "Attack", "damage": 8, "hits": 3},                # Spirit Barrage x3
+        {"type": "Attack", "damage": 29, "hits": 3},               # Spirit Barrage x3
         {"type": "Buff", "self_strength": 5},                       # Absorb
-        {"type": "Attack", "damage": 25, "hits": 1},               # Obliterate
+        {"type": "Attack", "damage": 6, "hits": 1},                # Obliterate
     ],
     "PHANTASMAL_GARDENER": [
         {"type": "Debuff", "player_frail": 2},                     # Wilt
-        {"type": "Attack", "damage": 10, "hits": 2},               # Vine Lash x2
+        {"type": "Attack", "damage": 5, "hits": 2},                # Vine Lash x2
         {"type": "Buff", "self_strength": 3, "self_block": 10},   # Overgrow
         {"type": "Attack", "damage": 7, "hits": 4},                # Thorn Storm x4
     ],
     "FLAIL_KNIGHT": [
-        {"type": "Attack", "damage": 14, "hits": 1},               # Flail Swing
-        {"type": "Attack", "damage": 6, "hits": 3},                # Chain Whip x3
+        {"type": "Attack", "damage": 9, "hits": 1},                # Flail Swing
+        {"type": "Attack", "damage": 15, "hits": 3},               # Chain Whip x3
         {"type": "Buff", "self_strength": 2, "self_block": 10},   # Rally
     ],
     "MAGI_KNIGHT": [
@@ -501,7 +501,7 @@ ENEMY_MOVE_TABLES: dict[str, list[dict]] = {
         {"type": "Buff", "all_strength": 2},                        # Empower (team buff)
     ],
     "SPECTRAL_KNIGHT": [
-        {"type": "Attack", "damage": 5, "hits": 4},                # Phase Strike x4
+        {"type": "Attack", "damage": 15, "hits": 4},               # Phase Strike x4
         {"type": "Debuff", "player_vulnerable": 2},                # Haunt
         {"type": "Defend", "block": 15},                            # Ethereal Shield
     ],
@@ -522,7 +522,7 @@ ENEMY_MOVE_TABLES: dict[str, list[dict]] = {
         {"type": "Attack", "damage": 15, "hits": 1},               # Stomp
         {"type": "Attack", "damage": 10, "hits": 1},               # Ram
         {"type": "Buff", "self_strength": 2},                       # Pressure Up
-        {"type": "Attack", "damage": 20, "hits": 1},               # Base Pressure Gun
+        {"type": "Attack", "damage": 13, "hits": 1},               # Base Pressure Gun
     ],
     "LAGAVULIN_MATRIARCH": [
         {"type": "Buff"},                                           # Sleep (asleep T1)
@@ -540,7 +540,7 @@ ENEMY_MOVE_TABLES: dict[str, list[dict]] = {
     ],
     "CRUSHER": [
         {"type": "Attack", "damage": 12, "hits": 1},               # Thrash
-        {"type": "Buff", "self_strength": 3, "self_block": 15},   # Adapt (harden/shell)
+        {"type": "Attack", "damage": 4, "hits": 1},                # Enlarging Strike
         {"type": "Attack", "damage": 6, "hits": 1},                # Bug Sting
         {"type": "Attack", "damage": 12, "hits": 1},               # Guarded Strike
     ],
@@ -552,7 +552,7 @@ ENEMY_MOVE_TABLES: dict[str, list[dict]] = {
     ],
     "QUEEN": [
         {"type": "Buff", "self_strength": 4, "self_block": 12},   # Puppet Strings
-        {"type": "Attack", "damage": 3, "hits": 1},                # Off With Your Head
+        {"type": "Attack", "damage": 15, "hits": 1},               # Off With Your Head
         {"type": "Debuff", "player_frail": 2, "player_weak": 2},  # Burn Bright for Me
         {"type": "Attack", "damage": 15, "hits": 1},               # Execution
     ],
@@ -565,7 +565,7 @@ ENEMY_MOVE_TABLES: dict[str, list[dict]] = {
     "SOUL_FYSH": [
         {"type": "Debuff", "player_weak": 2},                      # Beckon
         {"type": "Attack", "damage": 16, "hits": 1},               # De-Gas
-        {"type": "Buff", "self_strength": 3},                       # Gaze
+        {"type": "Attack", "damage": 7, "hits": 1},                # Gaze
         {"type": "Debuff", "player_frail": 1},                     # Fade (escape)
         {"type": "Attack", "damage": 11, "hits": 1},               # Scream
     ],
@@ -615,7 +615,7 @@ ENEMY_MOVE_TABLES: dict[str, list[dict]] = {
     ],
     "LIVING_SHIELD": [
         {"type": "Attack", "damage": 16, "hits": 1},               # Smash
-        {"type": "Defend", "block": 6},                             # Shield Slam
+        {"type": "Attack", "damage": 6, "hits": 1},                # Shield Slam
     ],
     "NOISEBOT": [
         {"type": "Debuff", "player_frail": 1, "player_vulnerable": 1},  # Noise
