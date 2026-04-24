@@ -20,7 +20,7 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_PORT = 8090
 HISTORY_FILE = SCRIPT_DIR / "dashboard_history.json"
-BOSS_FLOOR = 17
+BOSS_FLOOR = 15
 
 # Boss-fight log files — checkpoint dirs contain boss_fights.jsonl
 BOSS_LOG_DIRS = {
@@ -771,7 +771,7 @@ const VERSIONS = ['early','v5','v6','v7','v8','v9','v10','v11','v12','v13','v14'
 const EARLY_SOURCES = ['v1','v2','v3','v4'];
 // Last 5 display versions for the win rate chart (legacy, kept for version table)
 const RECENT_VERSIONS = ['v9','v10','v11','v12','v13','v14','v15','v16'];
-const BOSS_FLOOR = 17;
+const BOSS_FLOOR = 15;
 
 // ---- Lineage definitions ----
 // Each lineage is a cold-start chain. Versions within a lineage are warm
@@ -1288,14 +1288,14 @@ function updateGames(games, gameBossMap) {
   const body = document.getElementById('games-body');
   body.innerHTML = games.slice().reverse().map(g => {
     const cls = g.outcome==='win' ? 'win' : 'lose';
-    const pct = Math.min(100,(g.floor/17)*100);
+    const pct = Math.min(100,(g.floor/BOSS_FLOOR)*100);
     const barColor = g.outcome==='win' ? '#3fb950' : '#f85149';
     const arch = g.archetype||'';
     const archColor = ARCH_COLORS[arch]||'#8b949e';
     const commit = g.commitment!=null ? `<span class="commitment-badge">${(g.commitment*100).toFixed(0)}%</span>` : '';
     const bossId = gameBossMap[String(g.num)]||'';
-    const bossName = bossId ? humanizeBoss(bossId) : (g.floor>=17?'?':'-');
-    const bossColor = g.outcome==='win'?'#3fb950':(g.floor>=17?'#f85149':'#484f58');
+    const bossName = bossId ? humanizeBoss(bossId) : (g.floor>=BOSS_FLOOR?'?':'-');
+    const bossColor = g.outcome==='win'?'#3fb950':(g.floor>=BOSS_FLOOR?'#f85149':'#484f58');
     return `<tr>
       <td>${g.num||''}</td><td>${g.encounter||''}</td>
       <td style="color:${bossColor};font-size:0.8em">${bossName}</td>

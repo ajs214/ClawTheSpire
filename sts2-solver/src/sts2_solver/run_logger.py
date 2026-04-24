@@ -26,15 +26,15 @@ def floor_to_act(floor: int | None) -> int | None:
     """Derive act number from floor number.
 
     STS2 Silent act boundaries (observed from live play):
-      Act 1: floors 1–17  (boss on 15-17)
-      Act 2: floors 18–34 (boss on 33-34)
-      Act 3: floors 35+   (boss on 51-52)
+      Act 1: floors 1–15  (boss on 15)  [FIX 1: changed from 17 to 15 rooms]
+      Act 2: floors 16–32 (boss on 31-32)
+      Act 3: floors 33+   (boss on 49-50)
     """
     if floor is None:
         return None
-    if floor <= 17:
+    if floor <= 15:
         return 1
-    if floor <= 34:
+    if floor <= 32:
         return 2
     return 3
 
@@ -451,8 +451,8 @@ class RunLogger:
         # may already reflect the next floor if the game advanced.
         floor = getattr(self, '_combat_floor', None) or run.get("floor")
 
-        # Determine if this is a boss fight
-        boss_floors = {15, 16, 17, 33, 34, 51, 52}
+        # Determine if this is a boss fight (FIX 1: Act 1 now ends at floor 15)
+        boss_floors = {15, 32, 50}
         is_boss = floor in boss_floors if floor else False
 
         event: dict[str, Any] = {

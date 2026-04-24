@@ -522,8 +522,8 @@ def build_rest_message(state: dict, game_data: GameDataDB) -> str:
     floor = run.get("floor", 0)
     hp_pct = hp / max_hp if max_hp > 0 else 0
 
-    # Boss floors are typically 17, 34, 52
-    pre_boss = floor in (15, 16, 33, 34, 51, 52)
+    # Boss floors are 15, 32, 50 (Act 1 has 15 rooms)
+    pre_boss = floor in (14, 15, 31, 32, 49, 50)
     character = detect_character(state)
 
     # Silent has lower max HP (70) — use more aggressive rest thresholds

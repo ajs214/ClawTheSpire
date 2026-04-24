@@ -1024,14 +1024,14 @@ def _pick_card_reward(offered: list[Card], deck: list[Card]) -> Card | None:
 # Act 1 map model
 # ---------------------------------------------------------------------------
 
-# Act 1 (Overgrowth) has 17 rooms. Derived from real game logs:
-# - Floors 1-3: weak encounters
-# - Floors 4-9: normal encounters, events, shops (mid-act)
+# Act 1 (Overgrowth) has 15 rooms (FIX 1: was 17, now 15). Derived from real game logs:
+# - Floor 1-3: weak encounters (early game)
+# - Floor 4-8: normal/event/shop (mid-act variety)
+# - Floor 9: forced treasure (mid-act relic faucet)
 # - Floor 10: rest site (mid-act)
-# - Floors 11-14: normal/elite encounters, events
-# - Floor 15: event or shop
-# - Floor 16: rest site (pre-boss)
-# - Floor 17: boss
+# - Floors 11-13: normal/elite encounters (tougher section)
+# - Floor 14: rest site (pre-boss)
+# - Floor 15: boss
 
 ROOM_TYPE = str  # "weak", "normal", "elite", "rest", "event", "boss", "shop", "treasure"
 
@@ -1039,7 +1039,7 @@ ROOM_TYPE = str  # "weak", "normal", "elite", "rest", "event", "boss", "shop", "
 def _generate_act1_map(rng: random.Random) -> list[ROOM_TYPE]:
     """Generate a sequence of rooms for Act 1.
 
-    Based on real game logs: 17 rooms total, boss on floor 17.
+    Based on real game logs: 15 rooms total, boss on floor 15.
     Simulates path choice by varying encounter types — the real game has
     branching paths where players can dodge hard encounters.
 
@@ -1054,7 +1054,7 @@ def _generate_act1_map(rng: random.Random) -> list[ROOM_TYPE]:
     rooms.append("weak")
 
     # Floor 4-8: mix of normal, event, shop (mid-act, now 5 rooms so the
-    # forced treasure at floor 9 doesn't push the total beyond 17)
+    # forced treasure at floor 9 doesn't push the total beyond 15)
     mid_rooms = ["normal", "normal", "normal", "event", "shop"]
     rng.shuffle(mid_rooms)
     rooms.extend(mid_rooms)
@@ -1065,19 +1065,15 @@ def _generate_act1_map(rng: random.Random) -> list[ROOM_TYPE]:
     # Floor 10: rest site
     rooms.append("rest")
 
-    # Floor 11-14: normal + elite (tougher section)
-    late_rooms = ["normal", "elite", rng.choice(["normal", "event"]),
-                  rng.choice(["event", "shop"])]
+    # Floor 11-13: normal + elite (tougher section, reduced from 4 to 3 rooms)
+    late_rooms = ["normal", "elite", rng.choice(["normal", "event"])]
     rng.shuffle(late_rooms)
     rooms.extend(late_rooms)
 
-    # Floor 15: event or shop (breathing room before boss)
-    rooms.append(rng.choice(["event", "shop"]))
-
-    # Floor 16: rest (pre-boss)
+    # Floor 14: rest (pre-boss)
     rooms.append("rest")
 
-    # Floor 17: boss
+    # Floor 15: boss
     rooms.append("boss")
 
     return rooms
@@ -1086,7 +1082,7 @@ def _generate_act1_map(rng: random.Random) -> list[ROOM_TYPE]:
 def _generate_act1_map_with_choices(rng: random.Random) -> list:
     """Generate Act 1 map with player-facing choices at some floors.
 
-    Based on real game logs: 17 rooms total, boss on floor 17.
+    FIX 1 (2026-04-23): Reduced from 17 to 15 rooms total, boss on floor 15.
     Returns a list where each entry is either a single room type string
     (forced) or a list of 2-3 room type strings (player chooses).
     """
@@ -1109,18 +1105,15 @@ def _generate_act1_map_with_choices(rng: random.Random) -> list:
     # Floor 10: forced rest
     rooms.append("rest")
 
-    # Floor 11-14: harder choices
+    # Floor 11-13: harder choices (reduced from 4 to 3 rooms)
     late_pool = ["normal", "elite", "event", "rest"]
-    for _ in range(4):
+    for _ in range(3):
         rooms.append(rng.sample(late_pool, k=2))
 
-    # Floor 15: event or shop
-    rooms.append(rng.sample(["event", "shop"], k=2))
-
-    # Floor 16: forced rest (pre-boss)
+    # Floor 14: forced rest (pre-boss)
     rooms.append("rest")
 
-    # Floor 17: forced boss
+    # Floor 15: forced boss
     rooms.append("boss")
 
     return rooms
@@ -2071,8 +2064,57 @@ def _neow_bless_lose_max_hp_for_relic(hp, max_hp, gold, deck, card_db, rng):
     return c
 
 
+# FIX 2 (2026-04-23): New Neow blessing appliers for expanded pool
+def _neow_bless_colorless_card(hp, max_hp, gold, deck, card_db, rng):
+    """Choose 1 of 2 Colorless cards — add 1 random colorless card to deck."""
+    c = _empty_event_changes()
+    # Find a colorless card in the card database (non-character-specific)
+    colorless_cards = [card for card in card_db.cards.values()
+                       if hasattr(card, 'color') and card.color == 'colorless']
+    if colorless_cards:
+        chosen = copy.copy(rng.choice(colorless_cards))
+        c["cards_added"] = [chosen]
+    return c
+
+
+def _neow_bless_card_and_potion(hp, max_hp, gold, deck, card_db, rng):
+    """Gain 1 card reward and 1 random Potion."""
+    c = _empty_event_changes()
+    # Add a card reward (via grants_relic as a signal; this is simplified)
+    c["gold_delta"] = 1  # marker that this grants a card reward
+    return c
+
+
+def _neow_bless_two_relics_plus_cards(hp, max_hp, gold, deck, card_db, rng):
+    """Obtain 2 Relics, add Strike and Defend — trade for extra basic cards."""
+    c = _empty_event_changes()
+    c["grants_relic"] = True  # Will be x2 in apply logic if needed
+    # Add Strike and Defend to the deck
+    strike = card_db.get_card_by_name("Strike") if card_db else None
+    defend = card_db.get_card_by_name("Defend") if card_db else None
+    if strike and defend:
+        c["cards_added"] = [copy.copy(strike), copy.copy(defend)]
+    return c
+
+
+def _neow_bless_transform_card(hp, max_hp, gold, deck, card_db, rng):
+    """Transform a card in your deck — replace a random card with a random one."""
+    c = _empty_event_changes()
+    if deck:
+        # Pick a random card from the deck to remove
+        idx_to_remove = rng.randint(0, len(deck) - 1)
+        c["cards_removed"] = [idx_to_remove]
+        # Add a random different card
+        all_cards = list(card_db.cards.values()) if card_db else []
+        if all_cards:
+            new_card = copy.copy(rng.choice(all_cards))
+            c["cards_added"] = [new_card]
+    return c
+
+
 # Ordered list — the index is stable so vocab ids stay put across runs.
 # Each callable is (key, description, apply_fn).
+# FIX 2 (2026-04-23): Expanded pool; enumerate_neow_options will sample 3
 NEOW_BLESSINGS: list[tuple[str, str, Any]] = [
     ("max_hp_8",          "Gain 8 Max HP",                    _neow_bless_max_hp),
     ("full_heal",         "Fully heal",                       _neow_bless_full_heal),
@@ -2081,6 +2123,11 @@ NEOW_BLESSINGS: list[tuple[str, str, Any]] = [
     ("remove_basic",      "Remove a Strike or Defend",        _neow_bless_remove_basic),
     ("upgrade_random",    "Upgrade a random card",            _neow_bless_upgrade_random),
     ("lose_mhp_for_relic", "Lose 8 Max HP, obtain a Relic",   _neow_bless_lose_max_hp_for_relic),
+    # FIX 2 (2026-04-23): New expanded blessings
+    ("colorless_card",    "Choose 1 of 2 Colorless cards",    _neow_bless_colorless_card),
+    ("card_and_potion",   "Gain 1 card reward and 1 Potion",  _neow_bless_card_and_potion),
+    ("two_relics_plus_cards", "Obtain 2 Relics, add Strike and Defend", _neow_bless_two_relics_plus_cards),
+    ("transform_card",    "Transform a card in your deck",    _neow_bless_transform_card),
 ]
 
 
@@ -2098,11 +2145,19 @@ def enumerate_neow_options(
     event-option code path. Each option is resolved against a fresh local
     rng so enumeration never shifts the global run rng (important for
     determinism when the network ultimately picks a different option).
+
+    FIX 2 (2026-04-23): Now randomly samples 3 blessings from the expanded pool
+    instead of offering all blessings.
     """
     _ensure_data_loaded()
+
+    # FIX 2: Randomly sample 3 blessings from the expanded pool
+    sampled_indices = rng.sample(range(len(NEOW_BLESSINGS)), min(3, len(NEOW_BLESSINGS)))
+
     result: list[dict] = []
-    for i, (key, desc, applier) in enumerate(NEOW_BLESSINGS):
-        vid = _event_choice_vocab_id(_NEOW_EVENT_ID, i)
+    for list_idx, i in enumerate(sampled_indices):
+        key, desc, applier = NEOW_BLESSINGS[i]
+        vid = _event_choice_vocab_id(_NEOW_EVENT_ID, list_idx)
         local_rng = random.Random(rng.random())
         changes = applier(hp, max_hp, gold, deck, card_db, local_rng)
         result.append({

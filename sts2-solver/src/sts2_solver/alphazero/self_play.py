@@ -931,7 +931,7 @@ def train_worker(
     total_games = 0
     total_boss_reached = 0   # runs where floor_reached >= BOSS_FLOOR
     total_boss_wins = 0      # runs that beat the boss outright
-    BOSS_FLOOR = 17          # Act 1 boss floor
+    BOSS_FLOOR = 15          # Act 1 boss floor (FIX 1: was 17, now 15 rooms)
     recent_games: list[dict] = []
 
     # V8: relic telemetry (cumulative pickups across all runs)

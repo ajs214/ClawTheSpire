@@ -238,7 +238,7 @@ _STARTER_NAMES = frozenset({"strike", "defend", "survivor", "neutralize"})
 # cards the previous picker was systematically rejecting when it
 # committed to shiv/poison/sly too early.
 #
-# Bonus is additive to score_card and only applies in Act 1 (floor < 17)
+# Bonus is additive to score_card and only applies in Act 1 (floor < 15; FIX 1: was 17)
 # where the picker has the least information and the data is cleanest.
 # Kept modest (+0.10) so it nudges rather than dominates.
 _ACT1_PREMIUM_NEUTRALS = frozenset({
@@ -706,8 +706,9 @@ def score_card(
     # V7: Act-1 premium-neutral bonus.  Empirically-derived from the V6
     # boss-log: these cards have the highest win-lift in Act 1 and are
     # all neutral generalists.  Small +0.10 nudge, Act 1 only.
+    # FIX 1: floor boundary changed from 17 to 15
     premium_bonus = 0.0
-    if floor < 17 and _is_premium_neutral(card):
+    if floor < 15 and _is_premium_neutral(card):
         premium_bonus = 0.10
 
     score = (
