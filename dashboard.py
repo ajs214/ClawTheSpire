@@ -35,6 +35,7 @@ BOSS_LOG_DIRS = {
     "v14": "alphazero_checkpoints_v14",
     "v15": "alphazero_checkpoints_v15",
     "v16": "alphazero_checkpoints_v16",
+    "v17": "alphazero_checkpoints_v17",
 }
 
 # Cached boss data (refreshed by poll thread)
@@ -383,12 +384,13 @@ VERSION_FILES = {
     "v14": "training_v14_progress.json",
     "v15": "training_v15_progress.json",
     "v16": "training_v16_progress.json",
+    "v17": "training_v17_progress.json",
 }
 
 # --- Shared state ---
 lock = threading.Lock()
 all_history: dict[str, list[dict]] = {
-    "v1": [], "v2": [], "v3": [], "v4": [], "v5": [], "v6": [], "v7": [], "v8": [], "v9": [], "v10": [], "v11": [], "v12": [], "v13": [], "v14": [], "v15": [], "v16": [],
+    "v1": [], "v2": [], "v3": [], "v4": [], "v5": [], "v6": [], "v7": [], "v8": [], "v9": [], "v10": [], "v11": [], "v12": [], "v13": [], "v14": [], "v15": [], "v16": [], "v17": [],
 }
 snapshots: dict[str, dict] = {}
 active_version: str = ""  # whichever is currently training
@@ -607,7 +609,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 
   /* Version colors */
   .earlyc{color:#6e7681} .v5c{color:#bc8cff} .v6c{color:#ff7b72} .v7c{color:#ffa657}
-  .v8c{color:#2ea9e6} .v9c{color:#39d353} .v10c{color:#f0883e} .v11c{color:#e05dff} .v12c{color:#00d4aa} .v13c{color:#ff6b9d} .v14c{color:#79c0ff} .v15c{color:#ffd700} .v16c{color:#ff6347}
+  .v8c{color:#2ea9e6} .v9c{color:#39d353} .v10c{color:#f0883e} .v11c{color:#e05dff} .v12c{color:#00d4aa} .v13c{color:#ff6b9d} .v14c{color:#79c0ff} .v15c{color:#ffd700} .v16c{color:#ff6347} .v17c{color:#7b68ee}
 
   /* Boss table */
   .boss-row td { text-align:left; }
@@ -765,12 +767,12 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <div class="updated" id="updated"></div>
 
 <script>
-const COLORS = { early:'#6e7681', v1:'#6e7681', v2:'#7c858d', v3:'#8a939a', v4:'#99a1a8', v5:'#bc8cff', v6:'#ff7b72', v7:'#ffa657', v8:'#2ea9e6', v9:'#39d353', v10:'#f0883e', v11:'#e05dff', v12:'#00d4aa', v13:'#ff6b9d', v14:'#79c0ff', v15:'#ffd700', v16:'#ff6347' };
-const LABELS = { early:'Early (V1-V4)', v1:'V1', v2:'V2', v3:'V3', v4:'V4', v5:'V5', v6:'V6', v7:'V7', v8:'V8', v9:'V9', v10:'V10', v11:'V11', v12:'V12', v13:'V13', v14:'V14', v15:'V15', v16:'V16' };
-const VERSIONS = ['early','v5','v6','v7','v8','v9','v10','v11','v12','v13','v14','v15','v16'];
+const COLORS = { early:'#6e7681', v1:'#6e7681', v2:'#7c858d', v3:'#8a939a', v4:'#99a1a8', v5:'#bc8cff', v6:'#ff7b72', v7:'#ffa657', v8:'#2ea9e6', v9:'#39d353', v10:'#f0883e', v11:'#e05dff', v12:'#00d4aa', v13:'#ff6b9d', v14:'#79c0ff', v15:'#ffd700', v16:'#ff6347', v17:'#7b68ee' };
+const LABELS = { early:'Early (V1-V4)', v1:'V1', v2:'V2', v3:'V3', v4:'V4', v5:'V5', v6:'V6', v7:'V7', v8:'V8', v9:'V9', v10:'V10', v11:'V11', v12:'V12', v13:'V13', v14:'V14', v15:'V15', v16:'V16', v17:'V17' };
+const VERSIONS = ['early','v5','v6','v7','v8','v9','v10','v11','v12','v13','v14','v15','v16','v17'];
 const EARLY_SOURCES = ['v1','v2','v3','v4'];
 // Last 5 display versions for the win rate chart (legacy, kept for version table)
-const RECENT_VERSIONS = ['v9','v10','v11','v12','v13','v14','v15','v16'];
+const RECENT_VERSIONS = ['v9','v10','v11','v12','v13','v14','v15','v16','v17'];
 const BOSS_FLOOR = 17;
 
 // ---- Lineage definitions ----
@@ -782,7 +784,7 @@ const LINEAGES = [
   { id: 'L3', label: 'V13',       versions: ['v13'] },
   { id: 'L4', label: 'V14',       versions: ['v14'] },
   { id: 'L5', label: 'V15',       versions: ['v15'] },
-  { id: 'L6', label: 'V16',       versions: ['v16'] },
+  { id: 'L6', label: 'V16–V17', versions: ['v16','v17'] },
 ];
 
 const ARCH_COLORS = { poison:'#3fb950', shiv:'#d29922', sly:'#58a6ff', mixed:'#bc8cff', undecided:'#484f58', unknown:'#30363d' };
@@ -1391,7 +1393,7 @@ function updateLiveTab(liveRuns, activeVer) {
     const bossInfo = (r.boss_fights||[]).map(bf=>humanizeBoss(bf.encounter_id)||'?').join(', ')||'-';
     const bossColor = r.boss_fights&&r.boss_fights.length ? (r.boss_fights.some(bf=>bf.outcome==='win')?'#3fb950':'#f85149') : '#484f58';
     const relicCount = (r.relics_gained||[]).length + (r.starting_relics||[]).length;
-    const verColor = {'v9':'#39d353','v10':'#f0883e','v11':'#e05dff','v12':'#00d4aa','v13':'#ff6b9d','v14':'#79c0ff','v15':'#ffd700','v16':'#ff6347'}[r.train_version]||'#8b949e';
+    const verColor = {'v9':'#39d353','v10':'#f0883e','v11':'#e05dff','v12':'#00d4aa','v13':'#ff6b9d','v14':'#79c0ff','v15':'#ffd700','v16':'#ff6347','v17':'#7b68ee'}[r.train_version]||'#8b949e';
     return `<tr onclick="showRunDetail('${r.run_id}')">
       <td style="color:${verColor};font-weight:bold;font-size:0.8em">${r.train_version||'?'}</td>
       <td>${r.config_profile||'?'}</td>
@@ -1487,7 +1489,7 @@ async function poll() {
     const histDisplay = { early: earlyHist };
     const snapsDisplay = {};
     if (earlySnap) snapsDisplay.early = earlySnap;
-    for (const v of ['v5','v6','v7','v8','v9','v10','v11','v12','v13','v14','v15','v16']) {
+    for (const v of ['v5','v6','v7','v8','v9','v10','v11','v12','v13','v14','v15','v16','v17']) {
       histDisplay[v] = d.history[v] || [];
       if (d.snapshots[v]) {
         const copy = Object.assign({}, d.snapshots[v]);
