@@ -1712,13 +1712,15 @@ def _resolve_sim_intents(state: CombatState, ais: list[EnemyAI]) -> None:
         # move table doesn't specify.
         if intent.get("type") == "StatusCard":
             from .models import Card
+            from .constants import CardType, TargetType
             n_cards = intent.get("status_count", 2)
             status_id = intent.get("status_card_id", "Dazed")
             status_name = intent.get("status_card_name", status_id)
             for _ in range(n_cards):
                 junk = Card(
                     id=status_id, name=status_name, cost=99,
-                    card_type="Status", target="none", upgraded=False,
+                    card_type=CardType.STATUS, target=TargetType.SELF,
+                    upgraded=False,
                 )
                 state.player.discard_pile.append(junk)
 
