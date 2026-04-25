@@ -20,7 +20,7 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_PORT = 8090
 HISTORY_FILE = SCRIPT_DIR / "dashboard_history.json"
-BOSS_FLOOR = 15
+BOSS_FLOOR = 17
 
 # Boss-fight log files — checkpoint dirs contain boss_fights.jsonl
 BOSS_LOG_DIRS = {
@@ -771,7 +771,7 @@ const VERSIONS = ['early','v5','v6','v7','v8','v9','v10','v11','v12','v13','v14'
 const EARLY_SOURCES = ['v1','v2','v3','v4'];
 // Last 5 display versions for the win rate chart (legacy, kept for version table)
 const RECENT_VERSIONS = ['v9','v10','v11','v12','v13','v14','v15','v16'];
-const BOSS_FLOOR = 15;
+const BOSS_FLOOR = 17;
 
 // ---- Lineage definitions ----
 // Each lineage is a cold-start chain. Versions within a lineage are warm
@@ -1320,14 +1320,17 @@ function updateLiveTab(liveRuns, activeVer) {
   const curRuns = liveRuns.filter(r=>r.train_version===rawActiveVer);
   const allCompleted = liveRuns.filter(r=>r.outcome!=='in_progress');
 
-  // Resolve outcomes: in_progress (non-latest) = defeat, floor>=18 but not win = act1 victory
+  // Resolve outcomes: in_progress (non-latest) = defeat, floor>=17 = boss fight
   const latest = liveRuns[liveRuns.length-1];
   const resolved = liveRuns.map(r => {
     let outcome = r.outcome;
     if (outcome==='in_progress' && r!==latest) outcome = 'defeat';
-    // Act 1 victory: reached beyond boss floor but didn't win the whole game
-    if (outcome==='defeat' && (r.floor||0) > BOSS_FLOOR) outcome = 'act1_victory';
-    if (outcome==='win') outcome = 'act1_victory'; // wins are also act 1 victories
+    // Boss defeat: died on the boss floor
+    if (outcome==='defeat' && (r.floor||0) === BOSS_FLOOR) outcome = 'boss_defeat';
+    if (outcome==='boss_defeat') outcome = 'boss_defeat'; // preserve from logs
+    // Act 1 victory: reached beyond boss floor
+    if ((outcome==='defeat'||outcome==='victory') && (r.floor||0) > BOSS_FLOOR) outcome = 'act1_victory';
+    if (outcome==='win') outcome = 'act1_victory';
     return {...r, resolved_outcome: outcome};
   });
 
@@ -1375,12 +1378,13 @@ function updateLiveTab(liveRuns, activeVer) {
     lbb.innerHTML = '<tr><td colspan="5" style="color:#484f58;text-align:center">No boss fights yet</td></tr>';
   }
 
-  // Run table
+  // Run table — sort by run timestamp descending (newest first)
   const body = document.getElementById('live-runs-body');
-  const sorted = resolved.slice().reverse();
+  const sorted = resolved.slice().sort((a,b) => (b.ts||'').localeCompare(a.ts||''));
   body.innerHTML = sorted.map(r => {
     let outcomeLabel, outCls;
     if (r.resolved_outcome === 'act1_victory') { outcomeLabel='Act 1 Victory'; outCls='act1win'; }
+    else if (r.resolved_outcome === 'boss_defeat') { outcomeLabel='Boss Defeat'; outCls='lose'; }
     else if (r.resolved_outcome === 'in_progress') { outcomeLabel='In Progress'; outCls=''; }
     else { outcomeLabel='Defeat'; outCls='lose'; }
 

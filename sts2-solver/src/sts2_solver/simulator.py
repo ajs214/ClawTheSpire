@@ -134,7 +134,7 @@ ENEMY_MOVE_TABLES: dict[str, list[dict]] = {
         {"type": "Attack", "damage": 14, "hits": 1},                      # Headbutt
     ],
     "EYE_WITH_TEETH": [
-        {"type": "StatusCard"},                                            # Distract (adds 3 Dazed)
+        {"type": "StatusCard", "status_count": 3, "status_card_id": "Dazed", "status_card_name": "Dazed"},  # Distract (adds 3 Dazed)
     ],
     "CUBEX_CONSTRUCT": [
         {"type": "Buff", "self_strength": 2},                # Charge Up
@@ -251,6 +251,43 @@ ENEMY_MOVE_TABLES: dict[str, list[dict]] = {
         {"type": "Attack", "damage": 3, "hits": 5},                # Beam x5
         {"type": "Buff", "all_strength": 3},                       # Ritual (buffs team)
     ],
+
+}
+
+# Boss phase 2 tables — used when HP drops below threshold (default 50%).
+# Phase 2 is more aggressive: higher damage, more frequent attacks, stronger buffs.
+BOSS_PHASE2_TABLES: dict[str, dict] = {
+    "CEREMONIAL_BEAST": {
+        "table": [
+            {"type": "Buff", "self_strength": 5, "self_block": 20},    # Enraged Beast Cry
+            {"type": "Attack", "damage": 22, "hits": 1},               # Savage Plow
+            {"type": "Attack", "damage": 18, "hits": 2},               # Frenzied Stomp x2
+            {"type": "Attack", "damage": 25, "hits": 1},               # Devastating Crush
+        ],
+        "hp_pct": 0.50,
+    },
+    "VANTOM": {
+        "table": [
+            {"type": "Attack", "damage": 10, "hits": 2},               # Ink Barrage x2
+            {"type": "Attack", "damage": 8, "hits": 3},                # Inky Lance Flurry x3
+            {"type": "Buff", "self_strength": 6},                       # Desperate Prepare
+            {"type": "Attack", "damage": 35, "hits": 1},               # Savage Dismember
+        ],
+        "hp_pct": 0.50,
+    },
+    "KIN_PRIEST": {
+        "table": [
+            {"type": "Debuff", "player_frail": 3, "damage": 12},      # Greater Orb Of Frailty
+            {"type": "Debuff", "player_weak": 3, "damage": 12},       # Greater Orb Of Weakness
+            {"type": "Attack", "damage": 5, "hits": 5},                # Focused Beam x5
+            {"type": "Buff", "all_strength": 5},                       # Greater Ritual
+        ],
+        "hp_pct": 0.50,
+    },
+}
+
+# Remaining enemy move tables (split from main dict for readability)
+ENEMY_MOVE_TABLES.update({
 
     # ── New weak encounters ──
     "CORPSE_SLUG": [
@@ -663,7 +700,7 @@ ENEMY_MOVE_TABLES: dict[str, list[dict]] = {
     "ZAPBOT": [
         {"type": "Attack", "damage": 14, "hits": 1},               # Zap
     ],
-}
+})
 
 
 # Boss/elite monster IDs that use weighted random intent selection.
@@ -695,27 +732,52 @@ class EnemyAI:
     - **weighted**: weighted random selection from move_table with a
       max-consecutive constraint to prevent unrealistic repetition.
       Used for bosses and elites to produce more varied (realistic) play.
+
+    Phase transitions (bosses only):
+    - phase2_table: alternate move table used when enemy HP ≤ phase_hp_pct
+    - phase_hp_pct: fraction of max HP that triggers phase 2 (default 0.5)
+    - Once phase 2 activates, move_index resets and the AI uses phase2_table
     """
     monster_id: str
     move_table: list[dict]
     move_index: int = 0
     mode: str = "cycle"  # "cycle" or "weighted"
     recent_indices: list[int] = field(default_factory=list)
+    phase2_table: list[dict] | None = None
+    phase_hp_pct: float = 0.5
+    _in_phase2: bool = False
 
-    def pick_intent(self) -> dict:
-        """Return the next intent dict."""
-        if not self.move_table:
+    def pick_intent(self, enemy=None) -> dict:
+        """Return the next intent dict.
+
+        If enemy is provided and phase2_table is set, checks HP for
+        phase transition.
+        """
+        # Phase transition check
+        if (not self._in_phase2
+                and self.phase2_table is not None
+                and enemy is not None):
+            max_hp = getattr(enemy, "max_hp", 0) or 1
+            cur_hp = getattr(enemy, "hp", max_hp)
+            if cur_hp <= max_hp * self.phase_hp_pct:
+                self._in_phase2 = True
+                self.move_index = 0
+                self.recent_indices.clear()
+
+        active_table = self.phase2_table if self._in_phase2 else self.move_table
+
+        if not active_table:
             return {"type": "Attack", "damage": 8, "hits": 1}
 
-        if self.mode == "weighted" and len(self.move_table) > 1:
-            return self._pick_weighted()
+        if self.mode == "weighted" and len(active_table) > 1:
+            return self._pick_weighted(active_table)
 
         # Default: deterministic cycling
-        move = self.move_table[self.move_index % len(self.move_table)]
+        move = active_table[self.move_index % len(active_table)]
         self.move_index += 1
         return dict(move)
 
-    def _pick_weighted(self) -> dict:
+    def _pick_weighted(self, table: list[dict] | None = None) -> dict:
         """Weighted random move selection with max-consecutive constraint.
 
         Each move gets a base weight of 1.0. The first move in the table
@@ -723,7 +785,9 @@ class EnemyAI:
         that have been used consecutively get their weight reduced to
         prevent unrealistic repetition.
         """
-        n = len(self.move_table)
+        if table is None:
+            table = self.move_table
+        n = len(table)
         weights = [1.0] * n
 
         # Slight boost for the "opener" move on turn 1
@@ -753,20 +817,37 @@ class EnemyAI:
         if len(self.recent_indices) > 10:
             self.recent_indices = self.recent_indices[-10:]
         self.move_index += 1
-        return dict(self.move_table[chosen_idx])
+        return dict(table[chosen_idx])
 
 
-def _create_enemy_ai(monster_id: str) -> EnemyAI:
-    """Create an EnemyAI for a monster from data."""
+def _create_enemy_ai(monster_id: str,
+                     observed_damage: int | None = None,
+                     observed_hits: int = 1) -> EnemyAI:
+    """Create an EnemyAI for a monster from data.
+
+    Args:
+        monster_id: The monster's identifier.
+        observed_damage: If provided, use this as the attack damage for
+            unknown enemies instead of the hardcoded default.  This lets
+            live-play callers seed the AI with the real damage value
+            parsed from the game state.
+        observed_hits: Number of hits per attack (from game state).
+    """
     _ensure_data_loaded()
 
     # Use hand-coded table if available
     if monster_id in ENEMY_MOVE_TABLES:
         mode = "weighted" if monster_id in _WEIGHTED_INTENT_MONSTERS else "cycle"
+        # Check for boss phase 2 table
+        phase2_info = BOSS_PHASE2_TABLES.get(monster_id)
+        phase2_table = phase2_info["table"] if phase2_info else None
+        phase_hp_pct = phase2_info.get("hp_pct", 0.5) if phase2_info else 0.5
         return EnemyAI(
             monster_id=monster_id,
             move_table=ENEMY_MOVE_TABLES[monster_id],
             mode=mode,
+            phase2_table=phase2_table,
+            phase_hp_pct=phase_hp_pct,
         )
 
     # Fallback: build a simple table from monsters.json
@@ -786,7 +867,15 @@ def _create_enemy_ai(monster_id: str) -> EnemyAI:
             table.append({"type": "Buff", "self_strength": 1})
 
     if not table:
-        table = [{"type": "Attack", "damage": 8, "hits": 1}]
+        # Use observed damage from game state if available, otherwise
+        # default to 14 (representative of mid-game enemies rather than
+        # the old 8 which was far too optimistic for Act 2+).
+        fallback_damage = observed_damage if observed_damage is not None else 14
+        fallback_hits = observed_hits if observed_damage is not None else 1
+        table = [
+            {"type": "Attack", "damage": fallback_damage, "hits": fallback_hits},
+            {"type": "Buff", "self_strength": 2},
+        ]
 
     return EnemyAI(monster_id=monster_id, move_table=table)
 
@@ -1024,14 +1113,14 @@ def _pick_card_reward(offered: list[Card], deck: list[Card]) -> Card | None:
 # Act 1 map model
 # ---------------------------------------------------------------------------
 
-# Act 1 (Overgrowth) has 15 rooms (FIX 1: was 17, now 15). Derived from real game logs:
+# Act 1 (Overgrowth) has 17 rooms. Derived from real game logs:
 # - Floor 1-3: weak encounters (early game)
-# - Floor 4-8: normal/event/shop (mid-act variety)
-# - Floor 9: forced treasure (mid-act relic faucet)
-# - Floor 10: rest site (mid-act)
-# - Floors 11-13: normal/elite encounters (tougher section)
-# - Floor 14: rest site (pre-boss)
-# - Floor 15: boss
+# - Floor 4-9: normal/event/shop (mid-act variety, 6 rooms)
+# - Floor 10: forced treasure (mid-act relic faucet)
+# - Floor 11: rest site (mid-act)
+# - Floors 12-15: normal/elite encounters (tougher section, 4 rooms)
+# - Floor 16: rest site (pre-boss)
+# - Floor 17: boss
 
 ROOM_TYPE = str  # "weak", "normal", "elite", "rest", "event", "boss", "shop", "treasure"
 
@@ -1039,7 +1128,7 @@ ROOM_TYPE = str  # "weak", "normal", "elite", "rest", "event", "boss", "shop", "
 def _generate_act1_map(rng: random.Random) -> list[ROOM_TYPE]:
     """Generate a sequence of rooms for Act 1.
 
-    Based on real game logs: 15 rooms total, boss on floor 15.
+    Based on real game logs: 17 rooms total, boss on floor 17.
     Simulates path choice by varying encounter types — the real game has
     branching paths where players can dodge hard encounters.
 
@@ -1053,27 +1142,26 @@ def _generate_act1_map(rng: random.Random) -> list[ROOM_TYPE]:
     rooms.append("weak")
     rooms.append("weak")
 
-    # Floor 4-8: mix of normal, event, shop (mid-act, now 5 rooms so the
-    # forced treasure at floor 9 doesn't push the total beyond 15)
-    mid_rooms = ["normal", "normal", "normal", "event", "shop"]
+    # Floor 4-9: mix of normal, event, shop (mid-act, 6 rooms)
+    mid_rooms = ["normal", "normal", "normal", "normal", "event", "shop"]
     rng.shuffle(mid_rooms)
     rooms.extend(mid_rooms)
 
-    # Floor 9: forced treasure chest (mid-act relic faucet)
+    # Floor 10: forced treasure chest (mid-act relic faucet)
     rooms.append("treasure")
 
-    # Floor 10: rest site
+    # Floor 11: rest site
     rooms.append("rest")
 
-    # Floor 11-13: normal + elite (tougher section, reduced from 4 to 3 rooms)
-    late_rooms = ["normal", "elite", rng.choice(["normal", "event"])]
+    # Floor 12-15: normal + elite (tougher section, 4 rooms)
+    late_rooms = ["normal", "normal", "elite", rng.choice(["normal", "event"])]
     rng.shuffle(late_rooms)
     rooms.extend(late_rooms)
 
-    # Floor 14: rest (pre-boss)
+    # Floor 16: rest (pre-boss)
     rooms.append("rest")
 
-    # Floor 15: boss
+    # Floor 17: boss
     rooms.append("boss")
 
     return rooms
@@ -1082,7 +1170,7 @@ def _generate_act1_map(rng: random.Random) -> list[ROOM_TYPE]:
 def _generate_act1_map_with_choices(rng: random.Random) -> list:
     """Generate Act 1 map with player-facing choices at some floors.
 
-    FIX 1 (2026-04-23): Reduced from 17 to 15 rooms total, boss on floor 15.
+    17 rooms total, boss on floor 17 (matching real game).
     Returns a list where each entry is either a single room type string
     (forced) or a list of 2-3 room type strings (player chooses).
     """
@@ -1091,29 +1179,28 @@ def _generate_act1_map_with_choices(rng: random.Random) -> list:
     # Floor 1-3: forced weak
     rooms.extend(["weak", "weak", "weak"])
 
-    # Floor 4-8: each offers 2-3 choices from the mid-act pool (5 rooms
-    # to leave room for a forced treasure on floor 9).
+    # Floor 4-9: each offers 2-3 choices from the mid-act pool (6 rooms)
     mid_pool = ["normal", "event", "shop", "elite"]
-    for _ in range(5):
+    for _ in range(6):
         k = rng.choice([2, 3])
         rooms.append(rng.sample(mid_pool, k=k))
 
-    # Floor 9: forced treasure chest — guarantees one mid-act relic
+    # Floor 10: forced treasure chest — guarantees one mid-act relic
     # drop per run, matching real STS map structure.
     rooms.append("treasure")
 
-    # Floor 10: forced rest
+    # Floor 11: forced rest
     rooms.append("rest")
 
-    # Floor 11-13: harder choices (reduced from 4 to 3 rooms)
+    # Floor 12-15: harder choices (4 rooms)
     late_pool = ["normal", "elite", "event", "rest"]
-    for _ in range(3):
+    for _ in range(4):
         rooms.append(rng.sample(late_pool, k=2))
 
-    # Floor 14: forced rest (pre-boss)
+    # Floor 16: forced rest (pre-boss)
     rooms.append("rest")
 
-    # Floor 15: forced boss
+    # Floor 17: forced boss
     rooms.append("boss")
 
     return rooms
@@ -1136,10 +1223,15 @@ def _choose_room(
     Ports the live advisor's HP-threshold routing into the simulator so
     that training games make the same pathing decisions as live play.
 
+    Events ("?" nodes) are highly valuable in STS2: they can give free
+    relics, card removes, upgrades, healing, or gold with no HP cost.
+    They should generally be preferred over normal combat, especially
+    in Act 1 where the deck is still being built.
+
     Priority bands:
-      - HP < 35%: rest > shop > event > anything (survival mode)
-      - HP < 55%: rest > shop > event > treasure > monster (cautious)
-      - HP >= 55%: elite > treasure > monster > event > shop > rest (greedy)
+      - HP < 35%: rest > event > shop > anything (survival mode)
+      - HP < 55%: rest > event > shop > treasure > monster (cautious)
+      - HP >= 55%: elite > event > treasure > monster > shop > rest (greedy)
 
     Gold and deck-size bonuses push toward shops when they'd be useful.
     """
@@ -1150,19 +1242,19 @@ def _choose_room(
             return 100.0
 
         if hp_pct < 0.35:
-            # Critical HP: survival mode
-            scores = {"rest": 90, "shop": 80, "event": 60, "treasure": 50,
+            # Critical HP: survival mode — events are free value
+            scores = {"rest": 90, "event": 82, "shop": 75, "treasure": 50,
                       "normal": 10, "weak": 10, "elite": 0}
             return scores.get(room, 30)
 
         if hp_pct < 0.55:
-            # Low HP: avoid elites, prefer safe nodes
-            scores = {"rest": 85, "shop": 80, "event": 65, "treasure": 70,
+            # Low HP: avoid elites, events are safe + valuable
+            scores = {"rest": 85, "event": 78, "shop": 72, "treasure": 70,
                       "normal": 40, "weak": 40, "elite": 15}
             return scores.get(room, 30)
 
-        # Healthy: be greedy
-        scores = {"elite": 80, "normal": 55, "weak": 45, "event": 50,
+        # Healthy: be greedy but events still high value (free relics/upgrades)
+        scores = {"elite": 80, "event": 70, "normal": 55, "weak": 45,
                   "shop": 45, "treasure": 70, "rest": 30}
         s = scores.get(room, 40)
 
@@ -1288,7 +1380,7 @@ def _random_potion(rng: random.Random) -> dict:
 # Combat simulation
 # ---------------------------------------------------------------------------
 
-MAX_COMBAT_TURNS = 30  # Safety cap
+MAX_COMBAT_TURNS = 50  # Safety cap (raised from 30 to allow poison/stall strategies)
 
 
 @dataclass
@@ -1529,7 +1621,7 @@ def _set_enemy_intents(state: CombatState, ais: list[EnemyAI]) -> None:
     for enemy, ai in zip(state.enemies, ais):
         if not enemy.is_alive:
             continue
-        intent = ai.pick_intent()
+        intent = ai.pick_intent(enemy=enemy)
         enemy.intent_type = intent.get("type", "Attack")
         enemy.intent_damage = intent.get("damage")
         enemy.intent_hits = intent.get("hits", 1)
@@ -1614,14 +1706,21 @@ def _resolve_sim_intents(state: CombatState, ais: list[EnemyAI]) -> None:
                 + intent["player_tangled"]
             )
 
-        # Fix 9: Handle StatusCard intent (adds status cards to player hand)
-        # StatusCard intents represent moves that add status cards like Infection, Dazed, etc.
-        # Currently just marks the intent as resolved; actual card addition would happen
-        # via bridge.py when syncing with game state. This ensures simulator doesn't fail
-        # when encountering StatusCard move types.
+        # StatusCard intent: enemy adds junk cards (Dazed, Wound, etc.) to
+        # the player's discard pile, polluting future draws.  The number of
+        # cards and their type vary by enemy; we default to 2 Dazed if the
+        # move table doesn't specify.
         if intent.get("type") == "StatusCard":
-            # The game handles actual card addition; simulator just tracks intent resolution
-            pass
+            from .models import Card
+            n_cards = intent.get("status_count", 2)
+            status_id = intent.get("status_card_id", "Dazed")
+            status_name = intent.get("status_card_name", status_id)
+            for _ in range(n_cards):
+                junk = Card(
+                    id=status_id, name=status_name, cost=99,
+                    card_type="Status", target="none", upgraded=False,
+                )
+                state.player.discard_pile.append(junk)
 
         ai._pending_intent = None
 

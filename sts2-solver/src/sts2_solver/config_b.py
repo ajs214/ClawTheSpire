@@ -528,7 +528,7 @@ STRATEGY = {
     "shop_max_advisor_calls": 3,     # (unchanged)
 
     # Boss floors (for pre-boss logic)
-    "boss_floors": {15, 16, 33, 34, 51, 52},
+    "boss_floors": {17, 34, 51, 52},
 }
 
 

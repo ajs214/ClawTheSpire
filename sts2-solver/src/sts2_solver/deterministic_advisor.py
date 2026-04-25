@@ -667,7 +667,12 @@ def decide_card_reward(state: dict, game_data: GameDataDB) -> Decision:
 # ---------------------------------------------------------------------------
 
 def decide_map(state: dict) -> Decision:
-    """Deterministic map navigation: HP-threshold routing."""
+    """Deterministic map navigation: HP-threshold routing.
+
+    Events ("?" nodes) are highly valuable in STS2: they can give free
+    relics, card removes, upgrades, healing, or gold with no HP cost.
+    They should generally be preferred over normal combat.
+    """
     character = detect_character(state)
     hp_pct = _hp_pct(state)
     deck_size = len(_get_deck(state))
@@ -714,21 +719,24 @@ def decide_map(state: dict) -> Decision:
             return (100.0, "boss (must go)")  # No choice usually
 
         if hp_pct < 0.35:
-            # Critical HP: rest > shop > event > everything else
-            scores = {"rest": 90, "shop": 80, "event": 60, "treasure": 50,
-                      "monster": 10, "elite": 0, "unknown": 55}
+            # Critical HP: events are free value, no HP cost
+            scores = {"rest": 90, "event": 82, "unknown": 82,
+                      "shop": 75, "treasure": 50,
+                      "monster": 10, "elite": 0}
             return (scores.get(ntype, 30), f"HP critical ({hp_pct:.0%})")
 
         if hp_pct < 0.55:
-            # Low HP: avoid elites, prefer safe nodes
-            scores = {"rest": 85, "shop": 80, "event": 65, "treasure": 70,
-                      "monster": 40, "elite": 15, "unknown": 60}
+            # Low HP: avoid elites, events are safe + valuable
+            scores = {"rest": 85, "event": 78, "unknown": 78,
+                      "shop": 72, "treasure": 70,
+                      "monster": 40, "elite": 15}
             s = scores.get(ntype, 30)
             return (s, f"HP low ({hp_pct:.0%})")
 
-        # Healthy: score based on value
-        scores = {"elite": 80, "monster": 55, "event": 50, "shop": 45,
-                  "treasure": 70, "rest": 30, "unknown": 50}
+        # Healthy: events still high value (free relics/upgrades/removes)
+        scores = {"elite": 80, "event": 70, "unknown": 70,
+                  "monster": 55, "shop": 45,
+                  "treasure": 70, "rest": 30}
         s = scores.get(ntype, 40)
 
         # Elite bonus when HP is high

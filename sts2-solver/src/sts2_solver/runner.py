@@ -873,13 +873,14 @@ class Runner:
                 break
 
             # -- Force-play override: if MCTS wants END_TURN but there are
-            # affordable playable cards, override with 50% probability.
-            # This bridges the gap between training (80% override) and live play.
+            # affordable playable cards, override with 1% probability.
+            # Live play should be near-pure exploitation; training uses 80%
+            # for exploration but live play benefits from trusting MCTS.
             if action.action_type == "end_turn":
                 from .alphazero.self_play import _affordable_play_actions
                 import random
                 affordable = _affordable_play_actions(_enum_actions(sim), sim)
-                if affordable and random.random() < 0.50:
+                if affordable and random.random() < 0.01:
                     action = random.choice(affordable)
 
             if action.action_type == "end_turn":
@@ -1084,8 +1085,40 @@ class Runner:
                     enemies=[e.get("name", "?") for e in enemies],
                 )
 
-        # Potions are now handled by MCTS as part of the action space —
-        # the network decides when to use potions during the play loop.
+        # ── Pre-MCTS potion forcing ──────────────────────────────
+        # The heuristic _should_use_potion() is well-calibrated (saves for
+        # boss, emergency heals, aggressive boss-fight usage) but MCTS
+        # almost never selects use_potion over card plays.  Force the
+        # heuristic's recommendation *before* entering the card-play loop
+        # so potions actually get used.  Loop to drain multiple potions
+        # when appropriate (e.g. boss turn 1: buff + damage potion).
+        potions_used_preturn = 0
+        while potions_used_preturn < 3:  # safety cap
+            potion_decision = self._should_use_potion(gs)
+            if potion_decision is None:
+                break
+            slot, target = potion_decision
+            pot_name = "potion"
+            potions_raw = (gs.get("run") or {}).get("potions", [])
+            for p in potions_raw:
+                if p.get("index") == slot:
+                    pot_name = p.get("name", "potion")
+                    break
+            self._log_action(f"  [bold magenta]Potion: {pot_name} (slot {slot})[/bold magenta]")
+            if not self.dry_run:
+                try:
+                    self._execute_with_retry("use_potion", option_index=slot,
+                                             target_index=target)
+                    self.action_count += 1
+                    potions_used_preturn += 1
+                    # Re-fetch game state after potion use
+                    gs = self._get_game_state()
+                    self.game_state = gs
+                except Exception as e:
+                    self._log_action(f"  [red]Potion use failed: {e}[/red]")
+                    break
+            else:
+                break
 
         # Snapshot the pre-play state for combat logging
         turn_start_gs = gs
@@ -1102,6 +1135,8 @@ class Runner:
         best_score = 0.0
         turn_root_value: float | None = None  # first MCTS value of the turn
         max_cards = 12  # safety cap to prevent infinite loops
+        consecutive_rejections = 0  # track consecutive 409s (e.g. boss "ringing" mechanic)
+        max_consecutive_rejections = 3  # bail after this many in a row
 
         # V11: Plan full turn sequence for comparison and potential direct execution
         planned_sequence = self._plan_full_turn(gs)
@@ -1146,13 +1181,14 @@ class Runner:
                     turn_root_value = root_value
 
                 # -- Force-play override: if MCTS wants END_TURN but there are
-                # affordable playable cards, override with 50% probability.
-                # This bridges the gap between training (80% override) and live play.
+                # affordable playable cards, override with 1% probability.
+                # Live play should be near-pure exploitation; training uses
+                # 80% for exploration but live play trusts MCTS decisions.
                 if first_action.action_type == "end_turn":
                     from .alphazero.self_play import _affordable_play_actions
                     import random
                     affordable = _affordable_play_actions(_enum_actions(sim_state), sim_state)
-                    if affordable and random.random() < 0.50:
+                    if affordable and random.random() < 0.01:
                         first_action = random.choice(affordable)
 
                 # Update solver panel with MCTS analysis
@@ -1278,16 +1314,18 @@ class Runner:
                 )
                 if not result:
                     # Card was rejected (permanent 409 — e.g. Grand Finale
-                    # when draw pile isn't empty). Track it so MCTS doesn't
-                    # pick it again this turn, then re-solve from fresh state.
+                    # when draw pile isn't empty, or boss "ringing" mechanic
+                    # limiting one card per turn).
                     rejected_card = label
                     if not hasattr(self, "_rejected_cards_this_turn"):
                         self._rejected_cards_this_turn = set()
                     self._rejected_cards_this_turn.add(
                         first_action.card_idx if first_action else -1
                     )
+                    consecutive_rejections += 1
                     self._log_action(
-                        f"  [yellow]! {rejected_card} rejected by game — "
+                        f"  [yellow]! {rejected_card} rejected by game "
+                        f"({consecutive_rejections}/{max_consecutive_rejections}) — "
                         f"re-solving without it[/yellow]"
                     )
                     # Pop the failed card from our played list so stats are accurate
@@ -1295,9 +1333,18 @@ class Runner:
                         cards_played.pop()
                     if targets_chosen:
                         targets_chosen.pop()
+                    # If too many consecutive rejections, assume a per-turn
+                    # card limit (e.g. boss "ringing") and end the turn.
+                    if consecutive_rejections >= max_consecutive_rejections:
+                        self._log_action(
+                            f"  [yellow]! {consecutive_rejections} consecutive "
+                            f"rejections — ending turn (possible card limit)[/yellow]"
+                        )
+                        break
                     continue  # Re-enter the MCTS loop with fresh state
                 self._log_action(f"  [green]>[/green] {label}")
                 self.action_count += 1
+                consecutive_rejections = 0  # reset on success
                 # Clear rejected set on successful play (state has changed)
                 if hasattr(self, "_rejected_cards_this_turn"):
                     self._rejected_cards_this_turn.clear()
@@ -1938,6 +1985,19 @@ class Runner:
                 self._log_action("  [dim]Card reward data not ready — waiting[/dim]")
                 return
 
+        # Treasure / boss_relic: if "proceed" is available alongside the
+        # relic action, it means the relic was already picked (or skipped).
+        # Just proceed — don't try to pick the relic again.
+        if screen_type in ("treasure", "boss_relic") and "proceed" in actions:
+            self._log_action("  [dim]auto: proceed (treasure/relic done)[/dim]")
+            if not self.dry_run:
+                try:
+                    self._execute_with_retry("proceed")
+                    self.action_count += 1
+                except Exception as e:
+                    self._log_action(f"  [red]proceed failed: {e}[/red]")
+            return
+
         # General single-option auto-pick: if the screen has exactly one
         # indexed option, pick it without calling the LLM.  Applies to map,
         # event, rest, boss_relic — any screen where there's no real choice.
@@ -1946,6 +2006,7 @@ class Runner:
             "event": "choose_event_option",
             "rest": "choose_rest_option",
             "boss_relic": "choose_treasure_relic",
+            "treasure": "choose_treasure_relic",
         }
         single_action = _SINGLE_OPT_ACTIONS.get(screen_type)
         if single_action and single_action in actions:
@@ -1964,6 +2025,10 @@ class Runner:
                     or ((gs.get("agent_view") or {}).get("rest") or {}).get("options")
                     or [],
                 "boss_relic": lambda: (gs.get("chest") or {}).get("relics")
+                    or (gs.get("reward") or {}).get("relics")
+                    or ((gs.get("agent_view") or {}).get("chest") or {}).get("relics")
+                    or [],
+                "treasure": lambda: (gs.get("chest") or {}).get("relics")
                     or (gs.get("reward") or {}).get("relics")
                     or ((gs.get("agent_view") or {}).get("chest") or {}).get("relics")
                     or [],
@@ -2864,6 +2929,7 @@ class Runner:
                 "map": ("choose_map_node", 0),
                 "shop": ("close_shop_inventory", None),
                 "boss_relic": ("choose_treasure_relic", 0),
+                "treasure": ("choose_treasure_relic", 0),
                 "deck_select": ("select_deck_card", 0),
             }
             fb = _FALLBACKS.get(screen_type)
@@ -3161,6 +3227,9 @@ class Runner:
         floor = run.get("floor", "?")
         hp = run.get("current_hp", 0)
 
+        from .run_logger import BOSS_FLOORS
+        is_boss_floor = isinstance(floor, int) and floor in BOSS_FLOORS
+
         if outcome == "victory" or hp > 0:
             self._log_action(
                 f"[bold green]VICTORY![/bold green] Floor {floor} | HP {hp}"
@@ -3168,6 +3237,13 @@ class Runner:
             self.logger.log_combat_end(gs, "win")
             self.logger.log_run_end(gs, "victory")
             result = "victory"
+        elif is_boss_floor:
+            self._log_action(
+                f"[bold red]BOSS DEFEAT[/bold red] Floor {floor} | HP {hp}"
+            )
+            self.logger.log_combat_end(gs, "boss_defeat")
+            self.logger.log_run_end(gs, "boss_defeat")
+            result = "boss_defeat"
         else:
             self._log_action(
                 f"[bold red]DEFEAT[/bold red] Floor {floor} | HP {hp}"

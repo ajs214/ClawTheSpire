@@ -32,6 +32,10 @@ from .enemy_predict import annotate_predictions
 from .models import Card, CombatState, EnemyState, PlayerState
 
 
+_warned_potions: set[str] = set()
+_warned_multihit: set[str] = set()
+
+
 def _parse_potions(raw_potions: list) -> list[dict]:
     """Parse potions from raw game state.
 
@@ -57,9 +61,28 @@ def _parse_potions(raw_potions: list) -> list[dict]:
             pot["damage_all"] = 20
         elif "weak" in name or "fear" in name:
             pot["enemy_weak"] = 3
+        elif any(k in name for k in ("poison", "venom", "toxic", "blight", "corrosive", "orobic", "acid")):
+            pot["damage_all"] = 15  # Poison/acid potions — treat as damage
+        elif any(k in name for k in ("dexterity", "dex", "agile", "agility")):
+            pot["dexterity"] = 2
+        elif any(k in name for k in ("draw", "speed", "swift", "skill", "colorless")):
+            pot["draw"] = 2  # Card-draw potions
+        elif any(k in name for k in ("energy", "bottle", "entropic")):
+            pot["energy"] = 1
+        elif any(k in name for k in ("blessing", "forge", "smith", "anvil")):
+            pot["strength"] = 1  # Blessing-type — modest buff
+        elif any(k in name for k in ("rock", "shaped", "potion-shaped", "thrown", "bomb")):
+            pot["damage_all"] = 15  # Throwable damage potions
+        elif "essence" in name or "elixir" in name:
+            pot["heal"] = 15
+        elif "smoke" in name or "vanish" in name or "stealth" in name:
+            pot["block"] = 10  # Evasion-type
         else:
-            # Unknown potion — log and treat as generic (occupies slot)
-            print(f"[bridge] Unknown potion: '{p.get('name')}' at slot {idx} — treating as generic")
+            # Unknown potion — log ONCE and treat as generic (occupies slot)
+            pname = p.get("name", "?")
+            if pname not in _warned_potions:
+                _warned_potions.add(pname)
+                print(f"[bridge] Unknown potion: '{pname}' at slot {idx} — treating as generic")
             potions.append(pot)  # Add generic entry so MCTS knows slot is occupied
             continue
         potions.append(pot)
@@ -697,9 +720,12 @@ def _enemy_from_runtime(raw: dict) -> EnemyState:
     if intent_type is not None and intent_type not in known_intent_types:
         print(f"[bridge] Unknown intent_type '{intent_type}' for enemy {raw.get('name', 'UNKNOWN')}, raw data: {intents}")
 
-    # Log multi-hit intents for verification
+    # Log multi-hit intents for verification (once per enemy name)
     if intent_hits > 1:
-        print(f"[bridge] Multi-hit intent: {raw.get('name', 'UNKNOWN')} - {intent_type} x{intent_hits} (damage={intent_damage}), raw: {intents}")
+        enemy_key = raw.get("name", "UNKNOWN")
+        if enemy_key not in _warned_multihit:
+            _warned_multihit.add(enemy_key)
+            print(f"[bridge] Multi-hit intent: {enemy_key} - {intent_type} x{intent_hits} (damage={intent_damage}), raw: {intents}")
 
     return EnemyState(
         id=raw.get("enemy_id") or raw.get("id", ""),
