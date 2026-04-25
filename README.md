@@ -20,7 +20,7 @@ Built entirely with [Claude Code](https://claude.ai/claude-code) + the [STS2-Age
 │  ├── option_head:    non-combat decisions               │
 │  └── card_eval_head: deck-aware card pick scoring       │
 │                                                         │
-│  Checkpoints: alphazero_checkpoints_v15/gen_XXXX.pt     │
+│  Checkpoints: alphazero_checkpoints_v17/gen_XXXX.pt     │
 └─────────────────────────────────────────────────────────┘
                         │
                         ▼ (load checkpoint)
@@ -45,7 +45,7 @@ Built entirely with [Claude Code](https://claude.ai/claude-code) + the [STS2-Age
 │  ├── Card pick preferences and agreement tracking       │
 │  ├── Loss curves (policy, value, card_eval)             │
 │  ├── Live play results with per-run breakdowns          │
-│  └── Version comparison table (V2–V15)                  │
+│  └── Version comparison table (V2–V17)                  │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -56,18 +56,15 @@ Training runs headless — no game client needed. The system simulates full Act 
 Each generation: 8 games → collect samples → train network → save checkpoint. A typical training run is 12–18 hours on a MacBook Pro, producing 600–800 generations.
 
 ```bash
-# Start a training run (12-hour cap, resumes from latest checkpoint)
-nohup bash train-v15-continue-12hr.sh > train.log 2>&1 &
-tail -f train.log
+# Start a training run (15-hour cap, warm start from latest checkpoint)
+nohup bash train-v17-15hr.sh > train-v17-15hr.log 2>&1 &
+tail -f train-v17-15hr.log
 
 # Monitor training in a browser (localhost:8090)
 bash restart-dashboard.sh
-
-# Chain another 12 hours automatically after the current run finishes
-nohup bash train-v15-chain-12hr.sh > chain.log 2>&1 &
 ```
 
-Key training hyperparameters (V15): 500 MCTS simulations, batch size 64, 3 training epochs per generation, LR 1e-4 with cosine decay, temperature annealing from 1.0 → 0.2.
+Key training hyperparameters (V17): 500 MCTS simulations, batch size 64, 3 training epochs per generation, LR 1e-4 with cosine decay, temperature annealing from 1.0 → 0.2.
 
 ## Neural Network Architecture
 
@@ -100,7 +97,7 @@ The training dashboard (`dashboard.py`) serves a live web UI at `localhost:8090`
 
 **Summary tab** — three tiers of win rate stats (whole version aggregated across all runs, current run, last 10 generations), card selector diagnostics (shadow agreement, skip rate, score spread), per-boss win rates, and live play results.
 
-**Training tab** — version comparison table across all training lineages (V2–V15), win rate chart by generation with lineage-based coloring, per-boss win rate timeline, card preference table (offered/picked/win-correlated), and recent game details.
+**Training tab** — version comparison table across all training lineages (V2–V17), win rate chart by generation with lineage-based coloring, per-boss win rate timeline, card preference table (offered/picked/win-correlated), and recent game details.
 
 **Live tab** — per-run breakdowns from real games against the actual game client, with combat details, deck evolution, and relic tracking.
 
@@ -128,7 +125,11 @@ Each training version builds on the previous checkpoint with architectural or ga
 
 **V14** — Card ranking refinements. Decoupled skip from card ranking loss (cards only compete with cards). Pick bonus biasing toward card acquisition in early game. Deck summary excludes base starter cards. Tuned MCTS to 500 sims, 8 games/gen.
 
-**V15** (current) — Real relic mechanics. ~60 Silent-eligible relics get actual combat hooks (previously proxy multipliers). Relic-aware card_eval_head expanded to 357 input dims (8 relic embed + 13 synergy features). Checkpoint migration via `pad_card_eval_weights()`. Out-of-combat relics: egg auto-upgrades, on-pickup transforms, pre-combat effects. Card pool corruption fix (`copy.copy` at card_db boundaries). Currently training at ~22% Act 1 win rate, 33% boss-fight win rate.
+**V15** — Real relic mechanics. ~60 Silent-eligible relics get actual combat hooks (previously proxy multipliers). Relic-aware card_eval_head expanded to 357 input dims (8 relic embed + 13 synergy features). Checkpoint migration via `pad_card_eval_weights()`. Out-of-combat relics: egg auto-upgrades, on-pickup transforms, pre-combat effects. Card pool corruption fix (`copy.copy` at card_db boundaries). ~22% Act 1 win rate, 33% boss-fight win rate.
+
+**V16** — Economy and scoring. Empirical relic scoring from 22K V15 runs. HP preservation bonus on option samples. HP-scaled rest exploration forcing. Boosted ranking loss for win-correlated cards. Treasure chest gold rewards. Escalating card removal cost. Sim-to-live divergence fixes.
+
+**V17** (current) — Simulator fidelity + live play combat. Act 1 map corrected to 17 floors (was incorrectly 15 in simulator). StatusCard intents now add junk cards (Dazed, Wound) to player discard pile, training the network to prioritize killing status-card enemies. Boss phase transitions: Ceremonial Beast, Vantom, and Kin Priest get more aggressive move tables below 50% HP. Combat timeout raised from 30 to 50 turns (enables poison/stall strategies). Live play: forced potion usage before MCTS loop (0 activations across 222 runs was critical gap), force-play override dropped from 50% to 1%, unknown enemy intent prediction anchored on observed damage instead of hardcoded defaults.
 
 ## Project Structure
 
@@ -148,14 +149,17 @@ ClawTheSpire/
 │   ├── runner.py               # Live play game loop + TUI
 │   ├── bridge.py               # Game state ↔ solver state conversion
 │   ├── deterministic_advisor.py # Rule-based strategic fallback
+│   ├── enemy_predict.py         # Enemy intent prediction (move tables + observed damage)
 │   ├── effects.py              # Card/power effect implementations
 │   ├── relic_synergy.py        # Relic-card synergy scoring
 │   ├── models.py               # Card, PlayerState, CombatState dataclasses
+│   ├── run_logger.py           # Event-sourced JSONL run logger
 │   └── config.py               # Evaluator weights, tier lists, strategy params
 ├── dashboard.py                # Training dashboard (Chart.js, localhost:8090)
-├── train-v15-*.sh              # Training launch scripts
+├── train-v17-15hr.sh           # Training launch script (current)
+├── play-10-live.sh             # Run 10 live play games
 ├── STS2-Agent/                 # Game mod (git submodule)
-└── alphazero_checkpoints_v15/  # Trained model checkpoints
+└── alphazero_checkpoints_v17/  # Trained model checkpoints
 ```
 
 ## Prerequisites
