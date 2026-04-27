@@ -607,6 +607,12 @@ def train_batch(
     SHADOW_ALPHA = 0.15
     RANK_BETA = 0.20       # weight for ranking loss on card picks
     RANK_MARGIN = 0.05     # minimum desired score gap between chosen and alternatives
+    # Skip encouragement: on losing runs with bloated decks, push the skip
+    # option's score down (toward 0) so the network learns that skipping would
+    # have been better.  Only fires when: (a) run lost, (b) deck had 18+ cards,
+    # (c) network picked a card (not skip).  Weight scales with deck bloat.
+    SKIP_BLOAT_ALPHA = 0.10  # base weight for skip encouragement loss
+    SKIP_BLOAT_DECK_THRESHOLD = 18  # deck size above which skip signal fires
     # Empirical card lift: deck-win-rate relative to baseline (>1 = above avg).
     # Used to boost ranking loss for win-correlated cards so the network
     # gets stronger gradient toward picking proven winners.
@@ -692,6 +698,25 @@ def train_batch(
                     if n_compared > 0:
                         rank_loss = rank_loss / n_compared
                         o_loss = o_loss + boosted_beta * rank_loss
+
+                # Skip encouragement: on losing runs with bloated decks,
+                # add a loss term that pushes the chosen card's score DOWN
+                # (toward 0) to make skip relatively more attractive.
+                # Scales with deck bloat: stronger signal for 25-card decks
+                # than 18-card decks.
+                if (num_opts >= 2
+                        and sample.chosen_idx != skip_idx
+                        and sample.value < 0.3  # losing run
+                        and sample.deck_card_ids is not None
+                        and len(sample.deck_card_ids) >= SKIP_BLOAT_DECK_THRESHOLD):
+                    bloat = len(sample.deck_card_ids) - SKIP_BLOAT_DECK_THRESHOLD
+                    bloat_weight = SKIP_BLOAT_ALPHA * min(2.0, 1.0 + bloat / 10.0)
+                    # Push chosen card score toward 0 (making skip win by default)
+                    chosen_s = scores[0, sample.chosen_idx]
+                    skip_target = torch.tensor([[0.0]], dtype=torch.float32, device=device)
+                    skip_loss = bloat_weight * F.mse_loss(
+                        chosen_s.unsqueeze(0).unsqueeze(0), skip_target)
+                    o_loss = o_loss + skip_loss
 
             # ---- All other options: generic option_eval_head ----
             else:
@@ -1093,6 +1118,12 @@ def train_worker(
                     pass
             for os in result.option_samples:
                 option_buffer.add(os, is_win=is_win)
+                # Oversample relic picks 3x — they're rare (~0.7 per run)
+                # compared to card picks (~8 per run), so they get drowned
+                # out in the buffer without oversampling.
+                if OPTION_RELIC_PICK in os.option_types:
+                    for _ in range(2):  # already added once above → 3x total
+                        option_buffer.add(os, is_win=is_win)
 
             # --- Capture value probes from real games ---
             # We want ~6 diverse probes. Grab them opportunistically

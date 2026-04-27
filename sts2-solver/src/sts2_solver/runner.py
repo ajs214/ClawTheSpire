@@ -820,6 +820,66 @@ class Runner:
 
         return None
 
+    def _should_use_survival_potion(self, gs: dict) -> tuple[int, int | None] | None:
+        """Use a potion ONLY if the player would die this turn without it.
+
+        This is the minimal pre-MCTS safety net.  All strategic potion usage
+        (boss buffs, offensive potions, low-HP heals) is left to MCTS.
+        """
+        if "use_potion" not in gs.get("available_actions", []):
+            return None
+
+        run = gs.get("run") or {}
+        potions = run.get("potions", [])
+        combat = gs.get("combat") or {}
+        player = combat.get("player") or {}
+        enemies = combat.get("enemies") or []
+
+        hp = player.get("current_hp", 0)
+        block = player.get("block", 0)
+
+        # Calculate total incoming damage
+        total_incoming = 0
+        for e in enemies:
+            if e.get("current_hp", 0) <= 0:
+                continue
+            for intent in e.get("intents", []):
+                if intent.get("intent_type") == "Attack":
+                    dmg = intent.get("damage", 0) * intent.get("hits", 1)
+                    total_incoming += dmg
+
+        unblocked = max(0, total_incoming - block)
+        if unblocked < hp:
+            return None  # won't die — let MCTS handle potions
+
+        # Would die: find a block or heal potion
+        first_alive = self._best_damage_target(enemies)
+
+        usable: list[tuple[int, str, bool]] = []
+        for pot in potions:
+            if not pot.get("occupied") or not pot.get("can_use"):
+                continue
+            slot = pot.get("index", 0)
+            name = (pot.get("name") or "")
+            desc = (pot.get("description") or "")
+            cat = self._classify_potion(name, desc)
+            needs_target = pot.get("requires_target", False)
+            usable.append((slot, cat, needs_target))
+
+        def _target(needs: bool) -> int | None:
+            return first_alive if needs else None
+
+        # Block potions first (prevent the damage)
+        for slot, cat, needs_target in usable:
+            if cat == "block":
+                return (slot, _target(needs_target))
+        # Heal potions (survive after taking the hit)
+        for slot, cat, needs_target in usable:
+            if cat == "heal":
+                return (slot, _target(needs_target))
+
+        return None  # no survival potion available — MCTS will figure it out
+
     def _plan_full_turn(self, game_state: dict) -> list[tuple[str, int | None, int | None]]:
         """Plan a full turn's card sequence using internal MCTS simulation.
 
@@ -1069,16 +1129,16 @@ class Runner:
                     enemies=[e.get("name", "?") for e in enemies],
                 )
 
-        # ── Pre-MCTS potion forcing ──────────────────────────────
-        # The heuristic _should_use_potion() is well-calibrated (saves for
-        # boss, emergency heals, aggressive boss-fight usage) but MCTS
-        # almost never selects use_potion over card plays.  Force the
-        # heuristic's recommendation *before* entering the card-play loop
-        # so potions actually get used.  Loop to drain multiple potions
-        # when appropriate (e.g. boss turn 1: buff + damage potion).
+        # ── Pre-MCTS potion: survival only ──────────────────────
+        # MCTS already has use_potion in its action space and evaluates
+        # potion plays alongside card plays.  We only force a potion
+        # pre-MCTS when the player would literally die this turn without
+        # it — in that case MCTS's lookahead may not save us in time.
+        # All strategic potion usage (boss buff/debuff, offensive) is
+        # left to MCTS to decide within the solve loop.
         potions_used_preturn = 0
-        while potions_used_preturn < 3:  # safety cap
-            potion_decision = self._should_use_potion(gs)
+        while potions_used_preturn < 2:  # safety cap
+            potion_decision = self._should_use_survival_potion(gs)
             if potion_decision is None:
                 break
             slot, target = potion_decision
@@ -1088,7 +1148,7 @@ class Runner:
                 if p.get("index") == slot:
                     pot_name = p.get("name", "potion")
                     break
-            self._log_action(f"  [bold magenta]Potion: {pot_name} (slot {slot})[/bold magenta]")
+            self._log_action(f"  [bold magenta]Survival potion: {pot_name} (slot {slot})[/bold magenta]")
             if not self.dry_run:
                 try:
                     self._execute_with_retry("use_potion", option_index=slot,
@@ -1586,6 +1646,50 @@ class Runner:
         scored.sort(key=lambda x: x[0])
         return scored[0][1]
 
+    def _mcts_pick_combat_card(self, gs: dict, choice_type: str,
+                               cards: list[dict]) -> int | None:
+        """Use MCTS to pick a card for a mid-combat discard/exhaust/select.
+
+        Builds a CombatState with pending_choice set, runs a quick MCTS
+        search, and returns the chosen card index.  Returns None if MCTS
+        is unavailable or fails (caller should fall back to heuristic).
+        """
+        if self._mcts is None:
+            return None
+        try:
+            from .bridge import state_from_mcp
+            from .models import PendingChoice
+            from .actions import enumerate_actions as _enum_actions
+
+            sim_state = state_from_mcp(gs, self.card_db,
+                                       move_indices=self._combat_move_indices)
+            # Inject the pending choice so MCTS sees choose_card actions
+            valid_indices = [c.get("index", c.get("i", i))
+                            for i, c in enumerate(cards)]
+            sim_state.pending_choice = PendingChoice(
+                choice_type=choice_type,
+                num_choices=1,
+                source_card_id="live_play",
+                valid_indices=valid_indices,
+            )
+
+            available = _enum_actions(sim_state)
+            if not available:
+                return None
+
+            _sims = min(100, max(30, len(available) * 10))
+            first_action, _policy, _root_val, _actions = self._mcts.search(
+                sim_state, num_simulations=_sims, temperature=0.1,
+            )
+
+            if first_action.action_type == "choose_card" and first_action.choice_idx is not None:
+                return first_action.choice_idx
+
+        except Exception as e:
+            self._log_action(f"  [dim]MCTS discard/select failed: {e}[/dim]")
+
+        return None
+
     # ------------------------------------------------------------------
     # Non-combat
     # ------------------------------------------------------------------
@@ -1841,22 +1945,29 @@ class Runner:
                 return
 
             # Mid-combat discard prompts (Survivor "Choose a card to Discard",
-            # Gambler's Brew, etc.): smart discard — drop unplayable/junk first,
-            # then least valuable by tier.
+            # Gambler's Brew, etc.): MCTS-first, heuristic fallback.
             _is_discard = (
                 "discard" in prompt
                 and "discard pile" not in prompt
             )
             if _is_discard:
                 cards = sel.get("cards", [])
-                pick_idx = self._pick_card_to_discard(gs, cards)
+                # Try MCTS first
+                mcts_idx = self._mcts_pick_combat_card(
+                    gs, "discard_from_hand", cards)
+                if mcts_idx is not None:
+                    pick_idx = mcts_idx
+                    source = "MCTS"
+                else:
+                    pick_idx = self._pick_card_to_discard(gs, cards)
+                    source = "heuristic"
                 pick_name = ""
                 for c in cards:
                     if c.get("index", c.get("i", 0)) == pick_idx:
                         pick_name = c.get("name", "?")
                         break
                 self._log_action(
-                    f"  [dim]auto: select_deck_card({pick_idx}) — discard {pick_name}[/dim]"
+                    f"  [dim]auto: select_deck_card({pick_idx}) — discard {pick_name} ({source})[/dim]"
                 )
                 if not self.dry_run:
                     try:
@@ -1883,18 +1994,28 @@ class Runner:
             ))
 
             if is_combat_select:
-                # Quick deterministic pick: avoid key card, prefer Strikes/Defends
-                from .config import CHARACTER_CONFIG, detect_character
-                _char = detect_character(gs)
-                _key = CHARACTER_CONFIG.get(_char, {}).get("key_card", "Bash").lower()
+                # Try MCTS for exhaust/draw-pile selections, fall back to
+                # heuristic (avoid key card, prefer Strikes/Defends).
                 cards = sel.get("cards", [])
-                pick_idx = 0
-                for card in cards:
-                    name = (card.get("name") or "").lower()
-                    if _key not in name:
-                        pick_idx = card.get("index", card.get("i", 0))
-                        break
-                self._log_action(f"  [dim]auto: select_deck_card({pick_idx}) — combat select[/dim]")
+                choice_type = "discard_from_hand"  # exhaust acts like discard in MCTS
+                if "exhaust" in prompt:
+                    choice_type = "discard_from_hand"
+                mcts_idx = self._mcts_pick_combat_card(gs, choice_type, cards)
+                if mcts_idx is not None:
+                    pick_idx = mcts_idx
+                    source = "MCTS"
+                else:
+                    from .config import CHARACTER_CONFIG, detect_character
+                    _char = detect_character(gs)
+                    _key = CHARACTER_CONFIG.get(_char, {}).get("key_card", "Bash").lower()
+                    pick_idx = 0
+                    for card in cards:
+                        name = (card.get("name") or "").lower()
+                        if _key not in name:
+                            pick_idx = card.get("index", card.get("i", 0))
+                            break
+                    source = "heuristic"
+                self._log_action(f"  [dim]auto: select_deck_card({pick_idx}) — combat select ({source})[/dim]")
                 if not self.dry_run:
                     try:
                         self._execute_with_retry("select_deck_card", option_index=pick_idx)
