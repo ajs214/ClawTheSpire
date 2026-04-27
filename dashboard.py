@@ -37,6 +37,7 @@ BOSS_LOG_DIRS = {
     "v16": "alphazero_checkpoints_v16",
     "v17": "alphazero_checkpoints_v17",
     "v18": "alphazero_checkpoints_v18",
+    "v19": "alphazero_checkpoints_v19",
 }
 
 # Cached boss data (refreshed by poll thread)
@@ -387,12 +388,13 @@ VERSION_FILES = {
     "v16": "training_v16_progress.json",
     "v17": "training_v17_progress.json",
     "v18": "training_v18_progress.json",
+    "v19": "training_v19_progress.json",
 }
 
 # --- Shared state ---
 lock = threading.Lock()
 all_history: dict[str, list[dict]] = {
-    "v1": [], "v2": [], "v3": [], "v4": [], "v5": [], "v6": [], "v7": [], "v8": [], "v9": [], "v10": [], "v11": [], "v12": [], "v13": [], "v14": [], "v15": [], "v16": [], "v17": [], "v18": [],
+    "v1": [], "v2": [], "v3": [], "v4": [], "v5": [], "v6": [], "v7": [], "v8": [], "v9": [], "v10": [], "v11": [], "v12": [], "v13": [], "v14": [], "v15": [], "v16": [], "v17": [], "v18": [], "v19": [],
 }
 snapshots: dict[str, dict] = {}
 active_version: str = ""  # whichever is currently training
@@ -611,7 +613,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 
   /* Version colors */
   .earlyc{color:#6e7681} .v5c{color:#bc8cff} .v6c{color:#ff7b72} .v7c{color:#ffa657}
-  .v8c{color:#2ea9e6} .v9c{color:#39d353} .v10c{color:#f0883e} .v11c{color:#e05dff} .v12c{color:#00d4aa} .v13c{color:#ff6b9d} .v14c{color:#79c0ff} .v15c{color:#ffd700} .v16c{color:#ff6347} .v17c{color:#7b68ee}
+  .v8c{color:#2ea9e6} .v9c{color:#39d353} .v10c{color:#f0883e} .v11c{color:#e05dff} .v12c{color:#00d4aa} .v13c{color:#ff6b9d} .v14c{color:#79c0ff} .v15c{color:#ffd700} .v16c{color:#ff6347} .v17c{color:#7b68ee} .midc{color:#8a939a} .v18c{color:#00ff88} .v19c{color:#ff9500}
 
   /* Boss table */
   .boss-row td { text-align:left; }
@@ -719,8 +721,6 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </div>
 
   <div class="charts">
-    <div class="chart-box full"><h2>Win Rate by Generation (All Lineages)</h2><canvas id="winChart"></canvas></div>
-    <div class="chart-box full"><h2>Win Rate by Generation — Per Boss (Active Version)</h2><canvas id="genBossWrChart"></canvas></div>
     <div class="chart-box full"><h2>Card Selector — Agreement & Score Spread (Active Version)</h2><canvas id="cardPickChart"></canvas></div>
   </div>
 
@@ -769,12 +769,13 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <div class="updated" id="updated"></div>
 
 <script>
-const COLORS = { early:'#6e7681', v1:'#6e7681', v2:'#7c858d', v3:'#8a939a', v4:'#99a1a8', v5:'#bc8cff', v6:'#ff7b72', v7:'#ffa657', v8:'#2ea9e6', v9:'#39d353', v10:'#f0883e', v11:'#e05dff', v12:'#00d4aa', v13:'#ff6b9d', v14:'#79c0ff', v15:'#ffd700', v16:'#ff6347', v17:'#7b68ee', v18:'#00ff88' };
-const LABELS = { early:'Early (V1-V4)', v1:'V1', v2:'V2', v3:'V3', v4:'V4', v5:'V5', v6:'V6', v7:'V7', v8:'V8', v9:'V9', v10:'V10', v11:'V11', v12:'V12', v13:'V13', v14:'V14', v15:'V15', v16:'V16', v17:'V17', v18:'V18' };
-const VERSIONS = ['early','v5','v6','v7','v8','v9','v10','v11','v12','v13','v14','v15','v16','v17','v18'];
+const COLORS = { early:'#6e7681', mid:'#8a939a', v1:'#6e7681', v2:'#7c858d', v3:'#8a939a', v4:'#99a1a8', v5:'#bc8cff', v6:'#ff7b72', v7:'#ffa657', v8:'#2ea9e6', v9:'#39d353', v10:'#f0883e', v11:'#e05dff', v12:'#00d4aa', v13:'#ff6b9d', v14:'#79c0ff', v15:'#ffd700', v16:'#ff6347', v17:'#7b68ee', v18:'#00ff88', v19:'#ff9500' };
+const LABELS = { early:'Early (V1–V4)', mid:'Mid (V5–V12)', v1:'V1', v2:'V2', v3:'V3', v4:'V4', v5:'V5', v6:'V6', v7:'V7', v8:'V8', v9:'V9', v10:'V10', v11:'V11', v12:'V12', v13:'V13', v14:'V14', v15:'V15', v16:'V16', v17:'V17', v18:'V18', v19:'V19' };
+const VERSIONS = ['early','mid','v13','v14','v15','v16','v17','v18','v19'];
 const EARLY_SOURCES = ['v1','v2','v3','v4'];
-// Last 5 display versions for the win rate chart (legacy, kept for version table)
-const RECENT_VERSIONS = ['v9','v10','v11','v12','v13','v14','v15','v16','v17','v18'];
+const MID_SOURCES = ['v5','v6','v7','v8','v9','v10','v11','v12'];
+// Recent versions for charts
+const RECENT_VERSIONS = ['v13','v14','v15','v16','v17','v18','v19'];
 const BOSS_FLOOR = 17;
 
 // ---- Lineage definitions ----
@@ -786,7 +787,7 @@ const LINEAGES = [
   { id: 'L3', label: 'V13',       versions: ['v13'] },
   { id: 'L4', label: 'V14',       versions: ['v14'] },
   { id: 'L5', label: 'V15',       versions: ['v15'] },
-  { id: 'L6', label: 'V16–V18', versions: ['v16','v17','v18'] },
+  { id: 'L6', label: 'V16–V19', versions: ['v16','v17','v18','v19'] },
 ];
 
 const ARCH_COLORS = { poison:'#3fb950', shiv:'#d29922', sly:'#58a6ff', mixed:'#bc8cff', undecided:'#484f58', unknown:'#30363d' };
@@ -822,6 +823,34 @@ function buildEarlySnap(snapshots, histories) {
   }
   if (!snap) return null;
   const copy = Object.assign({}, snap); copy.games_played = totalGames; copy.generation = totalGens; return copy;
+}
+
+function buildMidHistory(histories) {
+  const merged = []; let offset = 0;
+  for (const src of MID_SOURCES) {
+    const h = histories[src] || []; if (!h.length) continue;
+    for (const pt of h) { const c = Object.assign({}, pt); c.generation = (c.generation||0)+offset; merged.push(c); }
+    offset = (h[h.length-1].generation||0) + offset;
+  }
+  return merged;
+}
+
+function buildMidSnap(snapshots, histories) {
+  let snap = null, totalGames = 0, totalGens = 0;
+  // Use the best-performing mid version as the representative snapshot
+  let bestWr = -1;
+  for (const src of MID_SOURCES) {
+    const s = snapshots[src]; if (!s) continue;
+    totalGames += computeTotalGames((histories||{})[src]||[], s.games_played||0);
+    totalGens += s.generation||0;
+    const wr = s.win_rate || 0;
+    if (wr > bestWr) { bestWr = wr; snap = s; }
+  }
+  if (!snap) return null;
+  const copy = Object.assign({}, snap); copy.games_played = totalGames; copy.generation = totalGens;
+  // Show peak win rate across V5-V12 (V11 was 38.6%)
+  copy.win_rate = bestWr;
+  return copy;
 }
 
 function computeTotalGames(history, currentGames) {
@@ -892,18 +921,6 @@ const baseOpts = {
 };
 const pctOpts = JSON.parse(JSON.stringify(baseOpts));
 pctOpts.scales.y.ticks = {...pctOpts.scales.y.ticks, callback:function(v){return (v*100).toFixed(0)+'%';}};
-
-// Win rate chart — lineage-based (one continuous line per cold start)
-const winChart = new Chart(document.getElementById('winChart'), {
-  type:'line', data:{labels:[],datasets:[]}, options:pctOpts,
-});
-
-// Per-boss WR chart
-const genBossWrChart = new Chart(document.getElementById('genBossWrChart'), {
-  type:'line', data:{labels:[],datasets:[]},
-  options:{...pctOpts, plugins:{...pctOpts.plugins,legend:{labels:{color:'#8b949e',font:{size:11}}}},
-    scales:{...pctOpts.scales,x:{...pctOpts.scales.x,type:'linear',title:{display:true,text:'Generation',color:'#484f58'}}}},
-});
 
 // Card-pick dual-axis chart: agreement (left, %) + score spread (right, raw)
 const cardPickChart = new Chart(document.getElementById('cardPickChart'), {
@@ -1219,34 +1236,6 @@ function buildLineageDatasets(rawHistories) {
   return datasets;
 }
 
-function updateWinChart(rawHistories) {
-  const datasets = buildLineageDatasets(rawHistories);
-  winChart.data.datasets = datasets;
-  winChart.options.scales.x.min = 0;
-  winChart.options.scales.x.max = 1;
-  winChart.options.scales.x.title.text = 'Training Progress (normalized per lineage)';
-  winChart.options.scales.x.ticks.callback = function(v) { return (v*100).toFixed(0)+'%'; };
-  winChart.update('none');
-}
-
-function updateGenBossWrChart(genWrData) {
-  if (!genWrData || !genWrData.length) { genBossWrChart.data.datasets=[]; genBossWrChart.update('none'); return; }
-  // Thin to ~150 points to reduce noise
-  const thinned = thin(genWrData, 150);
-  const allKeys = new Set();
-  for (const pt of thinned) { for (const k of Object.keys(pt)) { if(k!=='gen') allKeys.add(k); } }
-  const keyList = ['overall', ...Array.from(allKeys).filter(k=>k!=='overall').sort()];
-  genBossWrChart.data.datasets = keyList.map(key => ({
-    label: key==='overall' ? 'Overall' : humanizeBoss(key),
-    data: thinned.filter(pt=>pt[key]!=null).map(pt=>({x:pt.gen,y:pt[key]})),
-    borderColor: BOSS_CHART_COLORS[key.toUpperCase()]||BOSS_CHART_COLORS[key]||'#bc8cff',
-    borderWidth: key==='overall'?3:1.8, pointRadius:0, tension:0.4,
-    borderDash: key==='overall'?[]:[4,2],
-  }));
-  genBossWrChart.options.scales.x.max = thinned[thinned.length-1].gen||50;
-  genBossWrChart.update('none');
-}
-
 function updateCardPickChart(history) {
   if (!history || !history.length) { cardPickChart.data.datasets=[]; cardPickChart.update('none'); return; }
   // Thin to ~200 points
@@ -1395,7 +1384,7 @@ function updateLiveTab(liveRuns, activeVer) {
     const bossInfo = (r.boss_fights||[]).map(bf=>humanizeBoss(bf.encounter_id)||'?').join(', ')||'-';
     const bossColor = r.boss_fights&&r.boss_fights.length ? (r.boss_fights.some(bf=>bf.outcome==='win')?'#3fb950':'#f85149') : '#484f58';
     const relicCount = (r.relics_gained||[]).length + (r.starting_relics||[]).length;
-    const verColor = {'v9':'#39d353','v10':'#f0883e','v11':'#e05dff','v12':'#00d4aa','v13':'#ff6b9d','v14':'#79c0ff','v15':'#ffd700','v16':'#ff6347','v17':'#7b68ee'}[r.train_version]||'#8b949e';
+    const verColor = {'v9':'#39d353','v10':'#f0883e','v11':'#e05dff','v12':'#00d4aa','v13':'#ff6b9d','v14':'#79c0ff','v15':'#ffd700','v16':'#ff6347','v17':'#7b68ee','v18':'#00ff88','v19':'#ff9500'}[r.train_version]||'#8b949e';
     return `<tr onclick="showRunDetail('${r.run_id}')">
       <td style="color:${verColor};font-weight:bold;font-size:0.8em">${r.train_version||'?'}</td>
       <td>${r.config_profile||'?'}</td>
@@ -1488,10 +1477,13 @@ async function poll() {
 
     const earlyHist = buildEarlyHistory(d.history);
     const earlySnap = buildEarlySnap(d.snapshots, d.history);
-    const histDisplay = { early: earlyHist };
+    const midHist = buildMidHistory(d.history);
+    const midSnap = buildMidSnap(d.snapshots, d.history);
+    const histDisplay = { early: earlyHist, mid: midHist };
     const snapsDisplay = {};
     if (earlySnap) snapsDisplay.early = earlySnap;
-    for (const v of ['v5','v6','v7','v8','v9','v10','v11','v12','v13','v14','v15','v16','v17']) {
+    if (midSnap) snapsDisplay.mid = midSnap;
+    for (const v of ['v13','v14','v15','v16','v17','v18','v19']) {
       histDisplay[v] = d.history[v] || [];
       if (d.snapshots[v]) {
         const copy = Object.assign({}, d.snapshots[v]);
@@ -1506,13 +1498,14 @@ async function poll() {
     let rawActiveVer = d.active_version || '';
     if (!rawActiveVer) {
       for (const v of [...VERSIONS].reverse()) {
-        if (v !== 'early' && snapsDisplay[v]) { rawActiveVer = v; break; }
+        if (v !== 'early' && v !== 'mid' && snapsDisplay[v]) { rawActiveVer = v; break; }
       }
-      if (!rawActiveVer) rawActiveVer = 'v15';
+      if (!rawActiveVer) rawActiveVer = 'v19';
     }
     let activeVer = rawActiveVer;
     if (EARLY_SOURCES.includes(activeVer)) activeVer = 'early';
-    const snap = snapsDisplay[activeVer]||snapsDisplay.v15||snapsDisplay.v14||snapsDisplay.v13||snapsDisplay.v12||snapsDisplay.v11||snapsDisplay.v10||snapsDisplay.v9||{};
+    if (MID_SOURCES.includes(activeVer)) activeVer = 'mid';
+    const snap = snapsDisplay[activeVer]||snapsDisplay.v19||snapsDisplay.v18||snapsDisplay.v17||snapsDisplay.v16||snapsDisplay.v15||{};
 
     document.getElementById('active-label').innerHTML =
       `Active: <span class="${activeVer}c" style="font-weight:bold">${LABELS[activeVer]||activeVer}</span>`;
@@ -1525,15 +1518,14 @@ async function poll() {
     window._lastActiveVer = activeVer;
 
     // Get recent history for active version
-    const activeHistory = activeVer==='early' ? earlyHist : (d.history[rawActiveVer]||[]);
+    const activeHistory = activeVer==='early' ? earlyHist : activeVer==='mid' ? midHist : (d.history[rawActiveVer]||[]);
 
     // Summary tab
     updateSummaryTab(snap, activeVer, activeBoss.per_boss||{}, liveRuns, activeHistory);
 
     // Training tab
     updateVersionTable(snapsDisplay, histDisplay);
-    updateWinChart(d.history);
-    updateGenBossWrChart(activeBoss.gen_wr||[]);
+    // Win rate charts removed — version comparison table is sufficient
     updateCardPickChart(activeHistory);
     updateCardStats(snap.card_stats||[]);
     updateGames(snap.recent_games||[], gameBossMap);
