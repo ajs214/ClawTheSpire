@@ -22,6 +22,15 @@
     .char-section { margin-bottom: 32px; }
     .empty-msg { color: #8b949e; font-style: italic; padding: 24px; text-align: center; }
 
+    /* Version timeline */
+    .version-timeline { display: flex; gap: 0; margin-bottom: 20px; overflow-x: auto; }
+    .version-pill { padding: 8px 16px; border-bottom: 3px solid transparent; font-size: 0.78em; white-space: nowrap; }
+    .version-pill .v-label { font-weight: 700; font-size: 1.05em; }
+    .version-pill .v-detail { color: #8b949e; margin-top: 2px; font-size: 0.92em; }
+    .version-pill .v-status { font-size: 0.85em; margin-top: 3px; font-weight: 600; }
+    .version-pill.active .v-status { animation: pulse 2s ease-in-out infinite; }
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+
     /* View toggle */
     .view-toggle { display: inline-flex; gap: 0; margin-bottom: 16px; border-radius: 6px; overflow: hidden; border: 1px solid #30363d; }
     .view-btn { background: #161b22; color: #8b949e; border: none; padding: 6px 16px; font-size: 0.82em; cursor: pointer; transition: all 0.2s; font-family: inherit; }
@@ -78,7 +87,7 @@
 
     fetch('data.json')
       .then(r => r.json())
-      .then(data => { globalData = data; render(); });
+      .then(data => { globalData = data; renderVersionTimeline(); render(); });
 
     function setView(view) {
       currentView = view;
@@ -95,6 +104,57 @@
     function avg(arr) {
       if (!arr.length) return 0;
       return arr.reduce((a, b) => a + b, 0) / arr.length;
+    }
+
+    function renderVersionTimeline() {
+      if (!globalData || !globalData.versions) return;
+      const container = document.getElementById('sections');
+      const timeline = document.createElement('div');
+      timeline.className = 'version-timeline';
+
+      globalData.versions.forEach(v => {
+        const pill = document.createElement('div');
+        pill.className = 'version-pill' + (v.status === 'training' ? ' active' : '');
+        pill.style.borderBottomColor = v.color;
+        const statusHTML = v.status === 'training'
+          ? `<div class="v-status" style="color:${v.color}">Training (${v.training_hours}hr)</div>`
+          : '';
+        pill.innerHTML = `
+          <div class="v-label" style="color:${v.color}">${v.label}</div>
+          <div class="v-detail">${v.changes}</div>
+          ${statusHTML}
+        `;
+        timeline.appendChild(pill);
+      });
+
+      container.parentNode.insertBefore(timeline, container);
+    }
+
+    function getVersionAnnotations(totalRuns) {
+      if (!globalData || !globalData.versions) return {};
+      const annotations = {};
+      globalData.versions.forEach((v, i) => {
+        if (v.start_run > 1 && v.start_run <= totalRuns) {
+          annotations[`ver${i}`] = {
+            type: 'line',
+            xMin: v.start_run - 1,
+            xMax: v.start_run - 1,
+            borderColor: v.color + '80',
+            borderWidth: 2,
+            borderDash: [6, 3],
+            label: {
+              display: true,
+              content: v.label,
+              position: 'start',
+              color: v.color,
+              font: { size: 10, weight: 'bold' },
+              backgroundColor: '#0d1117e0',
+              padding: 3,
+            },
+          };
+        }
+      });
+      return annotations;
     }
 
     function render() {
@@ -178,7 +238,7 @@
     }
 
     function renderAllChart(canvas, runs, meta) {
-      const annotations = {};
+      const annotations = { ...getVersionAnnotations(runs.length) };
       const floors = runs.map(r => r.floor);
       const best = Math.max(...floors);
 

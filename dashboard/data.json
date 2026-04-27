@@ -1421,10 +1421,856 @@
       "run_id": "PTUMSKTEY9",
       "character": "The Silent",
       "config_profile": "a"
+    },
+    {
+      "run_number": 159,
+      "floor": 17,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v15/gen_0740.pt",
+      "run_id": "P6Y7DSFAL5",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 160,
+      "floor": 9,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v15/gen_0740.pt",
+      "run_id": "HZQVGY60G4",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 161,
+      "floor": 8,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v15/gen_0740.pt",
+      "run_id": "72JUBBCWUB",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 162,
+      "floor": 7,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v15/gen_0740.pt",
+      "run_id": "ZDWKRA0VXJ",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 163,
+      "floor": 6,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v15/gen_0740.pt",
+      "run_id": "1LZRZVBZSE",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 164,
+      "floor": 9,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v15/gen_0740.pt",
+      "run_id": "AA2J5AMZNR",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 165,
+      "floor": 8,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v15/gen_0740.pt",
+      "run_id": "VLKXATC1SZ",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 166,
+      "floor": 15,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v15/gen_0740.pt",
+      "run_id": "91VFHV1F3E",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 167,
+      "floor": 17,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v15/gen_0740.pt",
+      "run_id": "9E8AD5XU7C",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 168,
+      "floor": 6,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v15/gen_0740.pt",
+      "run_id": "Y8XDVBGXP3",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 169,
+      "floor": 12,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v15/gen_0740.pt",
+      "run_id": "WDDKPBVV7H",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 170,
+      "floor": 5,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v16/gen_0700.pt",
+      "run_id": "FVR5HKNF95",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 171,
+      "floor": 17,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v16/gen_0700.pt",
+      "run_id": "81N1G6FQ2P",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 172,
+      "floor": 12,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v16/gen_0700.pt",
+      "run_id": "FFC8B3E940",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 173,
+      "floor": 7,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v16/gen_0700.pt",
+      "run_id": "QLPLGMG97K",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 174,
+      "floor": 7,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v16/gen_0700.pt",
+      "run_id": "3JGT0T3LPT",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 175,
+      "floor": 13,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v16/gen_0700.pt",
+      "run_id": "6CZ3W6QRZW",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 176,
+      "floor": 11,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v16/gen_0700.pt",
+      "run_id": "0G93RHVSYM",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 177,
+      "floor": 17,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v16/gen_0700.pt",
+      "run_id": "6BFLW68LKY",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 178,
+      "floor": 8,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v16/gen_0700.pt",
+      "run_id": "TEE3GSUEH3",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 179,
+      "floor": 8,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v16/gen_0700.pt",
+      "run_id": "J7CVWW6RZE",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 180,
+      "floor": 9,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v16/gen_0700.pt",
+      "run_id": "BFNKNJ0F83",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 181,
+      "floor": 8,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v16/gen_0700.pt",
+      "run_id": "SPLKE8FVE7",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 182,
+      "floor": 15,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v16/gen_0700.pt",
+      "run_id": "PKB5HNHCDG",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 183,
+      "floor": 17,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v16/gen_0700.pt",
+      "run_id": "C68NWK1KMP",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 184,
+      "floor": 14,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v16/gen_0700.pt",
+      "run_id": "RUND3S8BDN",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 185,
+      "floor": 8,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v16/gen_0700.pt",
+      "run_id": "HF7LPMEAKP",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 186,
+      "floor": 14,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v16/gen_0700.pt",
+      "run_id": "ZJ6GTEMB6W",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 187,
+      "floor": 17,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v16/gen_0700.pt",
+      "run_id": "1HKPL12SUP",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 188,
+      "floor": 9,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v16/gen_0700.pt",
+      "run_id": "TQXRAHBQL1",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 189,
+      "floor": 7,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v16/gen_0700.pt",
+      "run_id": "W88L57LXU3",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 190,
+      "floor": 15,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v16/gen_0700.pt",
+      "run_id": "YMFFSVP7DR",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 191,
+      "floor": 17,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v16/gen_0700.pt",
+      "run_id": "4RD92SWMV3",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 192,
+      "floor": 12,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v16/gen_0700.pt",
+      "run_id": "BL1DRWMCRE",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 193,
+      "floor": 6,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v16/gen_0700.pt",
+      "run_id": "DRVD769AE8",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 194,
+      "floor": 11,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v16/gen_0700.pt",
+      "run_id": "TKQJM5738J",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 195,
+      "floor": 17,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v16/gen_0700.pt",
+      "run_id": "3FK498N3YK",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 196,
+      "floor": 9,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v16/gen_0700.pt",
+      "run_id": "B118T19TJV",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 197,
+      "floor": 11,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v16/gen_0700.pt",
+      "run_id": "P2UPKX7S17",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 198,
+      "floor": 9,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v16/gen_0700.pt",
+      "run_id": "VKEG7XDYFD",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 199,
+      "floor": 8,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v16/gen_0700.pt",
+      "run_id": "46ZZMJE1L2",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 200,
+      "floor": 5,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v16/gen_0700.pt",
+      "run_id": "QD1Q9FS4ZH",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 201,
+      "floor": 9,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v16/gen_0700.pt",
+      "run_id": "2MLGZ2RY0N",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 202,
+      "floor": 17,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v16/gen_0700.pt",
+      "run_id": "TG7BKML298",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 203,
+      "floor": 12,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v16/gen_0700.pt",
+      "run_id": "T8HB4T40UV",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 204,
+      "floor": 6,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v16/gen_0700.pt",
+      "run_id": "2FMCJU2BM8",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 205,
+      "floor": 17,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v16/gen_0700.pt",
+      "run_id": "2QBQW26CV8",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 206,
+      "floor": 17,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v16/gen_0700.pt",
+      "run_id": "BFGGAH93YY",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 207,
+      "floor": 15,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v16/gen_0700.pt",
+      "run_id": "QMJ68S58K7",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 208,
+      "floor": 9,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v16/gen_0700.pt",
+      "run_id": "GX7ST9QFQ7",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 209,
+      "floor": 12,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v17/gen_0750.pt",
+      "run_id": "G5R80V21RP",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 210,
+      "floor": 15,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v17/gen_0760.pt",
+      "run_id": "63R72NEQ34",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 211,
+      "floor": 14,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v17/gen_0770.pt",
+      "run_id": "LJVQLV19SU",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 212,
+      "floor": 12,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v17/gen_0780.pt",
+      "run_id": "A219XFV4JD",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 213,
+      "floor": 6,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v17/gen_0790.pt",
+      "run_id": "6EA7XG3A8C",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 214,
+      "floor": 5,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v17/gen_0800.pt",
+      "run_id": "7DMBNPHK0W",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 215,
+      "floor": 11,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v17/gen_0800.pt",
+      "run_id": "DDRC698ZFF",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 216,
+      "floor": 17,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v17/gen_0810.pt",
+      "run_id": "QHNLBVJ5H5",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 217,
+      "floor": 8,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v17/gen_0900.pt",
+      "run_id": "9KAM3C5317",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 218,
+      "floor": 7,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v17/gen_0900.pt",
+      "run_id": "CQ4LV83EGW",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 219,
+      "floor": 11,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v17/gen_0900.pt",
+      "run_id": "4DUMMSA5LW",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 220,
+      "floor": 6,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v17/gen_0900.pt",
+      "run_id": "JB0G0HJ79L",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 221,
+      "floor": 7,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v17/gen_0900.pt",
+      "run_id": "X5DMZG63M7",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 222,
+      "floor": 9,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v17/gen_0900.pt",
+      "run_id": "R0LEGDEXPX",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 223,
+      "floor": 13,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v17/gen_0900.pt",
+      "run_id": "0SX9XQBZP3",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 224,
+      "floor": 13,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v17/gen_0900.pt",
+      "run_id": "MN0RX62VX3",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 225,
+      "floor": 12,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v17/gen_0900.pt",
+      "run_id": "MF7N7R84PL",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 226,
+      "floor": 9,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v17/gen_0900.pt",
+      "run_id": "ZDJQN0PTAF",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 227,
+      "floor": 9,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v17/gen_0900.pt",
+      "run_id": "JRYWRCJYCY",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 228,
+      "floor": 17,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v17/gen_0900.pt",
+      "run_id": "9LX45KN2VB",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 229,
+      "floor": 17,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v17/gen_0900.pt",
+      "run_id": "Y6LWXLQZ6G",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 230,
+      "floor": 13,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v17/gen_0900.pt",
+      "run_id": "M0SBNEM1UE",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 231,
+      "floor": 8,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v17/gen_0900.pt",
+      "run_id": "2LFH5DP1F0",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 232,
+      "floor": 17,
+      "gen": "gen12",
+      "checkpoint": "alphazero_checkpoints_v17/gen_0900.pt",
+      "run_id": "Z8Y6CN4C96",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 233,
+      "floor": 12,
+      "gen": "current",
+      "checkpoint": "alphazero_checkpoints_v17/gen_0900.pt",
+      "run_id": "6EAYA7G3VQ",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 234,
+      "floor": 8,
+      "gen": "current",
+      "checkpoint": "alphazero_checkpoints_v17/gen_0900.pt",
+      "run_id": "GVC6Y0ME46",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 235,
+      "floor": 14,
+      "gen": "current",
+      "checkpoint": "alphazero_checkpoints_v17/gen_0900.pt",
+      "run_id": "R4DY1NRDTF",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 236,
+      "floor": 8,
+      "gen": "current",
+      "checkpoint": "alphazero_checkpoints_v17/gen_0900.pt",
+      "run_id": "RM40C74PPN",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 237,
+      "floor": 12,
+      "gen": "current",
+      "checkpoint": "alphazero_checkpoints_v17/gen_0900.pt",
+      "run_id": "G4ED1U7GVT",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 238,
+      "floor": 25,
+      "gen": "current",
+      "checkpoint": "alphazero_checkpoints_v17/gen_0900.pt",
+      "run_id": "SX1LRV422U",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 239,
+      "floor": 7,
+      "gen": "current",
+      "checkpoint": "alphazero_checkpoints_v17/gen_0900.pt",
+      "run_id": "31HWHR3RQ7",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 240,
+      "floor": 12,
+      "gen": "current",
+      "checkpoint": "alphazero_checkpoints_v17/gen_0900.pt",
+      "run_id": "HL2DVJMJM2",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 241,
+      "floor": 15,
+      "gen": "current",
+      "checkpoint": "alphazero_checkpoints_v17/gen_0900.pt",
+      "run_id": "3615867TQ2",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 242,
+      "floor": 17,
+      "gen": "current",
+      "checkpoint": "alphazero_checkpoints_v17/gen_0900.pt",
+      "run_id": "2XTEQTT1JG",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 243,
+      "floor": 5,
+      "gen": "current",
+      "checkpoint": "alphazero_checkpoints_v17/gen_0900.pt",
+      "run_id": "DABV4WMRV0",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 244,
+      "floor": 15,
+      "gen": "current",
+      "checkpoint": "alphazero_checkpoints_v17/gen_0900.pt",
+      "run_id": "U81Z6MB8DS",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 245,
+      "floor": 17,
+      "gen": "current",
+      "checkpoint": "alphazero_checkpoints_v17/gen_0900.pt",
+      "run_id": "QKH677EAJ0",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 246,
+      "floor": 13,
+      "gen": "current",
+      "checkpoint": "alphazero_checkpoints_v17/gen_0900.pt",
+      "run_id": "98PTCB1G9P",
+      "character": "The Silent",
+      "config_profile": "a"
+    },
+    {
+      "run_number": 247,
+      "floor": 9,
+      "gen": "current",
+      "checkpoint": "alphazero_checkpoints_v17/gen_0900.pt",
+      "run_id": "GXEEARG92M",
+      "character": "The Silent",
+      "config_profile": "a"
     }
   ],
   "gen_boundaries": {
-    "current": 109,
-    "gen12": 158
-  }
+    "current": 247,
+    "gen12": 232
+  },
+  "versions": [
+    {
+      "id": "v14",
+      "label": "V14",
+      "start_run": 1,
+      "changes": "Initial AlphaZero training — MCTS combat, option heads for rest/map/shop",
+      "checkpoint_dir": "alphazero_checkpoints_v14",
+      "color": "#8b949e"
+    },
+    {
+      "id": "v15",
+      "label": "V15",
+      "start_run": 100,
+      "changes": "Relic synergy features, expanded potion system, real relic implementations",
+      "checkpoint_dir": "alphazero_checkpoints_v15",
+      "color": "#58a6ff"
+    },
+    {
+      "id": "v16",
+      "label": "V16",
+      "start_run": 170,
+      "changes": "Boss move tables, weighted intents, journey logging, run viewer",
+      "checkpoint_dir": "alphazero_checkpoints_v16",
+      "color": "#d2a8ff"
+    },
+    {
+      "id": "v17",
+      "label": "V17",
+      "start_run": 220,
+      "changes": "StatusCard sim, boss phases, 50-turn timeout, card_eval_head in live play",
+      "checkpoint_dir": "alphazero_checkpoints_v17",
+      "color": "#f0883e"
+    },
+    {
+      "id": "v18",
+      "label": "V18",
+      "start_run": 248,
+      "changes": "Network relic picks (OPTION_RELIC_PICK), deck select via card_eval_head, multi-card network priority",
+      "checkpoint_dir": "alphazero_checkpoints_v18",
+      "status": "training",
+      "training_hours": 14,
+      "color": "#3fb950"
+    }
+  ],
+  "current_version": "v18"
 }
