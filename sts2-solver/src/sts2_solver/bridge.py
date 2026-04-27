@@ -459,14 +459,15 @@ def card_reward_options_from_mcp(raw: dict, vocabs) -> dict:
 
     # Extract card options from the several places MCP may put them.
     reward = raw.get("reward") or {}
-    cards = reward.get("card_choices") or reward.get("cards") or []
+    cards = (reward.get("card_options") or reward.get("card_choices")
+             or reward.get("cards") or [])
     if not cards:
         sel = raw.get("selection") or {}
         cards = sel.get("cards") or []
     if not cards:
-        cards = ((raw.get("agent_view") or {}).get("reward") or {}).get(
-            "card_choices") or ((raw.get("agent_view") or {}).get(
-                "reward") or {}).get("cards") or []
+        av_reward = (raw.get("agent_view") or {}).get("reward") or {}
+        cards = (av_reward.get("card_options") or av_reward.get("card_choices")
+                 or av_reward.get("cards") or [])
 
     opt_types: list[int] = []
     opt_cards: list[int] = []

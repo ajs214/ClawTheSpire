@@ -99,7 +99,7 @@ class Runner:
         self._mcts: AlphaZeroMCTS | None = None
         self._mcts_vocabs = None
         self._mcts_config = None
-        self._card_reward_handled = False  # Reset when leaving reward screen
+        self._combat_start_logged = False  # Prevent double combat_start logging
         self._deck_select_stuck = False  # Track stuck deck_select screens
         self._stuck_since: float | None = None  # Timestamp when we got stuck
         self._shop_visited = False  # Prevent re-opening shop after closing
@@ -191,19 +191,6 @@ class Runner:
         if self._live:
             self._update_status()
             self._live.update(self._build_layout())
-
-    @staticmethod
-    def _is_card_reward_item(item: dict) -> bool:
-        """Check if a reward item is a card reward (works with both raw and agent_view)."""
-        # Raw state: reward_type = "Card"
-        rtype = str(item.get("reward_type", "")).lower()
-        if rtype == "card":
-            return True
-        # Agent view: line = "card: Add a card..."
-        line = str(item.get("line", "")).lower()
-        if line.startswith("card"):
-            return True
-        return False
 
     # ------------------------------------------------------------------
     # Init & main loop
@@ -438,10 +425,6 @@ class Runner:
                 self._store_run_id = run_id
 
         screen = self.game_state.get("screen", "")
-
-        # Reset card reward tracking when we leave the reward screen
-        if screen not in ("REWARD", "CARD_SELECTION"):
-            self._card_reward_handled = False
 
         # Reset shop visit flag when the floor changes (not when screen changes)
         run = self.game_state.get("run") or {}
@@ -1065,7 +1048,7 @@ class Runner:
             f"[red]Combat T{turn}[/red] | vs {enemy_str}"
         )
 
-        if turn == 1 or (isinstance(turn, int) and turn <= 1):
+        if (turn == 1 or (isinstance(turn, int) and turn <= 1)) and not self._combat_start_logged:
             # Wait briefly for enemy intents to be revealed by the game
             time.sleep(0.5)
             gs = self.client.get_state()
@@ -1075,6 +1058,7 @@ class Runner:
             enemies = combat.get("enemies") or []
 
             self.logger.log_combat_start(gs)
+            self._combat_start_logged = True
             self._combat_move_indices = {}
 
             if self._store_run_started:
@@ -1466,6 +1450,7 @@ class Runner:
                 if all_dead:
                     self._log_action("[bold green]Combat won![/bold green]")
                     self.logger.log_combat_end(post, "win")
+                    self._combat_start_logged = False
                     if self._store_run_started:
                         post_run = post.get("run") or {}
                         self.store.log_combat_end(
@@ -1610,6 +1595,18 @@ class Runner:
         gs = self.game_state
         run = gs.get("run") or {}
 
+        # Diagnostic: log whenever we see card_reward or choose_reward_card
+        if screen_type == "card_reward" or "choose_reward_card" in actions:
+            self._log_action(
+                f"  [green bold]>>> CARD REWARD DETECTED <<< screen_type={screen_type} actions={actions[:5]}[/green bold]"
+            )
+            self.logger._emit({
+                "type": "card_reward_detected",
+                "screen_type": screen_type,
+                "actions": actions,
+                "screen": gs.get("screen", ""),
+            })
+
         self._log_action(
             f"[blue]Floor {run.get('floor', '?')}[/blue] | {screen_type.upper()}"
         )
@@ -1658,131 +1655,100 @@ class Runner:
                 self._log_action("  [yellow]No occupied potion slots — skipping[/yellow]")
             return
 
-        # Reward screen: collect_rewards_and_proceed auto-picks the first
-        # card reward — NEVER use it when an unhandled card choice exists.
-        # Instead, claim the card reward item to open the selection screen,
-        # then let the advisor choose or skip.
+        # ── Reward screen ────────────────────────────────────────
+        # After combat the game shows a reward screen with claimable
+        # items (gold, potions, card reward).
         #
-        # IMPORTANT: collect_rewards_and_proceed also auto-claims skipped card
-        # rewards. After a skip, we must claim non-card rewards individually
-        # first, then proceed only when no card rewards remain claimable.
-        if "collect_rewards_and_proceed" in actions and screen_type != "card_reward":
-            reward = gs.get("reward") or {}
-            if not reward:
-                reward = (gs.get("agent_view") or {}).get("reward") or {}
+        # CRITICAL: Never click card reward buttons via claim_reward —
+        # ForceClick on a card reward button auto-picks the first card
+        # without opening the selection screen.  Instead, only claim
+        # non-card rewards individually.  Then use collect_rewards_and_proceed
+        # which (with the mod fix) stops at card rewards and returns
+        # stable=false, leaving the card selection screen for the runner
+        # to handle via _az_decide_card_reward / card_eval_head.
+        if "claim_reward" in actions and screen_type != "card_reward":
+            # Parse reward list from game state to identify types.
+            reward_info = gs.get("reward") or (gs.get("agent_view") or {}).get("reward") or {}
+            rewards = reward_info.get("rewards") or []
 
-            # Also check agent_view reward for pending_card_choice
-            agent_reward = (gs.get("agent_view") or {}).get("reward") or {}
+            # Find first claimable NON-card reward.
+            _CARD_TYPES = {"Card", "SpecialCard"}
+            non_card_idx = None
+            for r in rewards:
+                if r.get("claimable") and r.get("reward_type") not in _CARD_TYPES:
+                    non_card_idx = r.get("index")
+                    if non_card_idx is None:
+                        non_card_idx = rewards.index(r)
+                    break
 
-            has_card_choice = (
-                reward.get("pending_card_choice")
-                or agent_reward.get("pending_card_choice")
-                or "choose_reward_card" in actions
-                or "skip_reward_cards" in actions
-            )
-
-            # Check reward items for card-type rewards.
-            # Raw state: reward_type="Card"; agent_view: line="card: ...".
-            reward_items = reward.get("rewards") or []
-            if not reward_items:
-                reward_items = agent_reward.get("rewards") or []
-            has_card_reward_item = any(
-                self._is_card_reward_item(item)
-                for item in reward_items
-                if item.get("claimable", True)
-            )
-
-            # If reward data is empty but we just arrived at the reward screen,
-            # wait for the data to populate before auto-proceeding.
-            if not reward_items and not has_card_choice and "claim_reward" in actions:
-                return  # Let next tick re-check once reward data is populated
-
-            # Debug: log reward detection state
-            if "claim_reward" in actions:
-                self._log_action(
-                    f"  [dim]reward check: items={len(reward_items)} "
-                    f"card_choice={has_card_choice} card_item={has_card_reward_item}[/dim]"
-                )
-
-            # If we already handled the card choice this reward screen,
-            # claim non-card rewards individually to avoid collect_rewards_and_proceed
-            # which auto-grabs the first card (even after skip_reward_cards).
-            if self._card_reward_handled:
-                self._card_reward_handled = False
-                if "claim_reward" in actions:
-                    # Claim first non-card reward item
-                    for item in reward_items:
-                        if not self._is_card_reward_item(item) and item.get("claimable", True):
-                            idx = item.get("index", item.get("i"))
-                            if idx is not None:
-                                self._log_action(f"  [dim]auto: claim_reward({idx}) — non-card[/dim]")
-                                if not self.dry_run:
-                                    try:
-                                        self._execute_with_retry("claim_reward", option_index=idx)
-                                        self.action_count += 1
-                                    except Exception:
-                                        pass
-                                return
-                # No non-card rewards left, or no claim_reward action.
-                # Try proceed first (doesn't auto-claim), fall back to
-                # collect_rewards_and_proceed only if proceed isn't available.
-                if "proceed" in actions:
-                    self._log_action("  [dim]auto: proceed (post-skip)[/dim]")
-                    if not self.dry_run:
-                        try:
-                            self._execute_with_retry("proceed")
-                            self.action_count += 1
-                        except Exception:
-                            pass
-                elif "collect_rewards_and_proceed" in actions:
-                    self._log_action("  [dim]auto: collect_rewards_and_proceed (post-skip)[/dim]")
-                    if not self.dry_run:
-                        try:
-                            self._execute_with_retry("collect_rewards_and_proceed")
-                            self.action_count += 1
-                        except Exception:
-                            pass
-                return
-
-            if has_card_choice or has_card_reward_item:
-                if "choose_reward_card" in actions or "skip_reward_cards" in actions:
-                    # Card selection screen is open — let advisor handle it
-                    screen_type = "card_reward"
-                    # Fall through to LLM decision below
-                elif has_card_reward_item and "claim_reward" in actions:
-                    # Open the card selection screen by claiming the card reward
-                    card_reward_idx = None
-                    for item in reward_items:
-                        if self._is_card_reward_item(item) and item.get("claimable", True):
-                            card_reward_idx = item.get("index", item.get("i"))
-                            break
-                    if card_reward_idx is not None:
-                        self._log_action(f"  [cyan]Opening card reward (index {card_reward_idx})...[/cyan]")
-                        if not self.dry_run:
-                            try:
-                                self._execute_with_retry("claim_reward", option_index=card_reward_idx)
-                                time.sleep(1.0)  # Wait for card data to populate
-                            except Exception as e:
-                                self._log_action(f"  [red]Failed to open card reward: {e}[/red]")
-                    return
-                else:
-                    # Not ready yet — return and let next tick handle it
-                    return
-            else:
-                # No card choice pending — safe to auto-proceed
-                self._log_action("  [dim]auto: collect_rewards_and_proceed[/dim]")
+            if non_card_idx is not None:
+                rtype = rewards[non_card_idx].get("reward_type", "?") if non_card_idx < len(rewards) else "?"
+                self._log_action(f"  [cyan]Claiming reward #{non_card_idx} ({rtype})...[/cyan]")
                 if not self.dry_run:
                     try:
-                        self._execute_with_retry("collect_rewards_and_proceed")
+                        self._execute_with_retry("claim_reward", option_index=non_card_idx)
                         self.action_count += 1
+                        time.sleep(0.8)
                     except Exception as e:
-                        self._log_action(f"  [red]Auto-action failed: {e}[/red]")
-                self.logger.log_decision(
-                    game_state=gs, screen_type="auto", options=actions,
-                    choice={"action": "collect_rewards_and_proceed", "option_index": None},
-                    source="auto",
-                )
+                        self._log_action(f"  [red]claim_reward failed: {e}[/red]")
                 return
+
+            # Only card rewards remain (or reward list was empty/unparsable).
+            # Do NOT claim them directly — ForceClick auto-picks cards.
+            # Instead use collect_rewards_and_proceed which has mod-side
+            # logic to stop at card rewards (returns stable=false).
+            if rewards:
+                self._log_action("  [cyan]Only card rewards left — using collect_rewards to open selection...[/cyan]")
+            else:
+                self._log_action("  [cyan]No reward type info — using collect_rewards (safe path)...[/cyan]")
+            if not self.dry_run:
+                try:
+                    result = self._execute_with_retry("collect_rewards_and_proceed")
+                    self.action_count += 1
+                    if isinstance(result, dict) and not result.get("stable", True):
+                        self._log_action("  [cyan]Card reward pending — waiting for selection screen[/cyan]")
+                        time.sleep(1.0)
+                        return
+                    # stable=true means mod claimed everything (no card rewards
+                    # left, or card type matching failed). Log diagnostic.
+                    self._log_action("  [yellow]collect_rewards returned stable=true despite expected card rewards[/yellow]")
+                except Exception as e:
+                    self._log_action(f"  [red]collect_rewards failed: {e}[/red]")
+            return
+
+        # Reward screen with no claimable items left — proceed.
+        # The mod's collect_rewards_and_proceed will auto-claim gold/potions
+        # but STOP at card reward selection, returning stable=false.
+        if ("collect_rewards_and_proceed" in actions
+                and "claim_reward" not in actions
+                and screen_type != "card_reward"):
+            self._log_action("  [dim]auto: collect_rewards_and_proceed[/dim]")
+            if not self.dry_run:
+                try:
+                    result = self._execute_with_retry("collect_rewards_and_proceed")
+                    self.action_count += 1
+                    # Log debug info from mod if present.
+                    if isinstance(result, dict):
+                        dbg = result.get("debug")
+                        if dbg:
+                            self._log_action(f"  [dim]mod debug: {dbg}[/dim]")
+                            self.logger._emit({
+                                "type": "reward_debug",
+                                "debug": dbg,
+                                "stable": result.get("stable"),
+                            })
+                        if not result.get("stable", True):
+                            self._log_action("  [cyan]Card reward pending — waiting for selection screen[/cyan]")
+                            time.sleep(0.8)
+                            return
+                except Exception as e:
+                    self._log_action(f"  [red]Auto-action failed: {e}[/red]")
+            self.logger.log_decision(
+                game_state=gs, screen_type="auto", options=actions,
+                choice={"action": "collect_rewards_and_proceed", "option_index": None},
+                source="auto",
+            )
+            return
 
         # Auto-actions — but prioritize shop opening over proceed
         if screen_type == "auto":
@@ -1817,20 +1783,13 @@ class Runner:
             gs = dict(gs)
             gs["available_actions"] = filtered_actions
 
-        # Deck card select overlay on top of card reward screen:
-        # The game can show a deck_card_select preview (e.g. card effect text)
-        # while choose_reward_card is also available. If we don't dismiss the
-        # overlay first, the card_reward handler gets stuck in a loop.
-        if screen_type == "card_reward" and "select_deck_card" in actions:
-            sel = gs.get("selection") or {}
-            if sel.get("kind") == "deck_card_select":
-                self._log_action("  [dim]auto: select_deck_card(0) — dismiss card preview overlay[/dim]")
-                if not self.dry_run:
-                    try:
-                        self._execute_with_retry("select_deck_card", option_index=0)
-                    except Exception:
-                        pass
-                return
+        # NOTE: The card reward screen exposes visible NCardHolder nodes
+        # which causes GetDeckSelectionOptions to return them with
+        # kind="deck_card_select".  Previously this block would
+        # auto-dismiss them via select_deck_card(0), accidentally
+        # picking the first card and bypassing the network handler.
+        # Now we fall through to the card_reward handler below which
+        # uses _az_decide_card_reward / card_eval_head for a proper pick.
 
         # Multi-select deck screens (e.g. "Choose 2 cards to Add/Remove"):
         # select_deck_card: check if this is a real decision or an
@@ -1856,6 +1815,19 @@ class Runner:
                 self._log_action(
                     f"  [dim]deck_select prompt={prompt!r} cards={_card_count}[/dim]"
                 )
+
+            # "Choose a Pack" / bundle selection screens — Neow's Scroll Boxes
+            # sometimes arrives as deck_select instead of BUNDLE_SELECTION.
+            # Auto-pick the first pack and move on.
+            if "pack" in prompt or "bundle" in prompt:
+                self._log_action(f"  [dim]auto: select_deck_card(0) — pack/bundle select[/dim]")
+                if not self.dry_run:
+                    try:
+                        self._execute_with_retry("select_deck_card", option_index=0)
+                        time.sleep(1.0)
+                    except Exception:
+                        pass
+                return
 
             # "Confirm" screens (e.g. Armaments "Confirm Card to Upgrade"):
             # A card was already selected — just re-select index 0 to confirm.
@@ -1962,23 +1934,12 @@ class Runner:
                         self._log_action(f"  [red]Failed: {e}[/red]")
                 return
 
-        # For card_reward: skip if already handled (avoid re-presenting to advisor)
-        if screen_type == "card_reward" and self._card_reward_handled:
-            if "skip_reward_cards" in actions:
-                self._log_action("  [dim]auto: skip_reward_cards (already handled)[/dim]")
-                if not self.dry_run:
-                    try:
-                        self._execute_with_retry("skip_reward_cards")
-                    except Exception:
-                        pass
-            return
-
         # For card_reward: if card options are empty, skip this tick (data not ready)
         if screen_type == "card_reward":
             reward = gs.get("reward") or {}
             if not reward:
                 reward = (gs.get("agent_view") or {}).get("reward") or {}
-            card_options = reward.get("card_choices") or reward.get("cards") or []
+            card_options = reward.get("card_options") or reward.get("card_choices") or reward.get("cards") or []
             sel = gs.get("selection") or {}
             sel_cards = sel.get("cards") or []
             if not card_options and not sel_cards:
@@ -2961,6 +2922,24 @@ class Runner:
                 head_scores=decision.head_scores,
             )
 
+            # Emit richer decision_detail for network-scored decisions
+            # (card_reward, event, map, rest, shop) so offline analysis
+            # can see every option's score in a uniform format.
+            hs = decision.head_scores
+            if hs and isinstance(hs, dict) and "options" in hs:
+                all_opts = hs["options"]
+                chosen_idx = hs.get("chosen", 0)
+                scores_list = [o.get("score", 0.0) for o in all_opts] if all_opts else None
+                self.logger.log_decision_detail(
+                    game_state=gs,
+                    screen_type=screen_type,
+                    all_options=all_opts,
+                    chosen_idx=chosen_idx,
+                    scores=scores_list,
+                    source=decision.source,
+                    extra={"network_value": decision.network_value} if decision.network_value is not None else None,
+                )
+
         if self._store_run_started:
             self.store.log_decision(
                 self._store_run_id,
@@ -2984,8 +2963,6 @@ class Runner:
                 return
 
         # Post-execution bookkeeping
-        if screen_type == "card_reward":
-            self._card_reward_handled = True
         if screen_type == "shop" and decision.action == "close_shop_inventory":
             self._shop_visited = True
 
@@ -3235,6 +3212,7 @@ class Runner:
                 f"[bold green]VICTORY![/bold green] Floor {floor} | HP {hp}"
             )
             self.logger.log_combat_end(gs, "win")
+            self._combat_start_logged = False
             self.logger.log_run_end(gs, "victory")
             result = "victory"
         elif is_boss_floor:
@@ -3242,6 +3220,7 @@ class Runner:
                 f"[bold red]BOSS DEFEAT[/bold red] Floor {floor} | HP {hp}"
             )
             self.logger.log_combat_end(gs, "boss_defeat")
+            self._combat_start_logged = False
             self.logger.log_run_end(gs, "boss_defeat")
             result = "boss_defeat"
         else:
@@ -3249,6 +3228,7 @@ class Runner:
                 f"[bold red]DEFEAT[/bold red] Floor {floor} | HP {hp}"
             )
             self.logger.log_combat_end(gs, "defeat")
+            self._combat_start_logged = False
             self.logger.log_run_end(gs, "defeat")
             result = "defeat"
 
@@ -3457,8 +3437,8 @@ def main():
         help="Show decisions without executing",
     )
     parser.add_argument(
-        "--poll", type=float, default=1.0,
-        help="Seconds between state polls (default: 1.0)",
+        "--poll", type=float, default=0.3,
+        help="Seconds between state polls (default: 0.3)",
     )
     parser.add_argument(
         "--character", type=str, default=DEFAULT_CHARACTER,

@@ -143,12 +143,14 @@ class RunLogger:
         self._emit(event)
 
     def log_combat_start(self, game_state: dict) -> None:
-        """Log the beginning of a combat encounter."""
+        """Log the beginning of a combat encounter.
+
+        The runner guards against double-calls with _combat_start_logged,
+        but we also auto-close any unclosed combat as a safety net.
+        """
         self.ensure_run(game_state)
 
-        # Auto-close any unclosed combat — happens when the game transitions
-        # directly from one combat to the next without the runner detecting the
-        # end (e.g., screen stays on COMBAT between fights).
+        # Auto-close any unclosed combat — safety net for unexpected transitions
         if self._combat_start_hp is not None:
             self.log_combat_end(game_state, "win")
 
@@ -215,6 +217,31 @@ class RunLogger:
             "enemies": self._combat_enemies,
             "enemies_full": enemies_full,
         })
+
+    def log_enemy_roster_change(self, game_state: dict, new_enemies: list[dict], removed_enemies: list[dict]) -> None:
+        """Log mid-combat enemy roster changes (spawns/deaths).
+
+        Called by the combat snapshot logic when it detects new enemies
+        appearing or existing enemies disappearing between turns.
+        """
+        if not new_enemies and not removed_enemies:
+            return
+        run = game_state.get("run") or {}
+        ef_floor = run.get("floor")
+        event: dict[str, Any] = {
+            "type": "enemy_roster_change",
+            "turn": self._combat_turn,
+            "floor": ef_floor,
+            "act": floor_to_act(ef_floor),
+        }
+        if new_enemies:
+            event["spawned"] = new_enemies
+            # Update the stored combat enemies roster
+            if self._combat_enemies is not None:
+                self._combat_enemies.extend(new_enemies)
+        if removed_enemies:
+            event["removed"] = removed_enemies
+        self._emit(event)
 
     def log_combat_turn(
         self,
@@ -389,6 +416,22 @@ class RunLogger:
                 if mi is not None:
                     entry["move_index"] = mi
             enemies.append(entry)
+
+        # Detect mid-combat enemy roster changes (spawns / deaths)
+        if self._combat_enemies is not None and turn > 1:
+            prev_names = {e["name"] for e in self._combat_enemies}
+            curr_names = {e["name"] for e in enemies}
+            spawned = curr_names - prev_names
+            removed = prev_names - curr_names
+            if spawned or removed:
+                new_entries = [
+                    {"name": e["name"], "hp": e.get("hp", 0), "max_hp": e.get("max_hp", 0)}
+                    for e in enemies if e["name"] in spawned
+                ]
+                removed_entries = [
+                    {"name": n} for n in removed
+                ]
+                self.log_enemy_roster_change(game_state, new_entries, removed_entries)
 
         # Accumulate per-turn enemy intent log for boss fight analysis.
         # Also compute HP deltas from last snapshot to detect what enemies
