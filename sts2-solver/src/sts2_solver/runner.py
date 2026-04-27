@@ -2489,13 +2489,26 @@ class Runner:
             reward_actions = parsed["actions"]
 
             if not opt_types:
+                self.logger._emit({
+                    "type": "card_eval_debug",
+                    "msg": "no opt_types parsed",
+                    "reward_keys": list((gs.get("reward") or {}).keys()),
+                    "sel_keys": list((gs.get("selection") or {}).keys()),
+                })
                 return None
+
+            self.logger._emit({
+                "type": "card_eval_debug",
+                "msg": "entering network",
+                "n_options": len(opt_types),
+                "actions": [a[2] for a in reward_actions],
+            })
 
             # Build deck card vocab IDs for the dedicated card_eval_head
             deck_card_ids = []
             for c in deck_cards:
                 base_id = c.id.rstrip("+")
-                deck_card_ids.append(vocabs.cards.get(base_id, 1))  # 1=UNK
+                deck_card_ids.append(vocabs.cards.get(base_id))  # returns UNK_IDX if missing
 
             with torch.no_grad():
                 # TODO: pass relic_ids, relic_mask, and synergy_features to pick_best_card
@@ -2514,10 +2527,13 @@ class Runner:
             # threshold, fall back to the organic card picker which has
             # solid hand-tuned heuristics for card evaluation.
             #
-            # Score spread = max(scores) - min(scores).  A well-trained
-            # head will produce spreads >> 0.20 when it has opinions.
+            # Score spread = max(scores) - min(scores).  A trained head
+            # with ranking loss (RANK_MARGIN=0.05) produces spreads of
+            # 0.07-0.15+.  Random-init weights produce ~0.01-0.03.
+            # Threshold 0.02 only falls back to organic when the head
+            # is genuinely untrained (no checkpoint or fresh random init).
             # ----------------------------------------------------------
-            CARD_CONFIDENCE_SPREAD = 0.20
+            CARD_CONFIDENCE_SPREAD = 0.02
             score_spread = max(scores) - min(scores) if len(scores) > 1 else 0.0
             overridden = False
             organic_reason = ""
@@ -2588,8 +2604,14 @@ class Runner:
                 network_value=nv, head_scores=hs,
                 source="network_card_eval_head" if not overridden else "organic_guard_rail")
         except Exception as e:
+            import traceback
             self._log_action(
                 f"  [dim]Network card_reward failed ({e}), falling back[/dim]")
+            self.logger._emit({
+                "type": "card_eval_error",
+                "error": str(e),
+                "traceback": traceback.format_exc(),
+            })
             return None
 
     def _az_decide_event_choice(self, gs: dict) -> "Decision | None":
