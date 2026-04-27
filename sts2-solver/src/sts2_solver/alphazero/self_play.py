@@ -132,6 +132,8 @@ OPTION_EVENT_CHOICE = 15
 # Now enumerated in full_run's shop loop and bridge.shop_options_from_mcp.
 # opt_cards[i] carries the relic's vocab index from vocabs.relics.
 OPTION_SHOP_BUY_RELIC = 16
+# Boss/elite relic reward: 1-of-3 pick. opt_cards carries relic vocab IDs.
+OPTION_RELIC_PICK = 17
 
 ROOM_TYPE_TO_OPTION = {
     "weak": OPTION_MAP_WEAK,

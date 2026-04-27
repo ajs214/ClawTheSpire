@@ -76,6 +76,7 @@ from .self_play import (
     OPTION_REST, OPTION_SMITH, OPTION_SHOP_REMOVE, OPTION_SHOP_BUY,
     OPTION_SHOP_LEAVE, OPTION_CARD_REWARD, OPTION_CARD_SKIP,
     OPTION_SHOP_BUY_POTION, OPTION_EVENT_CHOICE, OPTION_SHOP_BUY_RELIC,
+    OPTION_RELIC_PICK,
     ROOM_TYPE_TO_OPTION,
     _affordable_play_actions,
 )
@@ -173,6 +174,110 @@ def _pick_best_relic(
         # pick so we never silently drop a relic grant.
         chosen = rng.choice(sample)
         return chosen, sample
+
+
+def _pick_relic_with_network(
+    pool: list[str],
+    deck: list[Card],
+    owned: set[str],
+    rng: random.Random,
+    *,
+    mcts,
+    vocabs,
+    config,
+    hp: int,
+    max_hp: int,
+    gold: int,
+    floor_num: int,
+    option_samples: list,
+    source: str = "elite",
+    sample_size: int = 3,
+) -> tuple[str | None, list[str]]:
+    """Network-driven 1-of-N relic pick with OptionSample for training.
+
+    Uses option_eval_head with OPTION_RELIC_PICK type and relic vocab IDs.
+    Falls back to deterministic _pick_best_relic on any error.
+    Always emits an OptionSample (even when falling back) so the head
+    accumulates training data from game outcomes.
+    """
+    import torch
+
+    # First, draw the offered relics (same sampling as _pick_best_relic)
+    eligible = [r for r in pool if r not in owned]
+    if not eligible:
+        return None, []
+    sample = rng.sample(eligible, min(sample_size, len(eligible)))
+
+    if len(sample) == 1:
+        # Only one option — no decision to make, but still emit a sample
+        # so the head sees what a single-option relic pick looks like.
+        granted = sample[0]
+        try:
+            network = mcts.network
+            player = PlayerState(hp=hp, max_hp=max_hp, energy=3, max_energy=3,
+                                 draw_pile=list(deck))
+            dummy = CombatState(player=player, enemies=[], floor=floor_num,
+                                gold=gold, relics=frozenset(owned))
+            st = encode_state(dummy, vocabs, config)
+            st = {k: v.to(mcts.device) for k, v in st.items()}
+
+            opt_types = [OPTION_RELIC_PICK]
+            opt_cards = [vocabs.relics.get(granted) or 0]
+            option_samples.append(OptionSample(
+                state_tensors={k: v.cpu() for k, v in st.items()},
+                option_types=opt_types, option_cards=opt_cards,
+                chosen_idx=0, value=0.0,
+            ))
+        except Exception:
+            pass
+        return granted, sample
+
+    # Multiple options — use network to pick
+    try:
+        network = mcts.network
+        player = PlayerState(hp=hp, max_hp=max_hp, energy=3, max_energy=3,
+                             draw_pile=list(deck))
+        dummy = CombatState(player=player, enemies=[], floor=floor_num,
+                            gold=gold, relics=frozenset(owned))
+        st = encode_state(dummy, vocabs, config)
+        st = {k: v.to(mcts.device) for k, v in st.items()}
+
+        opt_types = [OPTION_RELIC_PICK] * len(sample)
+        opt_cards = [vocabs.relics.get(r) or 0 for r in sample]
+
+        with torch.no_grad():
+            hidden = network.encode_state(**st)
+            best_idx, scores = network.pick_best_option(
+                hidden, opt_types, opt_cards)
+
+        # Shadow heuristic index for exploration comparison
+        shadow_idx = 0
+        try:
+            from ..relic_synergy import score_relic_for_deck
+            best_shadow_score = float("-inf")
+            for si, rid in enumerate(sample):
+                display = _RELIC_ID_TO_NAME.get(rid, rid)
+                score = score_relic_for_deck(display, deck)
+                if score > best_shadow_score:
+                    best_shadow_score = score
+                    shadow_idx = si
+        except Exception:
+            shadow_idx = 0
+
+        option_samples.append(OptionSample(
+            state_tensors={k: v.cpu() for k, v in st.items()},
+            option_types=opt_types, option_cards=opt_cards,
+            chosen_idx=best_idx, value=0.0,
+            shadow_chosen_idx=shadow_idx,
+        ))
+
+        granted = sample[best_idx]
+        return granted, sample
+
+    except Exception:
+        # Fallback to deterministic pick, still emit sample if possible
+        granted, offered = _pick_best_relic(pool, deck, owned, rng, sample_size)
+        return granted, offered
 
 
 # Character starter relics
@@ -1320,12 +1425,16 @@ def play_full_run(
                 pot = _random_potion(rng)
                 potions.append(dict(pot))
 
-            # Elite relic drop — V7: deck-aware 1-of-3 pick from the
-            # implemented-effects pool.  Previously this was a uniform
-            # rng.choice over the same pool which ignored deck shape.
+            # Elite relic drop — network-driven 1-of-3 pick with
+            # OptionSample for training the option_eval_head on relic
+            # preferences.  Falls back to deterministic _pick_best_relic
+            # if network scoring fails.
             if room_type == "elite":
-                granted, offered = _pick_best_relic(
+                granted, offered = _pick_relic_with_network(
                     IMPLEMENTED_RELIC_POOL, deck, relics, rng,
+                    mcts=mcts, vocabs=vocabs, config=config,
+                    hp=hp, max_hp=max_hp, gold=gold, floor_num=floor_num,
+                    option_samples=option_samples, source="elite",
                 )
                 if granted is not None:
                     hp, max_hp, gold, potion_slots_cap = _grant_relic(
@@ -1418,8 +1527,11 @@ def play_full_run(
                     deck_change_samples.append(deck_sample)
 
             if room_type == "boss":
-                granted, offered = _pick_best_relic(
+                granted, offered = _pick_relic_with_network(
                     IMPLEMENTED_RELIC_POOL, deck, relics, rng,
+                    mcts=mcts, vocabs=vocabs, config=config,
+                    hp=hp, max_hp=max_hp, gold=gold, floor_num=floor_num,
+                    option_samples=option_samples, source="boss",
                 )
                 if granted is not None:
                     hp, max_hp, gold, potion_slots_cap = _grant_relic(

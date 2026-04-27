@@ -2381,12 +2381,24 @@ class Runner:
             return None
 
     def _az_decide_deck_select(self, gs: dict) -> "Decision | None":
-        """Use network deck_eval_head for card removal/upgrade/transform."""
+        """Use card_eval_head to score cards for removal/upgrade/transform.
+
+        Reuses the same card_eval_head trained on card reward picks:
+        - Remove / Transform: score each candidate card as a potential
+          card-reward pick.  The LOWEST-scored card is the least valuable
+          to keep in the deck → best removal target.
+        - Upgrade: score each card's upgraded version.  The HIGHEST-scored
+          card benefits the deck most from upgrading.
+
+        Falls back to None (deterministic advisor) on any error.
+        """
         import torch
+        from .alphazero.self_play import OPTION_CARD_REWARD
         from .deterministic_advisor import Decision
 
         try:
-            st, hidden, hp, max_hp, gold, floor, deck = self._az_run_state_tensors(gs)
+            _, hidden, hp, max_hp, _gold, floor, deck_cards = (
+                self._az_run_state_tensors(gs))
             network = self._mcts.network
             vocabs = self._mcts_vocabs
 
@@ -2398,57 +2410,101 @@ class Runner:
                 return None
 
             is_remove = "remove" in prompt or "transform" in prompt
-            is_upgrade = "upgrade" in prompt
+            is_upgrade = "upgrade" in prompt or "smith" in prompt
 
-            # Build card IDs for evaluation
-            card_ids = []
-            card_indices = []  # game option indices
+            # Build deck card vocab IDs (same as _az_decide_card_reward)
+            deck_card_ids = []
+            for c in deck_cards:
+                base_id = c.id.rstrip("+")
+                deck_card_ids.append(vocabs.cards.get(base_id))
+
+            # Build option types + card IDs for card_eval_head
+            opt_types: list[int] = []
+            opt_cards: list[int] = []
+            card_indices: list[int] = []  # game option indices
+
             for card_info in cards:
-                card_id = card_info.get("card_id") or card_info.get("id", "")
-                idx = card_info.get("index", len(card_ids))
+                card_id = card_info.get("card_id") or card_info.get("id") or card_info.get("name", "")
+                idx = card_info.get("index", len(opt_types))
 
+                base_id = card_id.rstrip("+")
                 if is_upgrade:
-                    # Score the upgraded version
-                    up_id = card_id.rstrip("+") + "+"
-                    card_ids.append(vocabs.cards.get(up_id.rstrip("+")))
+                    # For upgrade decisions, score the upgraded version
+                    # so we pick whichever card benefits most from upgrading
+                    up_id = base_id + "+"
+                    vocab_id = vocabs.cards.get(up_id.rstrip("+"))
                 else:
-                    card_ids.append(vocabs.cards.get(card_id.rstrip("+")))
+                    vocab_id = vocabs.cards.get(base_id)
+
+                opt_types.append(OPTION_CARD_REWARD)
+                opt_cards.append(vocab_id)
                 card_indices.append(idx)
 
-            if not card_ids:
+            if not opt_types:
                 return None
 
+            # Score all candidates using card_eval_head
             with torch.no_grad():
-                ids_t = torch.tensor([card_ids], dtype=torch.long)
-                scores = network.evaluate_deck_change(hidden, ids_t)
+                device = hidden.device
+                types_t = torch.tensor([opt_types], dtype=torch.long, device=device)
+                cards_t = torch.tensor([opt_cards], dtype=torch.long, device=device)
+                opt_mask = torch.zeros(1, len(opt_types), dtype=torch.bool, device=device)
+
+                if deck_card_ids:
+                    deck_t = torch.tensor([deck_card_ids], dtype=torch.long, device=device)
+                    deck_mask = torch.zeros(1, len(deck_card_ids), dtype=torch.bool, device=device)
+                else:
+                    deck_t = torch.zeros(1, 1, dtype=torch.long, device=device)
+                    deck_mask = torch.ones(1, 1, dtype=torch.bool, device=device)
+
+                scores = network.evaluate_card_picks(
+                    hidden, deck_t, deck_mask, types_t, cards_t, opt_mask)
                 scores_list = scores[0].tolist()
+                nv = network.value_head(hidden).item()
 
             if is_remove:
-                # Remove: pick lowest-scored card
+                # Remove/Transform: pick the LOWEST-scored card (least valuable)
                 best = min(range(len(scores_list)), key=lambda i: scores_list[i])
+                action = "remove" if "remove" in prompt else "transform"
             else:
-                # Upgrade: pick highest-scored card
+                # Upgrade: pick the HIGHEST-scored card (most valuable upgrade)
                 best = max(range(len(scores_list)), key=lambda i: scores_list[i])
+                action = "upgrade"
 
             chosen_idx = card_indices[best]
             card_name = cards[best].get("name", "?")
-            nv = network.value_head(hidden).item()
-            action = "remove" if is_remove else "upgrade"
 
             # Build labeled scores for telemetry
             option_labels = [c.get("name", "?") for c in cards[:len(scores_list)]]
             hs = {
-                "head": "deck_eval",
+                "head": "card_eval_deck_select",
+                "action": action,
                 "chosen": best,
-                "options": [{"label": lbl, "score": round(s, 4)} for lbl, s in zip(option_labels, scores_list)],
+                "options": [{"label": lbl, "score": round(s, 4)}
+                            for lbl, s in zip(option_labels, scores_list)],
             }
+
+            self.logger._emit({
+                "type": "deck_select_network",
+                "action": action,
+                "chosen": card_name,
+                "chosen_idx": chosen_idx,
+                "scores": hs["options"],
+                "spread": round(max(scores_list) - min(scores_list), 4) if len(scores_list) > 1 else 0.0,
+            })
 
             return Decision("select_deck_card", chosen_idx,
                             f"Network: {action} {card_name} (score={scores_list[best]:.2f})",
                             network_value=nv, head_scores=hs,
-                            source="network_option_head")
+                            source="network_card_eval")
         except Exception as e:
+            import traceback
             self._log_action(f"  [dim]Network deck_select failed ({e}), falling back[/dim]")
+            self.logger._emit({
+                "type": "deck_select_error",
+                "error": str(e),
+                "traceback": traceback.format_exc(),
+            })
             return None
 
     def _az_decide_card_reward(self, gs: dict) -> "Decision | None":
@@ -3029,16 +3085,29 @@ class Runner:
             self._handle_single_deck_select(gs)
 
     def _handle_single_deck_select(self, gs: dict) -> None:
-        """Single-select deck screen — deterministic tier-list decision.
+        """Single-select deck screen — network first, deterministic fallback.
 
-        NOTE: _az_decide_deck_select is disabled because the network's
-        evaluate_deck_change method was never implemented.  Calling it
-        adds ~200ms of wasted tensor work + exception overhead per screen.
-        Re-enable once evaluate_deck_change exists on STS2Network.
+        Uses card_eval_head to score candidates:
+        - Remove/transform: lowest-scored card (least valuable to keep)
+        - Upgrade: highest-scored upgraded version
+        Falls back to deterministic tier-list if network fails.
         """
-        decision = decide_deck_select(gs)
         actions = gs.get("available_actions", [])
         run = gs.get("run") or {}
+
+        # Try network first (card_eval_head)
+        decision = None
+        if self._mcts is not None and self._mcts_vocabs is not None:
+            decision = self._az_decide_deck_select(gs)
+            if decision is not None:
+                self._log_action(
+                    f"  [green]{decision.reasoning} (source=network_card_eval)[/green]"
+                )
+
+        # Fallback to deterministic
+        if decision is None:
+            decision = decide_deck_select(gs)
+
         self._execute_deterministic(gs, decision, "deck_select", actions, run)
 
         # Wait for screen to change or confirm
@@ -3056,25 +3125,120 @@ class Runner:
                     pass
             self._log_action("  [dim]auto: confirm_selection[/dim]")
 
-    def _handle_multi_deck_select(self, gs: dict, cards: list, prompt_text: str) -> None:
-        """Multi-select deck screen — pick deterministically.
+    def _network_multi_deck_priority(
+        self, gs: dict, cards: list, prompt_text: str,
+        is_remove: bool, is_upgrade: bool,
+    ) -> "list[int] | None":
+        """Score all candidates via card_eval_head and return sorted priority list.
 
-        For remove: Strikes first, then Defends, never key card.
-        For other multi-selects: pick sequentially from index 0.
+        Returns None if network is unavailable or fails, signaling the
+        caller to use deterministic fallback.
+        """
+        import torch
+        from .alphazero.self_play import OPTION_CARD_REWARD
+
+        if self._mcts is None or self._mcts_vocabs is None:
+            return None
+
+        try:
+            _, hidden, hp, max_hp, _gold, floor, deck_cards = (
+                self._az_run_state_tensors(gs))
+            network = self._mcts.network
+            vocabs = self._mcts_vocabs
+
+            deck_card_ids = []
+            for c in deck_cards:
+                base_id = c.id.rstrip("+")
+                deck_card_ids.append(vocabs.cards.get(base_id))
+
+            opt_types: list[int] = []
+            opt_cards: list[int] = []
+            card_indices: list[int] = []
+
+            for card_info in cards:
+                card_id = (card_info.get("card_id") or card_info.get("id")
+                           or card_info.get("name", ""))
+                idx = card_info.get("index", len(opt_types))
+                base_id = card_id.rstrip("+")
+
+                if is_upgrade:
+                    up_id = base_id + "+"
+                    vocab_id = vocabs.cards.get(up_id.rstrip("+"))
+                else:
+                    vocab_id = vocabs.cards.get(base_id)
+
+                opt_types.append(OPTION_CARD_REWARD)
+                opt_cards.append(vocab_id)
+                card_indices.append(idx)
+
+            if not opt_types:
+                return None
+
+            with torch.no_grad():
+                device = hidden.device
+                types_t = torch.tensor([opt_types], dtype=torch.long, device=device)
+                cards_t = torch.tensor([opt_cards], dtype=torch.long, device=device)
+                opt_mask = torch.zeros(1, len(opt_types), dtype=torch.bool, device=device)
+
+                if deck_card_ids:
+                    deck_t = torch.tensor([deck_card_ids], dtype=torch.long, device=device)
+                    deck_mask = torch.zeros(1, len(deck_card_ids), dtype=torch.bool, device=device)
+                else:
+                    deck_t = torch.zeros(1, 1, dtype=torch.long, device=device)
+                    deck_mask = torch.ones(1, 1, dtype=torch.bool, device=device)
+
+                scores = network.evaluate_card_picks(
+                    hidden, deck_t, deck_mask, types_t, cards_t, opt_mask)
+                scores_list = scores[0].tolist()
+
+            # Pair (score, game_index) for sorting
+            scored_pairs = list(zip(scores_list, card_indices))
+
+            if is_remove:
+                # Remove: lowest score first (least valuable to keep)
+                scored_pairs.sort(key=lambda x: x[0])
+                action = "remove"
+            else:
+                # Upgrade: highest score first (most valuable to upgrade)
+                scored_pairs.sort(key=lambda x: -x[0])
+                action = "upgrade"
+
+            priority = [idx for _, idx in scored_pairs]
+
+            # Telemetry
+            option_labels = [c.get("name", "?") for c in cards[:len(scores_list)]]
+            self.logger._emit({
+                "type": "multi_deck_select_network",
+                "action": action,
+                "priority": priority,
+                "scores": [{"label": lbl, "score": round(s, 4)}
+                           for lbl, s in zip(option_labels, scores_list)],
+            })
+            self._log_action(
+                f"  [green]Multi-{action} (network): priority "
+                f"{[cards[i].get('name', '?') for i in range(len(cards)) if cards[i].get('index', i) in priority[:3]]}[/green]"
+            )
+
+            return priority
+        except Exception as e:
+            self._log_action(f"  [dim]Network multi-deck scoring failed ({e}), falling back[/dim]")
+            return None
+
+    def _handle_multi_deck_select(self, gs: dict, cards: list, prompt_text: str) -> None:
+        """Multi-select deck screen — network-scored priority, deterministic fallback.
+
+        Uses card_eval_head to rank candidates:
+        - Remove: lowest-scored cards first (least valuable to keep)
+        - Upgrade: highest-scored cards first (most valuable to upgrade)
+        - Discard: uses existing _score_discard_priority (mid-combat, no network)
+        Falls back to deterministic Strike/Defend ordering if network fails.
         """
         import re
         multi_match = re.search(r"choose\s+(\d+)", prompt_text)
         num_to_pick = int(multi_match.group(1)) if multi_match else 2
 
         is_remove = "remove" in prompt_text
-        is_upgrade = "upgrade" in prompt_text
-        # Multi-discard surfaces: Gambling Chip ("Discard any number of
-        # cards"), multi-card Survivor variants, etc. The older
-        # _handle_multi_deck_select had no is_discard branch, so these
-        # prompts fell into the 'else' path below and picked cards in
-        # raw hand-index order — totally ignoring Wounds. Route them
-        # through the same priority scorer the single-discard path uses
-        # so junk gets queued first.
+        is_upgrade = "upgrade" in prompt_text or "smith" in prompt_text
         is_discard = (
             "discard" in prompt_text
             and "discard pile" not in prompt_text
@@ -3082,38 +3246,43 @@ class Runner:
 
         # Build priority order for indices
         if is_discard:
+            # Mid-combat discard: use existing priority scorer (no network)
             scored = []
             for card in cards:
                 idx = card.get("index", 0)
                 score = self._score_discard_priority(gs, card)
                 scored.append((score, idx))
-            scored.sort(key=lambda x: x[0])  # lowest score = discard first
+            scored.sort(key=lambda x: x[0])
             priority = [idx for _, idx in scored]
             self._log_action(
                 f"  [cyan]Multi-discard: priority {priority[:num_to_pick]} "
                 f"(junk-first)[/cyan]"
             )
-        elif is_remove:
-            # Remove Strikes first, then Defends, then others, NEVER key card
-            from .config import CHARACTER_CONFIG, detect_character
-            _char = detect_character(gs)
-            _key = CHARACTER_CONFIG.get(_char, {}).get("key_card", "Bash").lower()
-            priority = []
-            for card in cards:
-                name = (card.get("name") or "").lower()
-                idx = card.get("index", 0)
-                if _key in name:
-                    continue  # Never remove key card
-                if "strike" in name:
-                    priority.insert(0, idx)  # Strikes first
-                elif "defend" in name:
-                    priority.append(idx)  # Defends after Strikes
-                else:
-                    priority.append(idx)  # Others last
-            self._log_action(f"  [cyan]Multi-remove: picking {num_to_pick} from priority {priority[:num_to_pick]}[/cyan]")
         else:
-            # For upgrade/other: just pick sequentially
-            priority = [card.get("index", i) for i, card in enumerate(cards)]
+            # Try network scoring for remove/upgrade/transform
+            priority = self._network_multi_deck_priority(gs, cards, prompt_text, is_remove, is_upgrade)
+
+            if priority is None:
+                # Fallback: deterministic Strike/Defend priority
+                if is_remove:
+                    from .config import CHARACTER_CONFIG, detect_character
+                    _char = detect_character(gs)
+                    _key = CHARACTER_CONFIG.get(_char, {}).get("key_card", "Bash").lower()
+                    priority = []
+                    for card in cards:
+                        name = (card.get("name") or "").lower()
+                        idx = card.get("index", 0)
+                        if _key in name:
+                            continue
+                        if "strike" in name:
+                            priority.insert(0, idx)
+                        elif "defend" in name:
+                            priority.append(idx)
+                        else:
+                            priority.append(idx)
+                    self._log_action(f"  [cyan]Multi-remove (deterministic): priority {priority[:num_to_pick]}[/cyan]")
+                else:
+                    priority = [card.get("index", i) for i, card in enumerate(cards)]
 
         picked = 0
         attempted_indices: set[int] = set()
