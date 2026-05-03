@@ -20,6 +20,7 @@ import random
 import statistics
 import sys
 import time
+import copy
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -27,10 +28,12 @@ from typing import Any
 
 from .combat_engine import (
     can_play_card,
+    end_combat_relics,
     end_turn,
     is_combat_over,
     play_card,
     resolve_enemy_intents,
+    start_combat,
     start_turn,
     tick_enemy_powers,
 )
@@ -131,7 +134,7 @@ ENEMY_MOVE_TABLES: dict[str, list[dict]] = {
         {"type": "Attack", "damage": 14, "hits": 1},                      # Headbutt
     ],
     "EYE_WITH_TEETH": [
-        {"type": "StatusCard"},                                            # Distract (adds 3 Dazed)
+        {"type": "StatusCard", "status_count": 3, "status_card_id": "Dazed", "status_card_name": "Dazed"},  # Distract (adds 3 Dazed)
     ],
     "CUBEX_CONSTRUCT": [
         {"type": "Buff", "self_strength": 2},                # Charge Up
@@ -249,52 +252,89 @@ ENEMY_MOVE_TABLES: dict[str, list[dict]] = {
         {"type": "Buff", "all_strength": 3},                       # Ritual (buffs team)
     ],
 
+}
+
+# Boss phase 2 tables — used when HP drops below threshold (default 50%).
+# Phase 2 is more aggressive: higher damage, more frequent attacks, stronger buffs.
+BOSS_PHASE2_TABLES: dict[str, dict] = {
+    "CEREMONIAL_BEAST": {
+        "table": [
+            {"type": "Buff", "self_strength": 5, "self_block": 20},    # Enraged Beast Cry
+            {"type": "Attack", "damage": 22, "hits": 1},               # Savage Plow
+            {"type": "Attack", "damage": 18, "hits": 2},               # Frenzied Stomp x2
+            {"type": "Attack", "damage": 25, "hits": 1},               # Devastating Crush
+        ],
+        "hp_pct": 0.50,
+    },
+    "VANTOM": {
+        "table": [
+            {"type": "Attack", "damage": 10, "hits": 2},               # Ink Barrage x2
+            {"type": "Attack", "damage": 8, "hits": 3},                # Inky Lance Flurry x3
+            {"type": "Buff", "self_strength": 6},                       # Desperate Prepare
+            {"type": "Attack", "damage": 35, "hits": 1},               # Savage Dismember
+        ],
+        "hp_pct": 0.50,
+    },
+    "KIN_PRIEST": {
+        "table": [
+            {"type": "Debuff", "player_frail": 3, "damage": 12},      # Greater Orb Of Frailty
+            {"type": "Debuff", "player_weak": 3, "damage": 12},       # Greater Orb Of Weakness
+            {"type": "Attack", "damage": 5, "hits": 5},                # Focused Beam x5
+            {"type": "Buff", "all_strength": 5},                       # Greater Ritual
+        ],
+        "hp_pct": 0.50,
+    },
+}
+
+# Remaining enemy move tables (split from main dict for readability)
+ENEMY_MOVE_TABLES.update({
+
     # ── New weak encounters ──
     "CORPSE_SLUG": [
-        {"type": "Attack", "damage": 5, "hits": 2},                # Whip Slap x2
-        {"type": "Attack", "damage": 10, "hits": 1},               # Glomp
+        {"type": "Attack", "damage": 3, "hits": 2},                # Whip Slap x2
+        {"type": "Attack", "damage": 8, "hits": 1},                # Glomp
         {"type": "Debuff", "player_frail": 1},                     # Goop
     ],
     "EXOSKELETON": [
-        {"type": "Attack", "damage": 5, "hits": 2},                # Skitter x2
-        {"type": "Attack", "damage": 12, "hits": 1},               # Mandible
+        {"type": "Attack", "damage": 1, "hits": 2},                # Skitter x2
+        {"type": "Attack", "damage": 8, "hits": 1},                # Mandible
         {"type": "Buff", "self_strength": 2},                       # Enrage
     ],
     "SCROLL_OF_BITING": [
-        {"type": "Attack", "damage": 10, "hits": 1},               # Chomp
-        {"type": "Attack", "damage": 4, "hits": 3},                # Chew x3
+        {"type": "Attack", "damage": 14, "hits": 1},               # Chomp
+        {"type": "Attack", "damage": 5, "hits": 3},                # Chew x3
         {"type": "Buff", "self_strength": 3},                       # More Teeth
     ],
     "SEAPUNK": [
-        {"type": "Attack", "damage": 9, "hits": 1},                # Sea Kick
-        {"type": "Attack", "damage": 6, "hits": 2},                # Spinning Kick x2
+        {"type": "Attack", "damage": 11, "hits": 1},               # Sea Kick
+        {"type": "Attack", "damage": 2, "hits": 2},                # Spinning Kick x2
         {"type": "Debuff", "player_weak": 1, "self_block": 6},    # Bubble Burp
     ],
     "SLUDGE_SPINNER": [
         {"type": "Debuff", "player_frail": 1, "player_weak": 1},  # Oil Spray
-        {"type": "Attack", "damage": 12, "hits": 1},               # Slam
+        {"type": "Attack", "damage": 8, "hits": 1},                # Slam
         {"type": "Buff", "self_strength": 2},                       # Rage
     ],
     "TUNNELER": [
-        {"type": "Attack", "damage": 8, "hits": 1},                # Bite
+        {"type": "Attack", "damage": 13, "hits": 1},               # Bite
         {"type": "Defend", "block": 10},                            # Burrow (digs down)
         {"type": "Attack", "damage": 14, "hits": 1},               # Below Move (emerges)
         {"type": "Debuff", "player_weak": 1},                      # Dizzy
     ],
     "TOADPOLE": [
-        {"type": "Attack", "damage": 6, "hits": 1},                # Spike Spit
-        {"type": "Attack", "damage": 3, "hits": 3},                # Whirl x3
+        {"type": "Attack", "damage": 3, "hits": 1},                # Spike Spit
+        {"type": "Attack", "damage": 7, "hits": 3},                # Whirl x3
         {"type": "Buff", "self_strength": 2, "self_block": 4},    # Spiken
     ],
     "THIEVING_HOPPER": [
         {"type": "Attack", "damage": 6, "hits": 1},                # Thievery (steals gold)
-        {"type": "Attack", "damage": 8, "hits": 1},                # Nab
-        {"type": "Attack", "damage": 4, "hits": 3},                # Hat Trick x3
+        {"type": "Attack", "damage": 14, "hits": 1},               # Nab
+        {"type": "Attack", "damage": 21, "hits": 3},               # Hat Trick x3
         {"type": "Defend", "block": 8},                             # Flutter
     ],
     "DEVOTED_SCULPTOR": [
         {"type": "Buff", "self_strength": 4},                       # Forbidden Incantation
-        {"type": "Attack", "damage": 16, "hits": 1},               # Savage
+        {"type": "Attack", "damage": 12, "hits": 1},               # Savage
     ],
     "WRIGGLER": [
         {"type": "Attack", "damage": 7, "hits": 1},                # Nasty Bite
@@ -308,40 +348,40 @@ ENEMY_MOVE_TABLES: dict[str, list[dict]] = {
         {"type": "Debuff", "player_vulnerable": 2},                    # Screech
     ],
     "BOWLBUG_EGG": [
-        {"type": "Attack", "damage": 6, "hits": 1},                # Bite
+        {"type": "Attack", "damage": 7, "hits": 1},                # Bite
     ],
     "BOWLBUG_NECTAR": [
-        {"type": "Attack", "damage": 7, "hits": 1},                # Thrash
+        {"type": "Attack", "damage": 3, "hits": 1},                # Thrash
         {"type": "Buff", "all_strength": 1},                        # Buff (heals/buffs team)
-        {"type": "Attack", "damage": 10, "hits": 1},               # Thrash (stronger)
+        {"type": "Attack", "damage": 3, "hits": 1},                # Thrash (stronger)
     ],
     "BOWLBUG_ROCK": [
-        {"type": "Attack", "damage": 14, "hits": 1},               # Headbutt
+        {"type": "Attack", "damage": 15, "hits": 1},               # Headbutt
         {"type": "Debuff", "player_weak": 1},                      # Dizzy
     ],
     "BOWLBUG_SILK": [
-        {"type": "Attack", "damage": 9, "hits": 1},                # Trash
+        {"type": "Attack", "damage": 4, "hits": 1},                # Trash
         {"type": "Debuff", "player_frail": 2, "damage": 5},       # Toxic Spit
     ],
     "TWO_TAILED_RAT": [
-        {"type": "Attack", "damage": 5, "hits": 2},                # Scratch x2
-        {"type": "Attack", "damage": 8, "hits": 1, "player_frail": 1},  # Disease Bite
+        {"type": "Attack", "damage": 8, "hits": 2},                # Scratch x2
+        {"type": "Attack", "damage": 6, "hits": 1, "player_frail": 1},  # Disease Bite
         {"type": "Debuff", "player_weak": 1},                      # Screech
     ],
     "PUNCH_CONSTRUCT": [
         {"type": "Buff", "self_strength": 3},                       # Ready (charge up)
-        {"type": "Attack", "damage": 18, "hits": 1},               # Strong Punch
-        {"type": "Attack", "damage": 6, "hits": 3},                # Fast Punch x3
+        {"type": "Attack", "damage": 14, "hits": 1},               # Strong Punch
+        {"type": "Attack", "damage": 5, "hits": 3},                # Fast Punch x3
     ],
     "FROG_KNIGHT": [
         {"type": "Buff", "self_strength": 2, "self_block": 8},    # For the Queen
-        {"type": "Attack", "damage": 16, "hits": 1},               # Strike Down Evil
-        {"type": "Attack", "damage": 5, "hits": 3},                # Tongue Lash x3
-        {"type": "Attack", "damage": 20, "hits": 1},               # Beetle Charge
+        {"type": "Attack", "damage": 21, "hits": 1},               # Strike Down Evil
+        {"type": "Attack", "damage": 13, "hits": 1},               # Tongue Lash
+        {"type": "Attack", "damage": 35, "hits": 1},               # Beetle Charge
     ],
     "FOSSIL_STALKER": [
-        {"type": "Attack", "damage": 10, "hits": 1},               # Tackle
-        {"type": "Debuff", "player_vulnerable": 2, "damage": 6},  # Latch
+        {"type": "Attack", "damage": 9, "hits": 1},                # Tackle
+        {"type": "Debuff", "player_vulnerable": 2, "damage": 12},  # Latch
         {"type": "Attack", "damage": 4, "hits": 4},                # Lash x4
     ],
     "SPINY_TOAD": [
@@ -352,10 +392,10 @@ ENEMY_MOVE_TABLES: dict[str, list[dict]] = {
     "LIVING_FOG": [
         {"type": "Debuff", "player_frail": 1, "player_weak": 1},  # Advanced Gas
         {"type": "Buff", "self_strength": 3},                       # Bloat
-        {"type": "Attack", "damage": 18, "hits": 1},               # Super Gas Blast
+        {"type": "Attack", "damage": 8, "hits": 1},                # Super Gas Blast
     ],
     "GAS_BOMB": [
-        {"type": "Attack", "damage": 20, "hits": 1},               # Explode (dies after)
+        {"type": "Attack", "damage": 8, "hits": 1},                # Explode (dies after)
     ],
     "LOUSE_PROGENITOR": [
         {"type": "Attack", "damage": 8, "hits": 2},                # Web Cannon x2
@@ -364,93 +404,86 @@ ENEMY_MOVE_TABLES: dict[str, list[dict]] = {
     ],
     "HUNTER_KILLER": [
         {"type": "Debuff", "player_vulnerable": 2},                # Tenderizing Goop
-        {"type": "Attack", "damage": 12, "hits": 1},               # Bite
-        {"type": "Attack", "damage": 5, "hits": 3},                # Puncture x3
+        {"type": "Attack", "damage": 17, "hits": 1},               # Bite
+        {"type": "Attack", "damage": 7, "hits": 3},                # Puncture x3
     ],
     "FABRICATOR": [
         {"type": "Buff", "self_strength": 2, "self_block": 6},    # Fabricate
-        {"type": "Attack", "damage": 10, "hits": 1},               # Fabricating Strike
-        {"type": "Attack", "damage": 22, "hits": 1},               # Disintegrate
+        {"type": "Attack", "damage": 18, "hits": 1},               # Fabricating Strike
+        {"type": "Attack", "damage": 11, "hits": 1},               # Disintegrate
     ],
     "CALCIFIED_CULTIST": [
         {"type": "Buff", "self_strength": 2},                       # Ritual
         {"type": "Attack", "damage": 10, "hits": 1},               # Smash
-        {"type": "Attack", "damage": 6, "hits": 2},                # Dark Strike x2
+        {"type": "Attack", "damage": 9, "hits": 2},                # Dark Strike x2
     ],
     "DAMP_CULTIST": [
         {"type": "Debuff", "player_weak": 2},                      # Hex
-        {"type": "Attack", "damage": 8, "hits": 1},                # Chop
+        {"type": "Attack", "damage": 1, "hits": 1},                # Chop
         {"type": "Buff", "all_strength": 1},                        # Incantation
     ],
     "OWL_MAGISTRATE": [
         {"type": "Debuff", "player_frail": 2, "player_weak": 1},  # Judgement
-        {"type": "Attack", "damage": 10, "hits": 2},               # Talon Strike x2
+        {"type": "Attack", "damage": 4, "hits": 2},                # Talon Strike x2
         {"type": "Buff", "self_strength": 3, "self_block": 8},    # Roost
     ],
     "SLIMED_BERSERKER": [
-        {"type": "Attack", "damage": 7, "hits": 1},                # Slime Attack
+        {"type": "Attack", "damage": 30, "hits": 1},               # Slime Attack
         {"type": "Buff", "self_strength": 4},                       # Rage
         {"type": "Attack", "damage": 5, "hits": 3},                # Flurry x3
     ],
     "MYTE": [
-        {"type": "Attack", "damage": 4, "hits": 1},                # Nibble
+        {"type": "Attack", "damage": 13, "hits": 1},               # Nibble
         {"type": "Buff", "self_strength": 1},                       # Swarm
     ],
     "AXEBOT": [
-        {"type": "Attack", "damage": 10, "hits": 1, "self_block": 5},  # Axe Swing
-        {"type": "Attack", "damage": 6, "hits": 2},                     # Double Chop x2
-        {"type": "Buff", "self_strength": 2},                            # Sharpen
+        {"type": "Attack", "damage": 5, "hits": 1, "self_block": 5},   # Axe Swing (One-Two)
+        {"type": "Attack", "damage": 8, "hits": 1},                    # Hammer Uppercut
+        {"type": "Buff", "self_strength": 2},                           # Sharpen
     ],
     "GLOBE_HEAD": [
-        {"type": "Attack", "damage": 8, "hits": 1},                # Beam
-        {"type": "Debuff", "player_vulnerable": 1, "damage": 6},  # Flash
-        {"type": "Attack", "damage": 12, "hits": 1},               # Overload
+        {"type": "Attack", "damage": 6, "hits": 1},                # Thunder Strike
+        {"type": "Debuff", "player_vulnerable": 1, "damage": 13},  # Shocking Slap
+        {"type": "Attack", "damage": 16, "hits": 1},               # Galvanic Burst
     ],
     "HAUNTED_SHIP": [
-        {"type": "Attack", "damage": 6, "hits": 3},                # Broadside x3
-        {"type": "Debuff", "player_frail": 2},                     # Ghost Wind
-        {"type": "Attack", "damage": 18, "hits": 1},               # Ram
+        {"type": "Attack", "damage": 10, "hits": 1},               # Ramming Speed
+        {"type": "Attack", "damage": 13, "hits": 1},               # Swipe
+        {"type": "Debuff", "player_frail": 2},                     # Haunt
+        {"type": "Attack", "damage": 4, "hits": 1},                # Stomp
     ],
     "SEWER_CLAM": [
-        {"type": "Defend", "block": 8},                             # Shell Up
-        {"type": "Attack", "damage": 10, "hits": 1, "player_weak": 1},  # Spit
-        {"type": "Attack", "damage": 14, "hits": 1},               # Snap
+        {"type": "Defend", "block": 8},                             # Pressurize
+        {"type": "Attack", "damage": 10, "hits": 1},               # Jet
     ],
     "THE_LOST": [
-        {"type": "Attack", "damage": 6, "hits": 2},                # Slash x2
+        {"type": "Attack", "damage": 4, "hits": 2},                # Slash x2
         {"type": "Debuff", "player_frail": 1},                     # Haunt
     ],
     "THE_FORGOTTEN": [
-        {"type": "Attack", "damage": 12, "hits": 1},               # Crush
+        {"type": "Attack", "damage": 15, "hits": 1},               # Crush
         {"type": "Buff", "self_strength": 2, "self_block": 6},    # Remember
     ],
     "THE_OBSCURA": [
         {"type": "Debuff", "player_weak": 2, "player_frail": 1},  # Obscure
-        {"type": "Attack", "damage": 9, "hits": 2},                # Shadow Strike x2
-        {"type": "Attack", "damage": 16, "hits": 1},               # Void Blast
+        {"type": "Attack", "damage": 10, "hits": 2},               # Shadow Strike x2
+        {"type": "Attack", "damage": 6, "hits": 1},                # Void Blast
     ],
     "OVICOPTER": [
-        {"type": "Attack", "damage": 8, "hits": 1},                # Swoop
+        {"type": "Attack", "damage": 16, "hits": 1},               # Smash
         {"type": "Buff"},                                           # Lay Egg (summons)
-        {"type": "Attack", "damage": 5, "hits": 3},                # Barrage x3
+        {"type": "Attack", "damage": 7, "hits": 1},                # Tenderizer
     ],
     "TOUGH_EGG": [
         {"type": "Defend", "block": 6},                             # Harden
-        {"type": "Attack", "damage": 8, "hits": 1},                # Hatch (emerges)
+        {"type": "Attack", "damage": 4, "hits": 1},                # Nibble
     ],
 
     # ── New elites ──
-    "DECIMILLIPEDE_SEGMENT_FRONT": [
-        {"type": "Attack", "damage": 6, "hits": 3},                # Mandible Flurry x3
-        {"type": "Buff", "self_strength": 2, "self_block": 8},    # Burrow
-    ],
-    "DECIMILLIPEDE_SEGMENT_MIDDLE": [
-        {"type": "Attack", "damage": 8, "hits": 2},                # Body Slam x2
-        {"type": "Defend", "block": 12},                            # Curl Up
-    ],
-    "DECIMILLIPEDE_SEGMENT_BACK": [
-        {"type": "Attack", "damage": 5, "hits": 4},                # Tail Whip x4
-        {"type": "Debuff", "player_vulnerable": 2},                # Acid Spray
+    "DECIMILLIPEDE_SEGMENT": [
+        {"type": "Attack", "damage": 5, "hits": 1},                # Writhe
+        {"type": "Buff", "self_block": 6},                         # Bulk
+        {"type": "Debuff", "player_constrict": 2},                 # Constrict
     ],
     "ENTOMANCER": [
         {"type": "Buff", "self_strength": 3},                       # Summon Swarm
@@ -459,44 +492,44 @@ ENEMY_MOVE_TABLES: dict[str, list[dict]] = {
         {"type": "Attack", "damage": 20, "hits": 1},               # Devour
     ],
     "SKULKING_COLONY": [
-        {"type": "Attack", "damage": 4, "hits": 5},                # Swarm x5
+        {"type": "Attack", "damage": 16, "hits": 5},               # Swarm x5
         {"type": "Buff", "self_strength": 3, "self_block": 10},   # Regroup
-        {"type": "Attack", "damage": 18, "hits": 1},               # Colony Crush
+        {"type": "Attack", "damage": 6, "hits": 1},                # Colony Crush
         {"type": "Debuff", "player_weak": 2, "player_frail": 1},  # Overwhelm
     ],
     "MECHA_KNIGHT": [
-        {"type": "Attack", "damage": 12, "hits": 1, "self_block": 8},  # Shield Bash
-        {"type": "Attack", "damage": 8, "hits": 3},                     # Triple Strike x3
-        {"type": "Buff", "self_strength": 4},                            # Overclock
-        {"type": "Attack", "damage": 25, "hits": 1},                    # Mega Slash
+        {"type": "Attack", "damage": 25, "hits": 1, "self_block": 8},  # Shield Bash
+        {"type": "Attack", "damage": 8, "hits": 3},                    # Triple Strike x3
+        {"type": "Buff", "self_strength": 4},                           # Overclock
+        {"type": "Attack", "damage": 35, "hits": 1},                   # Mega Slash
     ],
     "INFESTED_PRISM": [
-        {"type": "Attack", "damage": 6, "hits": 3},                # Refracted Beam x3
+        {"type": "Attack", "damage": 22, "hits": 3},               # Refracted Beam x3
         {"type": "Debuff", "player_vulnerable": 2, "player_weak": 1},  # Prismatic Haze
-        {"type": "Attack", "damage": 20, "hits": 1},               # Overcharge
+        {"type": "Attack", "damage": 16, "hits": 1},               # Overcharge
         {"type": "Buff", "self_strength": 3, "self_block": 12},   # Crystal Shell
     ],
     "TERROR_EEL": [
-        {"type": "Attack", "damage": 5, "hits": 4},                # Electric Bite x4
+        {"type": "Attack", "damage": 17, "hits": 4},               # Electric Bite x4
         {"type": "Debuff", "player_frail": 2, "player_vulnerable": 2},  # Terrify
         {"type": "Attack", "damage": 22, "hits": 1},               # Thunder Slam
         {"type": "Buff", "self_strength": 4},                       # Charge Up
     ],
     "SOUL_NEXUS": [
         {"type": "Debuff", "player_weak": 3},                      # Soul Drain
-        {"type": "Attack", "damage": 8, "hits": 3},                # Spirit Barrage x3
+        {"type": "Attack", "damage": 29, "hits": 3},               # Spirit Barrage x3
         {"type": "Buff", "self_strength": 5},                       # Absorb
-        {"type": "Attack", "damage": 25, "hits": 1},               # Obliterate
+        {"type": "Attack", "damage": 6, "hits": 1},                # Obliterate
     ],
     "PHANTASMAL_GARDENER": [
         {"type": "Debuff", "player_frail": 2},                     # Wilt
-        {"type": "Attack", "damage": 10, "hits": 2},               # Vine Lash x2
+        {"type": "Attack", "damage": 5, "hits": 2},                # Vine Lash x2
         {"type": "Buff", "self_strength": 3, "self_block": 10},   # Overgrow
         {"type": "Attack", "damage": 7, "hits": 4},                # Thorn Storm x4
     ],
     "FLAIL_KNIGHT": [
-        {"type": "Attack", "damage": 14, "hits": 1},               # Flail Swing
-        {"type": "Attack", "damage": 6, "hits": 3},                # Chain Whip x3
+        {"type": "Attack", "damage": 9, "hits": 1},                # Flail Swing
+        {"type": "Attack", "damage": 15, "hits": 3},               # Chain Whip x3
         {"type": "Buff", "self_strength": 2, "self_block": 10},   # Rally
     ],
     "MAGI_KNIGHT": [
@@ -505,118 +538,316 @@ ENEMY_MOVE_TABLES: dict[str, list[dict]] = {
         {"type": "Buff", "all_strength": 2},                        # Empower (team buff)
     ],
     "SPECTRAL_KNIGHT": [
-        {"type": "Attack", "damage": 5, "hits": 4},                # Phase Strike x4
+        {"type": "Attack", "damage": 15, "hits": 4},               # Phase Strike x4
         {"type": "Debuff", "player_vulnerable": 2},                # Haunt
         {"type": "Defend", "block": 15},                            # Ethereal Shield
     ],
 
     # ── New bosses ──
     "DOORMAKER": [
-        {"type": "Buff", "self_strength": 3, "self_block": 15},    # Seal Door
-        {"type": "Attack", "damage": 10, "hits": 3},               # Door Slam x3
-        {"type": "Debuff", "player_frail": 2, "player_weak": 2},  # Dimensional Rip
-        {"type": "Attack", "damage": 28, "hits": 1},               # Grand Slam
+        {"type": "Buff", "self_strength": 2, "self_block": 15},    # What is it (startup) — v0.103: str 3→2
+        {"type": "Attack", "damage": 25, "hits": 1},               # Precision Beam — v0.103: 31→25
+        {"type": "Attack", "damage": 32, "hits": 1},               # Get Back In — v0.103: 40→32, debuffs removed
     ],
     "DOOR": [
-        {"type": "Defend", "block": 20},                            # Reinforce
-        {"type": "Attack", "damage": 12, "hits": 1},               # Slam
+        {"type": "Attack", "damage": 25, "hits": 1},               # Dramatic Open
+        {"type": "Attack", "damage": 20, "hits": 1},               # Enforce
+        {"type": "Attack", "damage": 15, "hits": 1},               # Door Slam
     ],
     "WATERFALL_GIANT": [
-        {"type": "Attack", "damage": 8, "hits": 3},                # Cascade x3
-        {"type": "Buff", "self_strength": 4, "self_block": 12},   # Rising Tide
-        {"type": "Attack", "damage": 30, "hits": 1},               # Tidal Crush
-        {"type": "Debuff", "player_frail": 3},                     # Drenching Wave
-        {"type": "Attack", "damage": 12, "hits": 3},               # Torrent x3
+        {"type": "Defend", "block": 8},                             # Pressurize (setup)
+        {"type": "Attack", "damage": 15, "hits": 1},               # Stomp
+        {"type": "Attack", "damage": 10, "hits": 1},               # Ram
+        {"type": "Buff", "self_strength": 2},                       # Pressure Up
+        {"type": "Attack", "damage": 13, "hits": 1},               # Base Pressure Gun
     ],
     "LAGAVULIN_MATRIARCH": [
-        {"type": "Buff"},                                           # Slumber (asleep T1)
-        {"type": "Buff"},                                           # Slumber (asleep T2)
+        {"type": "Buff"},                                           # Sleep (asleep T1)
+        {"type": "Buff"},                                           # Sleep (asleep T2)
         {"type": "Debuff", "player_shrink": 2, "player_frail": 2},  # Wake (debuff burst)
-        {"type": "Attack", "damage": 20, "hits": 1},               # Pummel
-        {"type": "Attack", "damage": 8, "hits": 3},                # Flurry x3
-        {"type": "Buff", "self_strength": 3},                       # Roar
+        {"type": "Attack", "damage": 19, "hits": 1},               # Slash
+        {"type": "Attack", "damage": 12, "hits": 1},               # Slash2
+        {"type": "Attack", "damage": 9, "hits": 1},                # Disembowel
     ],
     "KNOWLEDGE_DEMON": [
-        {"type": "Debuff", "player_weak": 2, "player_vulnerable": 2},  # Dark Knowledge
-        {"type": "Attack", "damage": 7, "hits": 4},                     # Mind Rend x4
-        {"type": "Buff", "self_strength": 5},                            # Study
-        {"type": "Attack", "damage": 30, "hits": 1},                    # Enlightened Fury
+        {"type": "Debuff", "player_weak": 2, "player_vulnerable": 2},  # Curse of Knowledge
+        {"type": "Attack", "damage": 17, "hits": 1},                    # Slap
+        {"type": "Buff", "self_strength": 2},                            # Ponder
+        {"type": "Attack", "damage": 8, "hits": 1},                     # Knowledge Overwhelming
     ],
     "CRUSHER": [
-        {"type": "Attack", "damage": 12, "hits": 2},               # Claw Crush x2
-        {"type": "Buff", "self_strength": 3, "self_block": 15},   # Harden Shell
-        {"type": "Attack", "damage": 25, "hits": 1},               # Mega Claw
+        {"type": "Attack", "damage": 12, "hits": 1},               # Thrash
+        {"type": "Attack", "damage": 4, "hits": 1},                # Enlarging Strike
+        {"type": "Attack", "damage": 6, "hits": 1},                # Bug Sting
+        {"type": "Attack", "damage": 12, "hits": 1},               # Guarded Strike
     ],
     "ROCKET": [
-        {"type": "Attack", "damage": 5, "hits": 5},                # Rocket Barrage x5
-        {"type": "Debuff", "player_vulnerable": 2},                # Lock On
-        {"type": "Attack", "damage": 20, "hits": 1},               # Big Shot
+        {"type": "Attack", "damage": 3, "hits": 1},                # Targeting Reticle
+        {"type": "Attack", "damage": 18, "hits": 1},               # Precision Beam
+        {"type": "Debuff", "player_vulnerable": 2},                # Charge Up
+        {"type": "Attack", "damage": 31, "hits": 1},               # Laser
     ],
     "QUEEN": [
-        {"type": "Buff", "self_strength": 4, "self_block": 12},   # Royal Decree
-        {"type": "Attack", "damage": 8, "hits": 4},                # Swarm Command x4
-        {"type": "Debuff", "player_frail": 2, "player_weak": 2},  # Weakening Aura
-        {"type": "Attack", "damage": 30, "hits": 1},               # Queen's Wrath
+        {"type": "Buff", "self_strength": 4, "self_block": 12},   # Puppet Strings
+        {"type": "Attack", "damage": 15, "hits": 1},               # Off With Your Head
+        {"type": "Debuff", "player_frail": 2, "player_weak": 2},  # Burn Bright for Me
+        {"type": "Attack", "damage": 15, "hits": 1},               # Execution
     ],
     "TORCH_HEAD_AMALGAM": [
-        {"type": "Attack", "damage": 10, "hits": 2},               # Flame Lash x2
-        {"type": "Buff", "self_strength": 3},                       # Ignite
-        {"type": "Attack", "damage": 18, "hits": 1},               # Fireball
+        {"type": "Attack", "damage": 18, "hits": 1},               # Tackle
+        {"type": "Attack", "damage": 14, "hits": 1},               # Weak Tackle
+        {"type": "Buff", "self_strength": 2},                       # Beam (soul beam)
+        {"type": "Attack", "damage": 8, "hits": 1},                # Soul Beam variant
     ],
     "SOUL_FYSH": [
-        {"type": "Debuff", "player_weak": 2},                      # Soul Siphon
-        {"type": "Attack", "damage": 6, "hits": 4},                # Bubble Barrage x4
-        {"type": "Buff", "self_strength": 4, "self_block": 10},   # Deep Dive
-        {"type": "Attack", "damage": 25, "hits": 1},               # Leviathan Crush
-        {"type": "Debuff", "player_frail": 3, "damage": 12},      # Abyssal Wave
+        {"type": "Debuff", "player_weak": 2},                      # Beckon
+        {"type": "Attack", "damage": 16, "hits": 1},               # De-Gas
+        {"type": "Attack", "damage": 7, "hits": 1},                # Gaze
+        {"type": "Debuff", "player_frail": 1},                     # Fade (escape)
+        {"type": "Attack", "damage": 11, "hits": 1},               # Scream
     ],
     "TEST_SUBJECT": [
-        {"type": "Buff", "self_strength": 3},                       # Mutate
-        {"type": "Attack", "damage": 10, "hits": 2},               # Lash x2
-        {"type": "Attack", "damage": 7, "hits": 4},                # Frenzy x4
-        {"type": "Debuff", "player_vulnerable": 3},                # Acid Spray
-        {"type": "Attack", "damage": 28, "hits": 1},               # Annihilate
+        {"type": "Buff", "self_strength": 3},                       # Respawn (phase change)
+        {"type": "Attack", "damage": 20, "hits": 1},               # Bite
+        {"type": "Attack", "damage": 14, "hits": 1},               # Skull Bash
+        {"type": "Attack", "damage": 30, "hits": 1},               # Pounce
+        {"type": "Attack", "damage": 10, "hits": 1},               # Multi Claw
+        {"type": "Attack", "damage": 10, "hits": 1},               # Phase 3 Lacerate
+        {"type": "Attack", "damage": 45, "hits": 1},               # Big Pounce
     ],
     "THE_INSATIABLE": [
-        {"type": "Attack", "damage": 8, "hits": 3},                # Devour x3
-        {"type": "Buff", "self_strength": 5},                       # Hunger
-        {"type": "Debuff", "player_weak": 2, "player_frail": 2},  # Consume
-        {"type": "Attack", "damage": 35, "hits": 1},               # Feast
-        {"type": "Attack", "damage": 12, "hits": 3},               # Ravage x3
+        {"type": "Defend", "block": 5},                             # Liquify Ground (setup)
+        {"type": "Attack", "damage": 8, "hits": 1},                # Thrash Move 1
+        {"type": "Attack", "damage": 8, "hits": 1},                # Thrash Move 2
+        {"type": "Attack", "damage": 28, "hits": 1},               # Lunging Bite
+        {"type": "Debuff", "player_weak": 1, "player_frail": 1},  # Salivate
     ],
+    # ── Missing entries from monsters.json ──
+    "ARCHITECT": [
+        {"type": "Buff"},                                           # Nothing (NPC/decoration)
+    ],
+    "BATTLE_FRIEND_V1": [
+        {"type": "Buff"},                                           # Nothing (ally)
+    ],
+    "BATTLE_FRIEND_V2": [
+        {"type": "Buff"},                                           # Nothing (ally)
+    ],
+    "BATTLE_FRIEND_V3": [
+        {"type": "Buff"},                                           # Nothing (ally)
+    ],
+    "BYRDPIP": [
+        {"type": "Buff"},                                           # Nothing (NPC/decoration)
+    ],
+    "FAT_GREMLIN": [
+        {"type": "Attack", "damage": 1, "hits": 1},                # Spawned (weak)
+        {"type": "Debuff", "player_weak": 1},                      # Flee (escape)
+    ],
+    "GREMLIN_MERC": [
+        {"type": "Attack", "damage": 7, "hits": 1},                # Gimme
+        {"type": "Attack", "damage": 6, "hits": 2},                # Double Smash x2
+        {"type": "Buff", "self_strength": 2},                       # Hehe (laugh)
+    ],
+    "GUARDBOT": [
+        {"type": "Defend", "block": 8},                             # Guard
+    ],
+    "LIVING_SHIELD": [
+        {"type": "Attack", "damage": 16, "hits": 1},               # Smash
+        {"type": "Attack", "damage": 6, "hits": 1},                # Shield Slam
+    ],
+    "NOISEBOT": [
+        {"type": "Debuff", "player_frail": 1, "player_vulnerable": 1},  # Noise
+    ],
+    "OSTY": [
+        {"type": "Buff"},                                           # Nothing (NPC)
+    ],
+    "PAELS_LEGION": [
+        {"type": "Buff"},                                           # Nothing (NPC/placeholder)
+    ],
+    "PARAFRIGHT": [
+        {"type": "Attack", "damage": 16, "hits": 1},               # Slam
+    ],
+    "SLUMBERING_BEETLE": [
+        {"type": "Buff"},                                           # Snore (asleep)
+        {"type": "Attack", "damage": 16, "hits": 1},               # Roll Out
+    ],
+    "SNEAKY_GREMLIN": [
+        {"type": "Attack", "damage": 1, "hits": 1},                # Spawned (weak)
+        {"type": "Attack", "damage": 9, "hits": 1},                # Tackle
+    ],
+    "STABBOT": [
+        {"type": "Attack", "damage": 11, "hits": 1},               # Stab
+    ],
+    "THE_ADVERSARY_MK_ONE": [
+        {"type": "Attack", "damage": 12, "hits": 1},               # Smash
+        {"type": "Attack", "damage": 15, "hits": 1},               # Beam
+        {"type": "Attack", "damage": 8, "hits": 2},                # Barrage x2
+    ],
+    "THE_ADVERSARY_MK_TWO": [
+        {"type": "Attack", "damage": 13, "hits": 1},               # Bash
+        {"type": "Attack", "damage": 16, "hits": 1},               # Flame Beam
+        {"type": "Attack", "damage": 9, "hits": 2},                # Barrage x2
+    ],
+    "THE_ADVERSARY_MK_THREE": [
+        {"type": "Attack", "damage": 15, "hits": 1},               # Crash
+        {"type": "Attack", "damage": 18, "hits": 1},               # Flame Beam
+        {"type": "Attack", "damage": 10, "hits": 2},               # Barrage x2
+    ],
+    "TURRET_OPERATOR": [
+        {"type": "Attack", "damage": 3, "hits": 1},                # Unload Move 1
+        {"type": "Attack", "damage": 3, "hits": 1},                # Unload Move 2
+        {"type": "Defend", "block": 6},                             # Reload
+    ],
+    "ZAPBOT": [
+        {"type": "Attack", "damage": 14, "hits": 1},               # Zap
+    ],
+})
+
+
+# Boss/elite monster IDs that use weighted random intent selection.
+# Regular enemies keep deterministic cycling (simpler, still realistic).
+_WEIGHTED_INTENT_MONSTERS: set[str] = {
+    # Bosses
+    "CEREMONIAL_BEAST", "VANTOM", "KIN_FOLLOWER", "KIN_PRIEST",
+    "DOORMAKER", "DOOR", "WATERFALL_GIANT", "LAGAVULIN_MATRIARCH",
+    "KNOWLEDGE_DEMON", "CRUSHER", "ROCKET", "QUEEN",
+    "TORCH_HEAD_AMALGAM", "SOUL_FYSH", "TEST_SUBJECT", "THE_INSATIABLE",
+    # Elites
+    "BYGONE_EFFIGY", "BYRDONIS", "PHROG_PARASITE",
+    "DECIMILLIPEDE_SEGMENT", "ENTOMANCER", "SKULKING_COLONY",
+    "MECHA_KNIGHT", "INFESTED_PRISM", "TERROR_EEL",
+    "SOUL_NEXUS", "PHANTASMAL_GARDENER",
+    "FLAIL_KNIGHT", "MAGI_KNIGHT", "SPECTRAL_KNIGHT",
 }
+
+# Max times the same move index can repeat consecutively.
+_MAX_CONSECUTIVE = 2
 
 
 @dataclass
 class EnemyAI:
-    """Tracks move cycling for a single enemy instance."""
+    """Tracks move cycling for a single enemy instance.
+
+    Two modes:
+    - **cycle** (default): deterministic sequential cycling through move_table.
+    - **weighted**: weighted random selection from move_table with a
+      max-consecutive constraint to prevent unrealistic repetition.
+      Used for bosses and elites to produce more varied (realistic) play.
+
+    Phase transitions (bosses only):
+    - phase2_table: alternate move table used when enemy HP ≤ phase_hp_pct
+    - phase_hp_pct: fraction of max HP that triggers phase 2 (default 0.5)
+    - Once phase 2 activates, move_index resets and the AI uses phase2_table
+    """
     monster_id: str
     move_table: list[dict]
     move_index: int = 0
+    mode: str = "cycle"  # "cycle" or "weighted"
+    recent_indices: list[int] = field(default_factory=list)
+    phase2_table: list[dict] | None = None
+    phase_hp_pct: float = 0.5
+    _in_phase2: bool = False
 
-    def pick_intent(self) -> dict:
+    def pick_intent(self, enemy=None) -> dict:
         """Return the next intent dict.
 
-        Cycles through the hand-coded move table. For enemies without
-        a table, falls back to generic data-driven resolution.
+        If enemy is provided and phase2_table is set, checks HP for
+        phase transition.
         """
-        if not self.move_table:
+        # Phase transition check
+        if (not self._in_phase2
+                and self.phase2_table is not None
+                and enemy is not None):
+            max_hp = getattr(enemy, "max_hp", 0) or 1
+            cur_hp = getattr(enemy, "hp", max_hp)
+            if cur_hp <= max_hp * self.phase_hp_pct:
+                self._in_phase2 = True
+                self.move_index = 0
+                self.recent_indices.clear()
+
+        active_table = self.phase2_table if self._in_phase2 else self.move_table
+
+        if not active_table:
             return {"type": "Attack", "damage": 8, "hits": 1}
 
-        move = self.move_table[self.move_index % len(self.move_table)]
+        if self.mode == "weighted" and len(active_table) > 1:
+            return self._pick_weighted(active_table)
+
+        # Default: deterministic cycling
+        move = active_table[self.move_index % len(active_table)]
         self.move_index += 1
-        return dict(move)  # Copy so caller can mutate
+        return dict(move)
+
+    def _pick_weighted(self, table: list[dict] | None = None) -> dict:
+        """Weighted random move selection with max-consecutive constraint.
+
+        Each move gets a base weight of 1.0. The first move in the table
+        gets a slight boost on turn 1 (setup moves like buffs). Moves
+        that have been used consecutively get their weight reduced to
+        prevent unrealistic repetition.
+        """
+        if table is None:
+            table = self.move_table
+        n = len(table)
+        weights = [1.0] * n
+
+        # Slight boost for the "opener" move on turn 1
+        if self.move_index == 0 and n > 0:
+            weights[0] += 1.0
+
+        # Penalise moves that have been repeated consecutively
+        if self.recent_indices:
+            last_idx = self.recent_indices[-1]
+            consecutive_count = 0
+            for ri in reversed(self.recent_indices):
+                if ri == last_idx:
+                    consecutive_count += 1
+                else:
+                    break
+            if consecutive_count >= _MAX_CONSECUTIVE:
+                weights[last_idx] = 0.0
+
+        # Ensure at least one move is available
+        if sum(weights) <= 0:
+            weights = [1.0] * n
+
+        # Weighted random selection
+        chosen_idx = random.choices(range(n), weights=weights, k=1)[0]
+        self.recent_indices.append(chosen_idx)
+        # Keep history bounded
+        if len(self.recent_indices) > 10:
+            self.recent_indices = self.recent_indices[-10:]
+        self.move_index += 1
+        return dict(table[chosen_idx])
 
 
-def _create_enemy_ai(monster_id: str) -> EnemyAI:
-    """Create an EnemyAI for a monster from data."""
+def _create_enemy_ai(monster_id: str,
+                     observed_damage: int | None = None,
+                     observed_hits: int = 1) -> EnemyAI:
+    """Create an EnemyAI for a monster from data.
+
+    Args:
+        monster_id: The monster's identifier.
+        observed_damage: If provided, use this as the attack damage for
+            unknown enemies instead of the hardcoded default.  This lets
+            live-play callers seed the AI with the real damage value
+            parsed from the game state.
+        observed_hits: Number of hits per attack (from game state).
+    """
     _ensure_data_loaded()
 
     # Use hand-coded table if available
     if monster_id in ENEMY_MOVE_TABLES:
+        mode = "weighted" if monster_id in _WEIGHTED_INTENT_MONSTERS else "cycle"
+        # Check for boss phase 2 table
+        phase2_info = BOSS_PHASE2_TABLES.get(monster_id)
+        phase2_table = phase2_info["table"] if phase2_info else None
+        phase_hp_pct = phase2_info.get("hp_pct", 0.5) if phase2_info else 0.5
         return EnemyAI(
             monster_id=monster_id,
             move_table=ENEMY_MOVE_TABLES[monster_id],
+            mode=mode,
+            phase2_table=phase2_table,
+            phase_hp_pct=phase_hp_pct,
         )
 
     # Fallback: build a simple table from monsters.json
@@ -636,7 +867,15 @@ def _create_enemy_ai(monster_id: str) -> EnemyAI:
             table.append({"type": "Buff", "self_strength": 1})
 
     if not table:
-        table = [{"type": "Attack", "damage": 8, "hits": 1}]
+        # Use observed damage from game state if available, otherwise
+        # default to 14 (representative of mid-game enemies rather than
+        # the old 8 which was far too optimistic for Act 2+).
+        fallback_damage = observed_damage if observed_damage is not None else 14
+        fallback_hits = observed_hits if observed_damage is not None else 1
+        table = [
+            {"type": "Attack", "damage": fallback_damage, "hits": fallback_hits},
+            {"type": "Buff", "self_strength": 2},
+        ]
 
     return EnemyAI(monster_id=monster_id, move_table=table)
 
@@ -674,7 +913,23 @@ def _spawn_enemy(monster_id: str) -> EnemyState:
 
 # STS-like rarity weights: Common 60%, Uncommon 37%, Rare 3%
 RARITY_WEIGHTS = {"Common": 60, "Uncommon": 37, "Rare": 3}
-REWARD_CARDS_OFFERED = 3
+REWARD_CARDS_OFFERED = 3  # base count; varies with relics (see _effective_reward_count)
+
+
+def _effective_reward_count(relics: frozenset[str] | set[str] | None = None) -> int:
+    """Return the number of card rewards to offer, accounting for relics.
+
+    Base is 3 (standard STS2). Certain relics add +1:
+    - QUESTION_CARD: +1 card choice at reward screens
+    - BUSTED_CROWN: -2 card choices (minimum 1)
+    """
+    count = REWARD_CARDS_OFFERED
+    if relics:
+        if "QUESTION_CARD" in relics:
+            count += 1
+        if "BUSTED_CROWN" in relics:
+            count -= 2
+    return max(1, count)
 
 
 def _build_card_pool(card_db: CardDB, character_color: str) -> dict[str, list[Card]]:
@@ -705,7 +960,7 @@ def _build_card_pool(card_db: CardDB, character_color: str) -> dict[str, list[Ca
         if color not in (character_color, "colorless"):
             continue
         if rarity in pools:
-            pools[rarity].append(card)
+            pools[rarity].append(copy.copy(card))
 
     return pools
 
@@ -713,9 +968,12 @@ def _build_card_pool(card_db: CardDB, character_color: str) -> dict[str, list[Ca
 def _offer_card_rewards(
     pools: dict[str, list[Card]],
     deck: list[Card],
-    count: int = REWARD_CARDS_OFFERED,
+    count: int | None = None,
+    relics: frozenset[str] | set[str] | None = None,
 ) -> list[Card]:
     """Generate a card reward offering (no duplicates, not already in deck)."""
+    if count is None:
+        count = _effective_reward_count(relics)
     deck_ids = {c.id for c in deck}
     offered: list[Card] = []
     rarities = list(RARITY_WEIGHTS.keys())
@@ -730,7 +988,7 @@ def _offer_card_rewards(
             continue
         card = random.choice(pool)
         if card.id not in deck_ids and card.id not in {c.id for c in offered}:
-            offered.append(card)
+            offered.append(copy.copy(card))
     return offered
 
 
@@ -802,31 +1060,20 @@ def _score_card_for_pick(card: Card, deck: list[Card]) -> float:
     return score
 
 
-_SIM_ML_LOADED: bool = False
-
-
 def _smart_pick_or_fallback(
     offered: list[Card], deck: list[Card],
-    floor: int = 1, hp: int = 50, max_hp: int = 80,
+    floor: int = 1, hp: int = 50, max_hp: int = 70,
+    relics: frozenset[str] | set[str] | None = None,
 ) -> Card | None:
-    """Use the organic card picker (rule-based + alpha-blended ML).
+    """Use the organic card picker (rule-based, relic-aware).
 
     Falls back to the old tier-list picker if the new system fails.
-    Lazily loads the XGBoost model on first call (not at data-load time,
-    to avoid xgboost/torch conflicts in the training process).
+    ``relics`` (when supplied) is threaded into score_card so relic
+    synergies influence the pick.
     """
-    global _SIM_ML_LOADED
-    if not _SIM_ML_LOADED:
-        _SIM_ML_LOADED = True
-        try:
-            from .card_picker import load_ml_model
-            if load_ml_model():
-                print("[Simulator] XGBoost card picker model loaded", flush=True)
-        except Exception:
-            pass
     try:
         from .card_picker import pick_card
-        return pick_card(offered, deck, floor, hp, max_hp)
+        return pick_card(offered, deck, floor, hp, max_hp, relics=relics)
     except Exception:
         pass
     return _pick_card_reward(offered, deck)
@@ -867,15 +1114,15 @@ def _pick_card_reward(offered: list[Card], deck: list[Card]) -> Card | None:
 # ---------------------------------------------------------------------------
 
 # Act 1 (Overgrowth) has 17 rooms. Derived from real game logs:
-# - Floors 1-3: weak encounters
-# - Floors 4-9: normal encounters, events, shops (mid-act)
-# - Floor 10: rest site (mid-act)
-# - Floors 11-14: normal/elite encounters, events
-# - Floor 15: event or shop
+# - Floor 1-3: weak encounters (early game)
+# - Floor 4-9: normal/event/shop (mid-act variety, 6 rooms)
+# - Floor 10: forced treasure (mid-act relic faucet)
+# - Floor 11: rest site (mid-act)
+# - Floors 12-15: normal/elite encounters (tougher section, 4 rooms)
 # - Floor 16: rest site (pre-boss)
 # - Floor 17: boss
 
-ROOM_TYPE = str  # "weak", "normal", "elite", "rest", "event", "boss", "shop"
+ROOM_TYPE = str  # "weak", "normal", "elite", "rest", "event", "boss", "shop", "treasure"
 
 
 def _generate_act1_map(rng: random.Random) -> list[ROOM_TYPE]:
@@ -884,6 +1131,9 @@ def _generate_act1_map(rng: random.Random) -> list[ROOM_TYPE]:
     Based on real game logs: 17 rooms total, boss on floor 17.
     Simulates path choice by varying encounter types — the real game has
     branching paths where players can dodge hard encounters.
+
+    Real STS guarantees one treasure chest mid-act; we force one in the
+    mid-section so training runs see a deterministic relic faucet.
     """
     rooms: list[ROOM_TYPE] = []
 
@@ -892,22 +1142,21 @@ def _generate_act1_map(rng: random.Random) -> list[ROOM_TYPE]:
     rooms.append("weak")
     rooms.append("weak")
 
-    # Floor 4-9: mix of normal, event, shop (mid-act)
-    mid_rooms = ["normal", "normal", "normal", "event", "event", "shop"]
+    # Floor 4-9: mix of normal, event, shop (mid-act, 6 rooms)
+    mid_rooms = ["normal", "normal", "normal", "normal", "event", "shop"]
     rng.shuffle(mid_rooms)
     rooms.extend(mid_rooms)
 
-    # Floor 10: rest site
+    # Floor 10: forced treasure chest (mid-act relic faucet)
+    rooms.append("treasure")
+
+    # Floor 11: rest site
     rooms.append("rest")
 
-    # Floor 11-14: normal + elite (tougher section, +1 room vs old map)
-    late_rooms = ["normal", "elite", rng.choice(["normal", "event"]),
-                  rng.choice(["event", "shop"])]
+    # Floor 12-15: normal + elite (tougher section, 4 rooms)
+    late_rooms = ["normal", "normal", "elite", rng.choice(["normal", "event"])]
     rng.shuffle(late_rooms)
     rooms.extend(late_rooms)
-
-    # Floor 15: event or shop (breathing room before boss)
-    rooms.append(rng.choice(["event", "shop"]))
 
     # Floor 16: rest (pre-boss)
     rooms.append("rest")
@@ -921,7 +1170,7 @@ def _generate_act1_map(rng: random.Random) -> list[ROOM_TYPE]:
 def _generate_act1_map_with_choices(rng: random.Random) -> list:
     """Generate Act 1 map with player-facing choices at some floors.
 
-    Based on real game logs: 17 rooms total, boss on floor 17.
+    17 rooms total, boss on floor 17 (matching real game).
     Returns a list where each entry is either a single room type string
     (forced) or a list of 2-3 room type strings (player chooses).
     """
@@ -930,22 +1179,23 @@ def _generate_act1_map_with_choices(rng: random.Random) -> list:
     # Floor 1-3: forced weak
     rooms.extend(["weak", "weak", "weak"])
 
-    # Floor 4-9: each offers 2-3 choices from the mid-act pool
+    # Floor 4-9: each offers 2-3 choices from the mid-act pool (6 rooms)
     mid_pool = ["normal", "event", "shop", "elite"]
     for _ in range(6):
         k = rng.choice([2, 3])
         rooms.append(rng.sample(mid_pool, k=k))
 
-    # Floor 10: forced rest
+    # Floor 10: forced treasure chest — guarantees one mid-act relic
+    # drop per run, matching real STS map structure.
+    rooms.append("treasure")
+
+    # Floor 11: forced rest
     rooms.append("rest")
 
-    # Floor 11-14: harder choices (+1 room vs old map)
+    # Floor 12-15: harder choices (4 rooms)
     late_pool = ["normal", "elite", "event", "rest"]
     for _ in range(4):
         rooms.append(rng.sample(late_pool, k=2))
-
-    # Floor 15: event or shop
-    rooms.append(rng.sample(["event", "shop"], k=2))
 
     # Floor 16: forced rest (pre-boss)
     rooms.append("rest")
@@ -973,10 +1223,15 @@ def _choose_room(
     Ports the live advisor's HP-threshold routing into the simulator so
     that training games make the same pathing decisions as live play.
 
+    Events ("?" nodes) are highly valuable in STS2: they can give free
+    relics, card removes, upgrades, healing, or gold with no HP cost.
+    They should generally be preferred over normal combat, especially
+    in Act 1 where the deck is still being built.
+
     Priority bands:
-      - HP < 35%: rest > shop > event > anything (survival mode)
-      - HP < 55%: rest > shop > event > treasure > monster (cautious)
-      - HP >= 55%: elite > treasure > monster > event > shop > rest (greedy)
+      - HP < 35%: rest > event > shop > anything (survival mode)
+      - HP < 55%: rest > event > shop > treasure > monster (cautious)
+      - HP >= 55%: elite > event > treasure > monster > shop > rest (greedy)
 
     Gold and deck-size bonuses push toward shops when they'd be useful.
     """
@@ -987,19 +1242,19 @@ def _choose_room(
             return 100.0
 
         if hp_pct < 0.35:
-            # Critical HP: survival mode
-            scores = {"rest": 90, "shop": 80, "event": 60, "treasure": 50,
+            # Critical HP: survival mode — events are free value
+            scores = {"rest": 90, "event": 82, "shop": 75, "treasure": 50,
                       "normal": 10, "weak": 10, "elite": 0}
             return scores.get(room, 30)
 
         if hp_pct < 0.55:
-            # Low HP: avoid elites, prefer safe nodes
-            scores = {"rest": 85, "shop": 80, "event": 65, "treasure": 70,
+            # Low HP: avoid elites, events are safe + valuable
+            scores = {"rest": 85, "event": 78, "shop": 72, "treasure": 70,
                       "normal": 40, "weak": 40, "elite": 15}
             return scores.get(room, 30)
 
-        # Healthy: be greedy
-        scores = {"elite": 80, "normal": 55, "weak": 45, "event": 50,
+        # Healthy: be greedy but events still high value (free relics/upgrades)
+        scores = {"elite": 80, "event": 70, "normal": 55, "weak": 45,
                   "shop": 45, "treasure": 70, "rest": 30}
         s = scores.get(room, 40)
 
@@ -1076,21 +1331,56 @@ def _pick_encounter(
 POTION_SLOTS = 3
 POTION_DROP_CHANCE = 0.40  # 40% chance to get a potion after combat
 
-# Simplified potion types and their effects
+# Potion types with rarity weighting.
+# Effect keys must match combat_engine.use_potion() dispatch.
 POTION_TYPES = [
-    {"name": "Blood Potion", "heal": 20},
-    {"name": "Block Potion", "block": 12},
-    {"name": "Strength Potion", "strength": 2},
-    {"name": "Fire Potion", "damage_all": 20},
-    {"name": "Weak Potion", "enemy_weak": 3},
+    # ── Common potions (weight ~3x) ──
+    {"name": "Blood Potion",      "rarity": "Common", "heal": 20},
+    {"name": "Block Potion",      "rarity": "Common", "block": 12},
+    {"name": "Energy Potion",     "rarity": "Common", "energy": 2},
+    {"name": "Swift Potion",      "rarity": "Common", "draw": 3},
+    {"name": "Fire Potion",       "rarity": "Common", "damage_all": 20},
+    {"name": "Explosive Potion",  "rarity": "Common", "damage_all": 10},  # weaker AoE
+    {"name": "Poison Potion",     "rarity": "Common", "enemy_poison": 6},
+    {"name": "Weak Potion",       "rarity": "Common", "enemy_weak": 3},
+    {"name": "Fear Potion",       "rarity": "Common", "enemy_vulnerable": 3},
+
+    # ── Uncommon potions (weight ~2x) ──
+    {"name": "Strength Potion",   "rarity": "Uncommon", "strength": 2},
+    {"name": "Dexterity Potion",  "rarity": "Uncommon", "dexterity": 2},
+    {"name": "Regen Potion",      "rarity": "Uncommon", "regen": 5},  # heal 5 per turn for 5 turns
+    {"name": "Essence of Steel",  "rarity": "Uncommon", "plated_armor": 4},  # 4 block per turn
+    {"name": "Distilled Chaos",   "rarity": "Uncommon", "play_top_cards": 3},  # play top 3 from draw pile
+    {"name": "Liquid Bronze",     "rarity": "Uncommon", "thorns": 3},
+    {"name": "Cultist Potion",    "rarity": "Uncommon", "ritual": 1},  # +1 Strength per turn
+    {"name": "Gambler's Brew",    "rarity": "Uncommon", "gamblers_brew": True},  # discard hand, redraw
+    {"name": "Snecko Oil",        "rarity": "Uncommon", "draw": 5},  # draw 5 (Confused ignored)
+    {"name": "Duplication Potion", "rarity": "Uncommon", "duplication": True},  # next card plays twice
+
+    # ── Rare potions (weight ~1x) ──
+    {"name": "Fairy in a Bottle", "rarity": "Rare", "fairy": True},  # auto-revive at 30% HP
+    {"name": "Smoke Bomb",        "rarity": "Rare", "smoke_bomb": True},  # flee combat (heal proxy)
+    {"name": "Entropic Brew",     "rarity": "Rare", "fill_potions": True},  # fill all potion slots
+    {"name": "Fruit Juice",       "rarity": "Rare", "max_hp": 5},  # permanent +5 max HP
+    {"name": "Heart of Iron",     "rarity": "Rare", "metallicize": 6},  # 6 block per turn
 ]
+
+_POTION_WEIGHTS = {"Common": 3, "Uncommon": 2, "Rare": 1}
+
+# Pre-compute weighted list for efficient sampling
+_POTION_WEIGHT_LIST = [_POTION_WEIGHTS.get(p.get("rarity", "Common"), 1) for p in POTION_TYPES]
+
+
+def _random_potion(rng: random.Random) -> dict:
+    """Pick a random potion using rarity-weighted selection."""
+    return rng.choices(POTION_TYPES, weights=_POTION_WEIGHT_LIST, k=1)[0]
 
 
 # ---------------------------------------------------------------------------
 # Combat simulation
 # ---------------------------------------------------------------------------
 
-MAX_COMBAT_TURNS = 30  # Safety cap
+MAX_COMBAT_TURNS = 50  # Safety cap (raised from 30 to allow poison/stall strategies)
 
 
 @dataclass
@@ -1114,6 +1404,8 @@ def simulate_combat(
     potions: list[dict] | None = None,
     solver_time_limit_ms: float = 500.0,
     is_boss: bool = False,
+    is_elite: bool = False,
+    relics: frozenset[str] | None = None,
 ) -> tuple[CombatResult, list[dict]]:
     """Run a full combat from start to finish using the solver.
 
@@ -1148,7 +1440,9 @@ def simulate_combat(
         draw_pile=draw_pile,
     )
 
-    state = CombatState(player=player, enemies=enemies)
+    state = CombatState(player=player, enemies=enemies,
+                        relics=relics or frozenset())
+    start_combat(state, is_elite=is_elite, is_boss=is_boss)
 
     hp_before = player_hp
 
@@ -1171,6 +1465,8 @@ def simulate_combat(
         # Check combat over (enemy might have died from start-of-turn effects)
         result = is_combat_over(state)
         if result:
+            if result == "win":
+                end_combat_relics(state)
             return CombatResult(
                 result, turn_num, hp_before,
                 max(0, state.player.hp), encounter_id,
@@ -1202,6 +1498,8 @@ def simulate_combat(
 
             result = is_combat_over(state)
             if result:
+                if result == "win":
+                    end_combat_relics(state)
                 return CombatResult(
                     result, turn_num, hp_before,
                     max(0, state.player.hp), encounter_id,
@@ -1219,6 +1517,8 @@ def simulate_combat(
 
         result = is_combat_over(state)
         if result:
+            if result == "win":
+                end_combat_relics(state)
             return CombatResult(
                 result, turn_num, hp_before,
                 max(0, state.player.hp), encounter_id,
@@ -1235,13 +1535,18 @@ def simulate_combat(
 def _use_precombat_potions(
     state: CombatState, potions: list[dict],
 ) -> list[dict]:
-    """Use offensive potions at combat start (Strength, Fire, Weak)."""
+    """Use offensive potions at combat start (Strength, Fire, Weak, etc.)."""
     remaining = []
     for pot in potions:
         used = False
         if pot.get("strength"):
             state.player.powers["Strength"] = (
                 state.player.powers.get("Strength", 0) + pot["strength"]
+            )
+            used = True
+        elif pot.get("dexterity"):
+            state.player.powers["Dexterity"] = (
+                state.player.powers.get("Dexterity", 0) + pot["dexterity"]
             )
             used = True
         elif pot.get("damage_all"):
@@ -1253,6 +1558,36 @@ def _use_precombat_potions(
             for e in state.enemies:
                 if e.is_alive:
                     e.powers["Weak"] = e.powers.get("Weak", 0) + pot["enemy_weak"]
+            used = True
+        elif pot.get("enemy_vulnerable"):
+            for e in state.enemies:
+                if e.is_alive:
+                    e.powers["Vulnerable"] = e.powers.get("Vulnerable", 0) + pot["enemy_vulnerable"]
+            used = True
+        elif pot.get("enemy_poison"):
+            for e in state.enemies:
+                if e.is_alive:
+                    e.powers["Poison"] = e.powers.get("Poison", 0) + pot["enemy_poison"]
+            used = True
+        elif pot.get("thorns"):
+            state.player.powers["Thorns"] = (
+                state.player.powers.get("Thorns", 0) + pot["thorns"]
+            )
+            used = True
+        elif pot.get("ritual"):
+            state.player.powers["Ritual"] = (
+                state.player.powers.get("Ritual", 0) + pot["ritual"]
+            )
+            used = True
+        elif pot.get("metallicize"):
+            state.player.powers["Metallicize"] = (
+                state.player.powers.get("Metallicize", 0) + pot["metallicize"]
+            )
+            used = True
+        elif pot.get("plated_armor"):
+            state.player.powers["Metallicize"] = (
+                state.player.powers.get("Metallicize", 0) + pot["plated_armor"]
+            )
             used = True
         if not used:
             remaining.append(pot)
@@ -1281,15 +1616,32 @@ def _set_enemy_intents(state: CombatState, ais: list[EnemyAI]) -> None:
 
     Stores the full intent (including buff/debuff data) on the AI so
     _resolve_sim_intents() can apply them after the player's turn.
+    Also populates the intent_* effect fields on the enemy for direct access.
     """
     for enemy, ai in zip(state.enemies, ais):
         if not enemy.is_alive:
             continue
-        intent = ai.pick_intent()
+        intent = ai.pick_intent(enemy=enemy)
         enemy.intent_type = intent.get("type", "Attack")
         enemy.intent_damage = intent.get("damage")
         enemy.intent_hits = intent.get("hits", 1)
         enemy.intent_block = intent.get("block")
+
+        # Populate intent effect fields from the move table
+        # Self-buffs
+        enemy.intent_self_strength = intent.get("self_strength")
+        enemy.intent_self_block = intent.get("self_block")
+        enemy.intent_self_heal = intent.get("self_heal")
+        enemy.intent_all_strength = intent.get("all_strength")
+
+        # Player debuffs
+        enemy.intent_player_weak = intent.get("player_weak")
+        enemy.intent_player_vulnerable = intent.get("player_vulnerable")
+        enemy.intent_player_frail = intent.get("player_frail")
+        enemy.intent_player_constrict = intent.get("player_constrict")
+        enemy.intent_player_tangled = intent.get("player_tangled")
+        enemy.intent_player_shrink = intent.get("player_shrink")
+
         # Stash full intent for post-turn resolution
         ai._pending_intent = intent
 
@@ -1354,12 +1706,50 @@ def _resolve_sim_intents(state: CombatState, ais: list[EnemyAI]) -> None:
                 + intent["player_tangled"]
             )
 
+        # StatusCard intent: enemy adds junk cards (Dazed, Wound, etc.) to
+        # the player's discard pile, polluting future draws.  The number of
+        # cards and their type vary by enemy; we default to 2 Dazed if the
+        # move table doesn't specify.
+        if intent.get("type") == "StatusCard":
+            from .models import Card
+            from .constants import CardType, TargetType
+            n_cards = intent.get("status_count", 2)
+            status_id = intent.get("status_card_id", "Dazed")
+            status_name = intent.get("status_card_name", status_id)
+            for _ in range(n_cards):
+                junk = Card(
+                    id=status_id, name=status_name, cost=99,
+                    card_type=CardType.STATUS, target=TargetType.SELF,
+                    upgraded=False,
+                )
+                state.player.discard_pile.append(junk)
+
         ai._pending_intent = None
 
 
 # ---------------------------------------------------------------------------
 # Event simulation
 # ---------------------------------------------------------------------------
+
+def _empty_event_changes() -> dict:
+    return {"hp_delta": 0, "max_hp_delta": 0, "gold_delta": 0,
+            "cards_added": [], "cards_removed": [], "grants_relic": False}
+
+
+def _clean_event_desc(desc: str | None) -> str:
+    """Strip bbcode colour tags from an event description.
+
+    Event descriptions in the data file wrap keywords in bbcode like
+    ``Obtain a random [gold]Relic[/gold]`` — the markup prevents plain
+    regex matches against the underlying words.  This helper removes
+    any ``[tag]``/``[/tag]`` pair and normalises whitespace.
+    """
+    import re
+    if not desc:
+        return ""
+    cleaned = re.sub(r'\[/?[a-zA-Z][a-zA-Z0-9_]*\]', '', desc)
+    return re.sub(r'\s+', ' ', cleaned).strip().lower()
+
 
 def _simulate_event(
     event_id: str,
@@ -1373,22 +1763,534 @@ def _simulate_event(
     """Simulate an event and return state changes.
 
     Returns dict with keys: hp_delta, max_hp_delta, gold_delta,
-    cards_added, cards_removed.
+    cards_added, cards_removed, grants_relic.
     """
     _ensure_data_loaded()
     event = _EVENTS_BY_ID.get(event_id)
     if not event:
-        return {"hp_delta": 0, "max_hp_delta": 0, "gold_delta": 0,
-                "cards_added": [], "cards_removed": []}
+        return _empty_event_changes()
 
     options = event.get("options", [])
     if not options:
-        return {"hp_delta": 0, "max_hp_delta": 0, "gold_delta": 0,
-                "cards_added": [], "cards_removed": []}
+        return _empty_event_changes()
 
     # Simple heuristic: parse option descriptions for effects
     best_option = _evaluate_event_options(options, hp, max_hp, gold, deck)
     return _apply_event_option(best_option, hp, max_hp, deck, card_db, rng)
+
+
+# ---------------------------------------------------------------------------
+# IMPROVEMENTS.md #4: event-choice enumeration for self-play training
+#
+# The training loop needs to *see* each event option as a discrete choice
+# so the option-head network can score them. These helpers expose the
+# raw options + their simulated effect tuples so full_run.py can build
+# an OptionSample, run pick_best_option, and apply the chosen effect.
+# ---------------------------------------------------------------------------
+
+# Global vocab of (event_id, option_index) → stable integer id, populated
+# lazily the first time an event is enumerated. Id 0 is reserved for
+# UNK / unseen events. The ``__neow__`` sentinel event id shares the same
+# pool so Neow blessings get stable ids too.
+#
+# V10 (2026-04-11): This vocab is now ACTIVE — the option head uses a
+# dedicated ``event_choice_embed`` table indexed by these IDs.  The
+# vocab is pre-populated deterministically at first access via
+# ``_pre_populate_event_choice_vocab()`` so IDs are stable across runs
+# regardless of which events the RNG happens to pick.
+EVENT_CHOICE_VOCAB: dict[tuple[str, int], int] = {}
+
+
+_EVENT_CHOICE_VOCAB_POPULATED = False
+
+
+def _pre_populate_event_choice_vocab() -> None:
+    """Deterministically assign stable IDs to every (event_id, option_idx).
+
+    Called once at first access.  Events are iterated in sorted-id order
+    so the mapping is reproducible regardless of training-run RNG.  Neow
+    blessings (under ``_NEOW_EVENT_ID``) are registered last.
+    """
+    global _EVENT_CHOICE_VOCAB_POPULATED
+    if _EVENT_CHOICE_VOCAB_POPULATED:
+        return
+    _ensure_data_loaded()
+    # 1. All regular events, sorted by event id for stability
+    for eid in sorted(_EVENTS_BY_ID.keys()):
+        ev = _EVENTS_BY_ID[eid]
+        for i in range(len(ev.get("options", []) or [])):
+            _event_choice_vocab_id_raw(eid, i)
+    # 2. Neow blessings (imported lazily to avoid circular ref)
+    for i in range(len(NEOW_BLESSINGS)):
+        _event_choice_vocab_id_raw(_NEOW_EVENT_ID, i)
+    _EVENT_CHOICE_VOCAB_POPULATED = True
+
+
+def _event_choice_vocab_id_raw(event_id: str, option_idx: int) -> int:
+    """Low-level ID assignment — always auto-increments for new keys."""
+    key = (event_id, option_idx)
+    vid = EVENT_CHOICE_VOCAB.get(key)
+    if vid is None:
+        vid = len(EVENT_CHOICE_VOCAB) + 1  # reserve 0 for UNK
+        EVENT_CHOICE_VOCAB[key] = vid
+    return vid
+
+
+def _event_choice_vocab_id(event_id: str, option_idx: int) -> int:
+    """Return the stable vocab ID for (event_id, option_idx).
+
+    Triggers pre-population on first call so IDs are deterministic.
+    """
+    if not _EVENT_CHOICE_VOCAB_POPULATED:
+        _pre_populate_event_choice_vocab()
+    return _event_choice_vocab_id_raw(event_id, option_idx)
+
+
+def enumerate_event_options(
+    event_id: str,
+    deck: list[Card],
+    hp: int,
+    max_hp: int,
+    gold: int,
+    card_db: CardDB,
+    rng: random.Random,
+) -> list[dict]:
+    """Return a list of ``{vocab_id, description, changes}`` per event option.
+
+    ``changes`` is an ``_apply_event_option`` result — already resolved
+    so the caller can apply a single selection atomically. RNG-dependent
+    effects (card rolls, relic grants) are baked in here, so the caller
+    does not need to re-seed.
+
+    Used by ``play_full_run`` to build an ``OptionSample`` for the
+    event-choice head.
+    """
+    _ensure_data_loaded()
+    event = _EVENTS_BY_ID.get(event_id)
+    if not event:
+        return []
+    options = event.get("options", []) or []
+    result: list[dict] = []
+    for i, opt in enumerate(options):
+        vid = _event_choice_vocab_id(event_id, i)
+        # Apply each option with a *fresh local rng copy* keyed off the
+        # caller's rng so parallel enumeration doesn't shift global state.
+        local_rng = random.Random(rng.random())
+        changes = _apply_event_option(opt, hp, max_hp, deck, card_db, local_rng)
+        result.append({
+            "vocab_id": vid,
+            "description": _clean_event_desc(opt.get("description")),
+            "changes": changes,
+        })
+    return result
+
+
+def heuristic_event_option_index(
+    event_id: str,
+    hp: int,
+    max_hp: int,
+    gold: int,
+    deck: list[Card],
+) -> int:
+    """Return the index of the option the legacy heuristic would pick.
+
+    Used as the shadow advisor pick for the agreement-rate diagnostic
+    (IMPROVEMENTS.md #10). Returns 0 if the event is unknown / has no
+    options.
+    """
+    _ensure_data_loaded()
+    event = _EVENTS_BY_ID.get(event_id)
+    if not event:
+        return 0
+    options = event.get("options", []) or []
+    if not options:
+        return 0
+    best = _evaluate_event_options(options, hp, max_hp, gold, deck)
+    for i, opt in enumerate(options):
+        if opt is best:
+            return i
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Neow blessings (IMPROVEMENTS.md #7)
+# ---------------------------------------------------------------------------
+
+# Semantic Neow option tags. Both live play (keyword-scoring the game's
+# option text in ``deterministic_advisor.decide_neow``) and training
+# (scoring the fixed ``NEOW_BLESSINGS`` list via key lookup in
+# ``shadow_advisor.heuristic_neow_option_index``) funnel through the
+# SAME priority table below — so the two code paths can't drift on
+# "how good is Remove a Strike?". If the table changes, both scorers
+# change together. This is the analogue of ``_evaluate_event_options``
+# being shared between training and ``decide_event_default`` for
+# regular events.
+
+# Canonical tags (string constants are fine; keeping a tuple for
+# documentation / future typing).
+NEOW_TAGS = (
+    "deck_thin",       # remove basic / transform — highest impact on Silent
+    "relic",           # obtain a random relic
+    "rare_card",       # gain a random rare / colorless / card pack
+    "upgrade_single",  # upgrade a specific card / card rewards upgraded
+    "draw",            # draw N extra cards first turn
+    "risky_trade",     # lose max hp, gain relic — conditional on hp_frac
+    "rest_bonus",      # rest at a rest site heals more
+    "max_hp",          # +N max hp
+    "full_heal",       # heal to full — conditional on hp_frac
+    "gold",            # +N gold
+    "boss_dependent",  # "boss drops" etc. — Act 2+ value, near-zero for Act 1
+    "unknown",         # fallback for unrecognized text
+)
+
+
+# Tag priorities are tuned to stay close to the legacy
+# ``_NEOW_KEYWORD_SCORES`` table that used to live in
+# ``deterministic_advisor.py`` — so refactoring to a shared table
+# doesn't silently change live-play Neow picks. Deviations from the
+# old numbers: (1) rest_bonus collapses into its own tag so the
+# old 4.0 flat score is preserved instead of leaking into full_heal,
+# (2) boss_dependent stays at its old 3.0 instead of being routed to
+# rare_card, (3) risky_trade is new and only used by training's Neow
+# blessing list (``lose_mhp_for_relic``).
+NEOW_TAG_PRIORITY: dict[str, float] = {
+    "deck_thin":       9.0,
+    "relic":           7.0,
+    "rare_card":       6.5,
+    "upgrade_single":  5.5,
+    "draw":            4.5,
+    "risky_trade":     7.0,  # same as "relic" — it IS a relic grant
+    "rest_bonus":      4.0,
+    "max_hp":          3.5,
+    "full_heal":       4.0,  # conditional — weighted by (1 - hp_frac)
+    "gold":            2.5,
+    "boss_dependent":  3.0,  # Act 1 simulator can't value this
+    "unknown":         1.0,
+}
+
+
+# Keyword → tag classification for LIVE option text. Order matters:
+# earlier, more specific matches win. Mirrors the old
+# ``_NEOW_KEYWORD_SCORES`` order; only the numeric scores have moved to
+# the tag table.
+_NEOW_TEXT_KEYWORDS: list[tuple[str, str]] = [
+    # Most-specific phrases first — earlier matches win, so anything
+    # that also contains a later generic keyword (e.g. "boss drops are
+    # upgraded" contains "upgraded") must be matched up here.
+    ("boss drops",              "boss_dependent"),
+    ("card rewards you see are upgraded", "upgrade_single"),
+    ("rest at a rest site",     "rest_bonus"),
+    ("raise your max hp",       "max_hp"),
+    ("obtain a random relic",   "relic"),
+    ("obtain a relic",          "relic"),
+    ("random rare card",        "rare_card"),
+    ("gain 150 gold",           "gold"),
+    ("gain 100 gold",           "gold"),
+
+    # Top tier: deck thinning
+    ("remove",                  "deck_thin"),
+    ("transform",               "deck_thin"),
+
+    # Upgrade-flavoured mid tier
+    ("enchant",                 "upgrade_single"),
+    ("upgraded",                "upgrade_single"),
+
+    # Card packs / colorless — grouped with rare-card tier
+    ("colorless card",          "rare_card"),
+    ("packs of cards",          "rare_card"),
+
+    # Situational: "draw N extra cards on first turn"
+    ("draw",                    "draw"),
+
+    # Generic fallbacks
+    ("gain",                    "unknown"),
+    ("gold",                    "gold"),
+]
+
+
+# HP / resource loss penalty phrases that apply on TOP of the base tag
+# score. Live play is the only caller that sees option text; training
+# already bakes HP/max_hp deltas into ``changes`` and routes them via a
+# different code path, so this table is only consulted when ``text`` is
+# passed to ``score_neow_option``.
+_NEOW_HP_PENALTIES: list[tuple[str, float]] = [
+    ("lose max hp",                      -4.0),
+    ("lose 10 max hp",                   -5.0),
+    ("lose 7 max hp",                    -4.0),
+    ("lose 5 max hp",                    -3.0),
+    ("lose hp",                          -3.0),
+    ("lose 7 hp",                        -2.5),
+    ("lose 10 hp",                       -3.0),
+    ("lose all gold",                    -1.5),
+    ("treasure chest you open is empty", -1.0),
+]
+
+
+def classify_neow_option_text(text: str) -> str:
+    """Return a ``NEOW_TAGS`` tag for a live Neow option's visible text."""
+    if not text:
+        return "unknown"
+    lower = text.lower()
+    for kw, tag in _NEOW_TEXT_KEYWORDS:
+        if kw in lower:
+            return tag
+    return "unknown"
+
+
+def score_neow_option(
+    *,
+    tag: str,
+    text: str | None = None,
+    hp_frac: float = 1.0,
+) -> float:
+    """Return a comparable score for a Neow option identified by tag.
+
+    ``text`` (optional) is the live option's visible description — when
+    provided, HP-loss penalties in ``_NEOW_HP_PENALTIES`` are applied so
+    live play still ranks "-10 Max HP, obtain a relic" below a plain
+    relic grant. Training callers pass ``text=None`` because they know
+    the underlying blessing key's cost structure already.
+
+    ``hp_frac`` (``hp/max_hp`` in [0, 1]) modulates conditional tags:
+    ``full_heal`` is scored proportional to missing HP, and
+    ``risky_trade`` is suppressed at low HP.
+    """
+    base = NEOW_TAG_PRIORITY.get(tag, 0.0)
+
+    if tag == "full_heal":
+        base *= max(0.0, 1.0 - hp_frac)
+    elif tag == "risky_trade" and hp_frac < 0.7:
+        # Below 70% HP, giving up 8 more max HP is too fragile.
+        base *= 0.4
+
+    if text:
+        lower = text.lower()
+        for phrase, penalty in _NEOW_HP_PENALTIES:
+            if phrase in lower:
+                base += penalty
+
+    return base
+
+
+# Training blessing key → semantic tag. Paired with ``NEOW_BLESSINGS``
+# below. If you add a blessing, add its tag here.
+_NEOW_KEY_TO_TAG: dict[str, str] = {
+    "max_hp_8":            "max_hp",
+    "full_heal":           "full_heal",
+    "gold_100":            "gold",
+    "random_relic":        "relic",
+    "remove_basic":        "deck_thin",
+    "upgrade_random":      "upgrade_single",
+    "lose_mhp_for_relic":  "risky_trade",
+}
+
+
+
+# Canonical Neow blessings exposed to training. Each entry is
+# ``(key, description, applier)`` where ``applier`` is a callable
+# ``(hp, max_hp, gold, deck, card_db, rng) -> changes`` that returns an
+# event-style changes dict. We reuse the event-changes dict so
+# ``play_full_run`` can apply the result with the same code path it uses
+# for events. Selections are enumerated in a stable order so the shared
+# ``EVENT_CHOICE_VOCAB`` assigns each blessing a fixed vocab id.
+#
+# The blessing list is intentionally short and represents the most
+# impactful real Neow choices — expanding this is cheap but more options
+# means more noise for the option head to chew through before it
+# converges on "is this blessing good for the current deck/hp".
+
+_NEOW_EVENT_ID = "__neow__"
+
+
+def _neow_bless_max_hp(hp, max_hp, gold, deck, card_db, rng):
+    c = _empty_event_changes()
+    c["max_hp_delta"] = 8
+    c["hp_delta"] = 8  # heal to new max by also restoring 8
+    return c
+
+
+def _neow_bless_full_heal(hp, max_hp, gold, deck, card_db, rng):
+    c = _empty_event_changes()
+    c["hp_delta"] = max_hp - hp  # fully heal
+    return c
+
+
+def _neow_bless_gold(hp, max_hp, gold, deck, card_db, rng):
+    c = _empty_event_changes()
+    c["gold_delta"] = 100
+    return c
+
+
+def _neow_bless_random_relic(hp, max_hp, gold, deck, card_db, rng):
+    c = _empty_event_changes()
+    c["grants_relic"] = True
+    return c
+
+
+def _neow_bless_remove_basic(hp, max_hp, gold, deck, card_db, rng):
+    """Remove a random Strike or Defend from the starting deck."""
+    c = _empty_event_changes()
+    basic_idxs = [i for i, card in enumerate(deck)
+                  if card.name in ("Strike", "Defend") and not card.upgraded]
+    if basic_idxs:
+        c["cards_removed"] = [rng.choice(basic_idxs)]
+    return c
+
+
+def _neow_bless_upgrade_random(hp, max_hp, gold, deck, card_db, rng):
+    """Upgrade a random non-basic, non-curse card (encoded as remove+add)."""
+    c = _empty_event_changes()
+    candidates = []
+    for i, card in enumerate(deck):
+        if card.upgraded:
+            continue
+        if card.card_type in (CardType.STATUS, CardType.CURSE):
+            continue
+        if card.name in ("Strike", "Defend"):
+            continue
+        candidates.append(i)
+    if candidates:
+        idx = rng.choice(candidates)
+        upgraded = card_db.get_upgraded(deck[idx].id)
+        if upgraded is not None:
+            c["cards_removed"] = [idx]
+            c["cards_added"] = [copy.copy(upgraded)]
+    return c
+
+
+def _neow_bless_lose_max_hp_for_relic(hp, max_hp, gold, deck, card_db, rng):
+    c = _empty_event_changes()
+    c["max_hp_delta"] = -8
+    c["grants_relic"] = True
+    return c
+
+
+# FIX 2 (2026-04-23): New Neow blessing appliers for expanded pool
+def _neow_bless_colorless_card(hp, max_hp, gold, deck, card_db, rng):
+    """Choose 1 of 2 Colorless cards — add 1 random colorless card to deck."""
+    c = _empty_event_changes()
+    # Find a colorless card in the card database (non-character-specific)
+    colorless_cards = [card for card in card_db.cards.values()
+                       if hasattr(card, 'color') and card.color == 'colorless']
+    if colorless_cards:
+        chosen = copy.copy(rng.choice(colorless_cards))
+        c["cards_added"] = [chosen]
+    return c
+
+
+def _neow_bless_card_and_potion(hp, max_hp, gold, deck, card_db, rng):
+    """Gain 1 card reward and 1 random Potion."""
+    c = _empty_event_changes()
+    # Add a card reward (via grants_relic as a signal; this is simplified)
+    c["gold_delta"] = 1  # marker that this grants a card reward
+    return c
+
+
+def _neow_bless_two_relics_plus_cards(hp, max_hp, gold, deck, card_db, rng):
+    """Obtain 2 Relics, add Strike and Defend — trade for extra basic cards."""
+    c = _empty_event_changes()
+    c["grants_relic"] = True  # Will be x2 in apply logic if needed
+    # Add Strike and Defend to the deck
+    strike = card_db.get_card_by_name("Strike") if card_db else None
+    defend = card_db.get_card_by_name("Defend") if card_db else None
+    if strike and defend:
+        c["cards_added"] = [copy.copy(strike), copy.copy(defend)]
+    return c
+
+
+def _neow_bless_transform_card(hp, max_hp, gold, deck, card_db, rng):
+    """Transform a card in your deck — replace a random card with a random one."""
+    c = _empty_event_changes()
+    if deck:
+        # Pick a random card from the deck to remove
+        idx_to_remove = rng.randint(0, len(deck) - 1)
+        c["cards_removed"] = [idx_to_remove]
+        # Add a random different card
+        all_cards = list(card_db.cards.values()) if card_db else []
+        if all_cards:
+            new_card = copy.copy(rng.choice(all_cards))
+            c["cards_added"] = [new_card]
+    return c
+
+
+# Ordered list — the index is stable so vocab ids stay put across runs.
+# Each callable is (key, description, apply_fn).
+# FIX 2 (2026-04-23): Expanded pool; enumerate_neow_options will sample 3
+NEOW_BLESSINGS: list[tuple[str, str, Any]] = [
+    ("max_hp_8",          "Gain 8 Max HP",                    _neow_bless_max_hp),
+    ("full_heal",         "Fully heal",                       _neow_bless_full_heal),
+    ("gold_100",          "Gain 100 Gold",                    _neow_bless_gold),
+    ("random_relic",      "Obtain a random Relic",            _neow_bless_random_relic),
+    ("remove_basic",      "Remove a Strike or Defend",        _neow_bless_remove_basic),
+    ("upgrade_random",    "Upgrade a random card",            _neow_bless_upgrade_random),
+    ("lose_mhp_for_relic", "Lose 8 Max HP, obtain a Relic",   _neow_bless_lose_max_hp_for_relic),
+    # FIX 2 (2026-04-23): New expanded blessings
+    ("colorless_card",    "Choose 1 of 2 Colorless cards",    _neow_bless_colorless_card),
+    ("card_and_potion",   "Gain 1 card reward and 1 Potion",  _neow_bless_card_and_potion),
+    ("two_relics_plus_cards", "Obtain 2 Relics, add Strike and Defend", _neow_bless_two_relics_plus_cards),
+    ("transform_card",    "Transform a card in your deck",    _neow_bless_transform_card),
+]
+
+
+def enumerate_neow_options(
+    deck: list[Card],
+    hp: int,
+    max_hp: int,
+    gold: int,
+    card_db: CardDB,
+    rng: random.Random,
+) -> list[dict]:
+    """Return ``[{vocab_id, description, changes, key}, ...]`` for Neow.
+
+    Mirrors ``enumerate_event_options`` so ``play_full_run`` can reuse the
+    event-option code path. Each option is resolved against a fresh local
+    rng so enumeration never shifts the global run rng (important for
+    determinism when the network ultimately picks a different option).
+
+    FIX 2 (2026-04-23): Now randomly samples 3 blessings from the expanded pool
+    instead of offering all blessings.
+    """
+    _ensure_data_loaded()
+
+    # FIX 2: Randomly sample 3 blessings from the expanded pool
+    sampled_indices = rng.sample(range(len(NEOW_BLESSINGS)), min(3, len(NEOW_BLESSINGS)))
+
+    result: list[dict] = []
+    for list_idx, i in enumerate(sampled_indices):
+        key, desc, applier = NEOW_BLESSINGS[i]
+        vid = _event_choice_vocab_id(_NEOW_EVENT_ID, list_idx)
+        local_rng = random.Random(rng.random())
+        changes = applier(hp, max_hp, gold, deck, card_db, local_rng)
+        result.append({
+            "vocab_id": vid,
+            "description": desc,
+            "changes": changes,
+            "key": key,
+        })
+    return result
+
+
+def heuristic_neow_option_index(
+    hp: int,
+    max_hp: int,
+    gold: int,
+    deck: list[Card],
+) -> int:
+    """Rule-of-thumb Neow pick used as the shadow advisor baseline.
+
+    Delegates to the shared ``score_neow_option`` scorer so training and
+    ``deterministic_advisor.decide_neow`` can't drift: both paths
+    consult ``NEOW_TAG_PRIORITY`` via the same code. Returns the index
+    of the best blessing in ``NEOW_BLESSINGS``.
+    """
+    hp_frac = hp / max_hp if max_hp > 0 else 1.0
+    best_i, best_s = 0, -1e9
+    for i, (key, _desc, _fn) in enumerate(NEOW_BLESSINGS):
+        tag = _NEOW_KEY_TO_TAG.get(key, "unknown")
+        s = score_neow_option(tag=tag, text=None, hp_frac=hp_frac)
+        if s > best_s:
+            best_i, best_s = i, s
+    return best_i
 
 
 def _evaluate_event_options(
@@ -1403,7 +2305,7 @@ def _evaluate_event_options(
     best_option = options[0] if options else {}
 
     for opt in options:
-        desc = (opt.get("description") or "").lower()
+        desc = _clean_event_desc(opt.get("description"))
         score = 0.0
 
         # Positive effects
@@ -1419,8 +2321,12 @@ def _evaluate_event_options(
             score += 15  # Card removal is very valuable
         if "gold" in desc and "gain" in desc:
             score += 5
-        if "relic" in desc:
-            score += 20
+        if "relic" in desc and "trade" not in desc:
+            # Relic rewards are very valuable — V6 boss-log data shows
+            # relic count is the single biggest correlate with winning.
+            # Offset HP-loss penalty explicitly so a "-8 HP, gain relic"
+            # option still beats "gain 100 gold" at healthy HP.
+            score += 35
 
         # Negative effects
         if "damage" in desc or "lose" in desc:
@@ -1451,9 +2357,8 @@ def _apply_event_option(
     common patterns.
     """
     import re
-    desc = (option.get("description") or "").lower()
-    result = {"hp_delta": 0, "max_hp_delta": 0, "gold_delta": 0,
-              "cards_added": [], "cards_removed": []}
+    desc = _clean_event_desc(option.get("description"))
+    result = _empty_event_changes()
 
     # Heal N HP
     heal_match = re.search(r'heal\s*(\d+)', desc)
@@ -1479,6 +2384,30 @@ def _apply_event_option(
     gold_lose_match = re.search(r'lose\s*(\d+)\s*gold', desc)
     if gold_lose_match:
         result["gold_delta"] -= int(gold_lose_match.group(1))
+
+    # Gain a relic.  Covers phrasings like "gain a relic", "obtain a
+    # random relic", "choose 1 of 3 doll relics", "receive a relic",
+    # "find a relic".  The description is pre-cleaned of bbcode tags
+    # by _clean_event_desc.  We look for any positive verb in the same
+    # description as the word "relic", and filter out phrasings that
+    # explicitly destroy or trade a relic (so RELIC_TRADER doesn't
+    # grant one).  Note: "lose 11 HP. obtain a relic" is POSITIVE —
+    # the HP loss is unrelated to the relic grant.
+    has_relic_word = "relic" in desc
+    positive_verb = re.search(
+        r'\b(gain|obtain|receive|choose|find|win|reward|pick|get|procure)\b',
+        desc,
+    )
+    # Only match "lose/destroy/transform/curse" when they apply DIRECTLY
+    # to a relic (e.g. "lose a relic", "destroy your relic", "trade your
+    # relic").  The intervening words can only be short qualifiers.
+    negative_phrase = re.search(
+        r'\b(lose|destroy|transform|curse|trade)\b'
+        r'(?:\s+(?:a|an|the|your|one|1|random|of|your))*\s+relic',
+        desc,
+    )
+    if has_relic_word and positive_verb and not negative_phrase:
+        result["grants_relic"] = True
 
     return result
 
@@ -1519,7 +2448,10 @@ def _rest_site_decision(
         heal = int(max_hp * 0.3)
         return {"action": "rest", "hp_delta": heal, "upgrade_card_idx": None}
 
-    # Score upgradeable cards using the organic picker's power scoring
+    # Score upgradeable cards using the organic scorer applied to the
+    # *upgraded* version so archetype fit and in-deck value drive the
+    # choice — the rest site agrees with card_picker.score_card on what
+    # 'best upgrade' means.
     upgradeable = []
     for i, card in enumerate(deck):
         if card.upgraded:
@@ -1532,26 +2464,28 @@ def _rest_site_decision(
 
         score = 0.0
         try:
-            from .card_picker import extract_properties, _card_power_score
+            from .card_picker import extract_properties, _card_power_score, score_card
             props = extract_properties(card)
-            score = _card_power_score(card, props) * 100
-
-            # Bonus for upgrading cards with large stat deltas
             upgraded = card_db.get_upgraded(card.id)
-            if upgraded:
+
+            if upgraded is not None:
+                # Primary signal: how valuable the upgraded version is in
+                # this deck, multiplied up so the stat-delta kicker below
+                # still registers meaningfully.
+                score = score_card(upgraded, deck, floor, hp, max_hp) * 100
                 uprops = extract_properties(upgraded)
-                # Damage improvement
+                # Stat-delta kicker (helps break ties with clearer upgrades)
                 if uprops.deals_damage > props.deals_damage:
                     score += (uprops.deals_damage - props.deals_damage) * 2
-                # Block improvement
                 if uprops.grants_block > props.grants_block:
                     score += (uprops.grants_block - props.grants_block) * 2
-                # Draw improvement
                 if uprops.draws_cards > props.draws_cards:
                     score += (uprops.draws_cards - props.draws_cards) * 10
-                # Poison improvement
                 if uprops.applies_poison > props.applies_poison:
                     score += (uprops.applies_poison - props.applies_poison) * 3
+            else:
+                # No upgraded variant — fall back to base power.
+                score = _card_power_score(card, props) * 100
 
             # Powers are high-priority upgrades (permanent effects)
             if props.is_power:
@@ -1594,7 +2528,9 @@ def _rest_site_decision(
 # Shop simulation — archetype-aware, multi-step
 # ---------------------------------------------------------------------------
 
-SHOP_CARD_REMOVE_COST = 75
+SHOP_CARD_REMOVE_BASE_COST = 75   # First removal costs 75
+SHOP_CARD_REMOVE_COST_STEP = 25   # Each subsequent removal costs +25 more
+SHOP_CARD_REMOVE_COST = 75        # Legacy alias (initial cost)
 SHOP_CARD_COSTS = {"Common": 50, "Uncommon": 75, "Rare": 150}
 SHOP_POTION_COST = 50  # Flat cost for any potion
 SHOP_RELIC_COST = 150   # Simplified flat relic price
@@ -1644,51 +2580,159 @@ def _score_card_for_removal(card: Card, deck: list[Card], floor: int,
 
 def _score_relic_for_purchase(relic_name: str, deck: list[Card],
                               character: str) -> float:
-    """Score a relic for purchase based on archetype fit.
+    """Score a relic for purchase based on the *actual* current deck.
 
-    Returns 0.0–2.0.  Uses the RELIC_GUIDE from config if available.
+    Thin wrapper over :func:`relic_synergy.score_relic_for_deck` so the
+    shop shares the same deck-aware scoring the deterministic advisor
+    uses.  Returns roughly [-1.0, 2.0].
     """
     try:
-        from .config_a import RELIC_GUIDE
-        from .card_picker import build_signature
-
-        sig = build_signature(deck)
-        archetype = sig.dominant_archetype
-
-        guide = RELIC_GUIDE.get(character, {})
-
-        # Check avoid list first
-        avoid = guide.get("avoid", {}).get("relics", [])
-        if relic_name in avoid:
-            return -1.0
-
-        # Top picks are always good
-        top = guide.get("top_picks", {}).get("relics", [])
-        if relic_name in top:
-            return 2.0
-
-        # Archetype-specific match
-        archetype_to_category = {
-            "poison": "poison_synergy",
-            "shiv": "shiv_synergy",
-            "sly": "sly_synergy",
-        }
-        if archetype in archetype_to_category:
-            cat_key = archetype_to_category[archetype]
-            cat_relics = guide.get(cat_key, {}).get("relics", [])
-            if relic_name in cat_relics:
-                return 1.5
-
-        # Partial match — in some category but not our archetype
-        for key, info in guide.items():
-            if key in ("top_picks", "avoid"):
-                continue
-            if relic_name in info.get("relics", []):
-                return 0.5
-
-        return 0.0
+        from .relic_synergy import score_relic_for_deck
+        return score_relic_for_deck(relic_name, deck)
     except Exception:
         return 0.0
+
+
+# ---------------------------------------------------------------------------
+# Relic reward pools
+# ---------------------------------------------------------------------------
+#
+# Real STS has distinct drop pools by source:
+#
+#   * Shops:   Common / Uncommon / Rare / Shop relics (no boss, no event,
+#              no starter).
+#   * Elites:  Common / Uncommon / Rare relics.
+#   * Bosses:  Ancient (boss-only) relics.
+#   * Treasure: Common / Uncommon / Rare relics (same pool as elite).
+#   * Events:  Event-tagged relics, with occasional cross-pool picks.
+#
+# The data file stores rarity as "Common Relic", "Uncommon Relic",
+# "Rare Relic", "Shop Relic", "Ancient Relic", "Event Relic",
+# "Starter Relic" (note the "Relic" suffix — the old filter was
+# matching bare "Starter"/"Boss" and silently excluding nothing).  The
+# pool builders below use the actual rarity strings.
+
+_STARTER_RARITY = "Starter Relic"
+_COMMON_RARITY  = "Common Relic"
+_UNCOMMON_RARITY = "Uncommon Relic"
+_RARE_RARITY    = "Rare Relic"
+_SHOP_RARITY    = "Shop Relic"
+_ANCIENT_RARITY = "Ancient Relic"   # boss drops
+_EVENT_RARITY   = "Event Relic"
+
+_STANDARD_DROP_RARITIES = frozenset({
+    _COMMON_RARITY, _UNCOMMON_RARITY, _RARE_RARITY,
+})
+_SHOP_RARITIES = frozenset({
+    _COMMON_RARITY, _UNCOMMON_RARITY, _RARE_RARITY, _SHOP_RARITY,
+})
+
+# Explicit starter-relic IDs we never want to re-grant even if they
+# somehow leak into a pool (the rarity filter should already block
+# them, but this is a belt-and-braces check).
+_STARTER_RELIC_IDS = frozenset({
+    "RING_OF_THE_SNAKE",          # Silent
+    "BURNING_BLOOD",              # Ironclad
+    "CRACKED_CORE",               # Defect
+    "PURE_WATER",                 # Watcher
+    "SOUL_FURNACE",               # Necrobinder/etc.
+})
+
+
+def _build_relic_pool(rarity_set: frozenset[str]) -> list[str]:
+    """Return all relic names whose rarity is in ``rarity_set``."""
+    _ensure_data_loaded()
+    pool: list[str] = []
+    for rid, rdata in _RELICS_BY_ID.items():
+        if rid in _STARTER_RELIC_IDS:
+            continue
+        rarity = rdata.get("rarity", "") or rdata.get("tier", "")
+        if rarity not in rarity_set:
+            continue
+        if rdata.get("event_only") or rdata.get("boss_only"):
+            continue
+        pool.append(rdata.get("name", rid))
+    return pool
+
+
+_SHOP_RELIC_POOL_CACHE: list[str] | None = None
+_STANDARD_RELIC_POOL_CACHE: list[str] | None = None
+_BOSS_RELIC_POOL_CACHE: list[str] | None = None
+_EVENT_RELIC_POOL_CACHE: list[str] | None = None
+
+
+def _get_shop_relic_pool() -> list[str]:
+    """Relic names eligible to appear in a shop."""
+    global _SHOP_RELIC_POOL_CACHE
+    if _SHOP_RELIC_POOL_CACHE is None:
+        _SHOP_RELIC_POOL_CACHE = _build_relic_pool(_SHOP_RARITIES)
+    return _SHOP_RELIC_POOL_CACHE
+
+
+def _get_standard_relic_pool() -> list[str]:
+    """Relic names eligible as elite or treasure drops."""
+    global _STANDARD_RELIC_POOL_CACHE
+    if _STANDARD_RELIC_POOL_CACHE is None:
+        _STANDARD_RELIC_POOL_CACHE = _build_relic_pool(_STANDARD_DROP_RARITIES)
+    return _STANDARD_RELIC_POOL_CACHE
+
+
+def _get_boss_relic_pool() -> list[str]:
+    """Relic names eligible as boss drops (Ancient tier)."""
+    global _BOSS_RELIC_POOL_CACHE
+    if _BOSS_RELIC_POOL_CACHE is None:
+        _BOSS_RELIC_POOL_CACHE = _build_relic_pool(frozenset({_ANCIENT_RARITY}))
+    return _BOSS_RELIC_POOL_CACHE
+
+
+def _get_event_relic_pool() -> list[str]:
+    """Relic names that can be granted by events.
+
+    Events hand out their tagged Event Relics most of the time, but the
+    real game will occasionally drop a standard-pool relic as well.  We
+    just union the two pools — the scorer picks the best fit.
+    """
+    global _EVENT_RELIC_POOL_CACHE
+    if _EVENT_RELIC_POOL_CACHE is None:
+        _EVENT_RELIC_POOL_CACHE = _build_relic_pool(frozenset({
+            _EVENT_RARITY, _COMMON_RARITY, _UNCOMMON_RARITY, _RARE_RARITY,
+        }))
+    return _EVENT_RELIC_POOL_CACHE
+
+
+def _grant_relic_from_pool(
+    pool: list[str],
+    deck: list[Card],
+    owned: set[str] | frozenset[str],
+    rng: random.Random,
+    sample_size: int = 3,
+) -> str | None:
+    """Pick the best relic from a random sample of ``pool``.
+
+    STS relic drops typically show a 1-of-3 choice; we emulate that by
+    sampling ``sample_size`` relics and scoring each against the current
+    deck, returning the highest-scoring non-owned option.  Returns None
+    only if the pool has no eligible relics at all.
+    """
+    if not pool:
+        return None
+    eligible = [r for r in pool if r not in owned]
+    if not eligible:
+        return None
+    sample = rng.sample(eligible, min(sample_size, len(eligible)))
+    try:
+        from .relic_synergy import score_relic_for_deck
+    except Exception:
+        return sample[0]
+    best, best_score = sample[0], float("-inf")
+    for name in sample:
+        try:
+            s = score_relic_for_deck(name, deck)
+        except Exception:
+            s = 0.0
+        if s > best_score:
+            best, best_score = name, s
+    return best
 
 
 def _simulate_shop(
@@ -1699,17 +2743,27 @@ def _simulate_shop(
     rng: random.Random,
     floor: int = 8,
     hp: int = 50,
-    max_hp: int = 80,
+    max_hp: int = 70,
     character: str = "SILENT",
     potions: list[dict] | None = None,
+    removals_done: int = 0,
+    relics: frozenset[str] | set[str] | None = None,
 ) -> dict:
-    """Simulate a shop visit with archetype-aware multi-step purchasing.
+    """Simulate a shop visit with relic-first purchasing.
 
-    Priority order:
-      1. Remove the weakest card (by organic scorer, not just Strike/Defend)
-      2. Buy a relic that fits the archetype (if score >= 1.0)
-      3. Buy an archetype-fitting card (using score_card)
-      4. Buy a potion if HP is low and we have room
+    V7 priority order (reshuffled from V6 based on win-rate data showing
+    elite-drop relics are the single biggest correlate of winning):
+
+      1. Buy a relic — relics compound across the whole run, so they
+         get first claim on the gold budget.  Gate relaxed to score
+         >= 0.5 (was 1.0) so generally-useful relics aren't skipped
+         just because they lack a strong archetype hook.
+      2. Buy a potion if HP is low and we have room — emergency heals
+         directly preserve the path to the boss.
+      3. Remove the weakest card — still valuable, but lowest priority
+         because it's the cheapest action at 75g and can wait until we've
+         secured the big-impact purchases.
+      4. Buy a card reward if budget remains.
 
     Returns: {gold_delta, cards_added, cards_removed, card_upgraded,
               relics_bought, potions_bought}
@@ -1726,64 +2780,42 @@ def _simulate_shop(
         "potions_bought": [],
     }
 
-    # --- Step 1: Remove the weakest card in the deck ---
-    if gold >= SHOP_CARD_REMOVE_COST and len(deck) >= 8:
-        # Score every card; find the worst contributor
-        scored = [
-            (i, c, _score_card_for_removal(c, deck, floor, hp, max_hp))
-            for i, c in enumerate(deck)
-        ]
-        scored.sort(key=lambda x: x[2])  # Lowest score = worst card
-
-        worst_idx, worst_card, worst_score = scored[0]
-        # Only remove if the card is genuinely weak (below 0.25 contribution)
-        # or is an unupgraded basic (Strike/Defend always worth removing)
-        is_basic = worst_card.name in ("Strike", "Defend") and not worst_card.upgraded
-        if worst_score < 0.25 or is_basic:
-            result["cards_removed"].append(worst_idx)
-            result["gold_delta"] -= SHOP_CARD_REMOVE_COST
-            gold -= SHOP_CARD_REMOVE_COST
-
-    # --- Step 2: Buy a relic (if affordable and good fit) ---
+    # --- Step 1: Buy a relic (HIGHEST PRIORITY) ---
+    # Relics give permanent compounding value, so they claim gold first.
+    # Uses a filtered pool (no starter/boss/event relics) and a relaxed
+    # score gate (>=0.5, was >=1.0).
     if gold >= SHOP_RELIC_COST:
-        # Simulate shop relic offering: pick 3 from available relics
-        _ensure_data_loaded()
-        all_relic_names = [r.get("name", r["id"]) for r in _RELICS_BY_ID.values()]
-        if all_relic_names:
-            shop_relics = rng.sample(all_relic_names,
-                                     min(3, len(all_relic_names)))
-            best_relic, best_relic_score = None, 0.0
+        shop_relic_pool = _get_shop_relic_pool()
+        if shop_relic_pool:
+            shop_relics = rng.sample(shop_relic_pool,
+                                     min(3, len(shop_relic_pool)))
+            # Filter out relics the player already owns
+            owned = set(relics) if relics else set()
+            shop_relics = [r for r in shop_relics if r not in owned]
+
+            best_relic, best_relic_score = None, float("-inf")
             for rname in shop_relics:
                 score = _score_relic_for_purchase(rname, deck, character)
                 if score > best_relic_score:
                     best_relic = rname
                     best_relic_score = score
 
-            # Only buy relics that are top picks or strong archetype matches
-            if best_relic_score >= 1.0 and best_relic is not None:
+            # V7: relaxed gate — buy any relic scoring >= 0.4.  Most
+            # relics without a strong archetype hook fall back to ~0.45
+            # (see relic_synergy._GENERALLY_GOOD_RELICS and the default
+            # branch) and were being rejected under the old 1.0 gate;
+            # the boss-log data says elite-drop relics are the single
+            # biggest win-correlate, so we want to be eager here.  The
+            # only way a relic lands below 0.4 is if it's in the
+            # explicit anti-synergy list (Ectoplasm, Sozu, Velvet Choker
+            # in a 0-cost deck, etc.), which we legitimately want to
+            # skip.
+            if best_relic_score >= 0.4 and best_relic is not None:
                 result["relics_bought"].append(best_relic)
                 result["gold_delta"] -= SHOP_RELIC_COST
                 gold -= SHOP_RELIC_COST
 
-    # --- Step 3: Buy a card (archetype-aware, using organic scorer) ---
-    if gold >= 50:
-        # Shop offers more cards than combat rewards (typically 6-7 in STS2)
-        offered = _offer_card_rewards(pools, deck, 6)
-        # Use the organic picker for scoring
-        pick = _smart_pick_or_fallback(offered, deck, floor, hp, max_hp)
-        if pick:
-            # Determine cost by rarity
-            cost = 75  # Default (Uncommon)
-            for rarity, cards in pools.items():
-                if any(c.id == pick.id for c in cards):
-                    cost = SHOP_CARD_COSTS.get(rarity, 75)
-                    break
-            if gold >= cost:
-                result["cards_added"].append(pick)
-                result["gold_delta"] -= cost
-                gold -= cost
-
-    # --- Step 4: Buy a potion if HP is low and we have room ---
+    # --- Step 2: Buy a potion if HP is low and we have room ---
     hp_ratio = hp / max(1, max_hp)
     potion_count = len(potions) + len(result["potions_bought"])
     if (gold >= SHOP_POTION_COST
@@ -1793,10 +2825,48 @@ def _simulate_shop(
         if hp_ratio < 0.35:
             pot = {"name": "Blood Potion", "heal": 20}
         else:
-            pot = rng.choice(POTION_TYPES)
+            pot = _random_potion(rng)
         result["potions_bought"].append(pot)
         result["gold_delta"] -= SHOP_POTION_COST
         gold -= SHOP_POTION_COST
+
+    # --- Step 3: Remove the weakest card in the deck ---
+    # Demoted from step 1 (V6): still valuable for pruning the starter
+    # strikes/defends, but it's the cheapest action (75g base) and can wait
+    # until the bigger-impact purchases are locked in.
+    # Cost escalates: 75, 100, 125, ... (+25 per removal done this run).
+    remove_cost = SHOP_CARD_REMOVE_BASE_COST + removals_done * SHOP_CARD_REMOVE_COST_STEP
+    if gold >= remove_cost and len(deck) >= 8:
+        scored = [
+            (i, c, _score_card_for_removal(c, deck, floor, hp, max_hp))
+            for i, c in enumerate(deck)
+        ]
+        scored.sort(key=lambda x: x[2])  # Lowest score = worst card
+
+        worst_idx, worst_card, worst_score = scored[0]
+        is_basic = worst_card.name in ("Strike", "Defend") and not worst_card.upgraded
+        if worst_score < 0.25 or is_basic:
+            result["cards_removed"].append(worst_idx)
+            result["gold_delta"] -= remove_cost
+            result["removals_done"] = removals_done + 1
+            gold -= remove_cost
+
+    # --- Step 4: Buy a card (archetype-aware, using organic scorer) ---
+    if gold >= 50:
+        # Shop offers more cards than combat rewards (typically 6-7 in STS2)
+        offered = _offer_card_rewards(pools, deck, 6)
+        pick = _smart_pick_or_fallback(offered, deck, floor, hp, max_hp,
+                                       relics=relics)
+        if pick:
+            cost = 75  # Default (Uncommon)
+            for rarity, cards in pools.items():
+                if any(c.id == pick.id for c in cards):
+                    cost = SHOP_CARD_COSTS.get(rarity, 75)
+                    break
+            if gold >= cost:
+                result["cards_added"].append(pick)
+                result["gold_delta"] -= cost
+                gold -= cost
 
     return result
 
@@ -1869,7 +2939,7 @@ def simulate_act1(
 
     # Character setup
     char_data = _CHARACTERS_BY_ID.get(character, {})
-    hp = char_data.get("starting_hp", 80)
+    hp = char_data.get("starting_hp", 70)
     max_hp = hp
     gold = char_data.get("starting_gold", 99)
     max_energy = char_data.get("max_energy", 3)
@@ -1881,26 +2951,26 @@ def simulate_act1(
         card_id = _normalize_card_id(raw_id)
         card = card_db.get(card_id)
         if card:
-            deck.append(card)
+            deck.append(copy.copy(card))
         else:
             # Try direct lookup
             card = card_db.get(raw_id)
             if card:
-                deck.append(card)
+                deck.append(copy.copy(card))
 
     if not deck:
         # Fallback: hardcode Ironclad starter
         for _ in range(5):
             c = card_db.get("STRIKE_IRONCLAD")
             if c:
-                deck.append(c)
+                deck.append(copy.copy(c))
         for _ in range(4):
             c = card_db.get("DEFEND_IRONCLAD")
             if c:
-                deck.append(c)
+                deck.append(copy.copy(c))
         c = card_db.get("BASH")
         if c:
-            deck.append(c)
+            deck.append(copy.copy(c))
 
     # Card pools for rewards
     char_color = char_data.get("color", "red")
@@ -1918,6 +2988,16 @@ def simulate_act1(
 
     # Potions
     potions: list[dict] = []  # Start with no potions (acquired from combat)
+
+    # Relics — starts with the character's starter relic (if any), then
+    # grows from shop purchases and boss rewards.  Used by the organic
+    # card picker so relics bias card selection the same way as in game.
+    relics: set[str] = set()
+    starter_relic = char_data.get("starting_relic")
+    if isinstance(starter_relic, str) and starter_relic:
+        relics.add(starter_relic)
+    elif isinstance(starter_relic, dict):
+        relics.add(starter_relic.get("name", starter_relic.get("id", "")))
 
     # Run state
     result = RunResult(run_id=run_id, outcome="lose", floor_reached=0,
@@ -1999,14 +3079,16 @@ def simulate_act1(
 
             # Potion drop
             if rng.random() < POTION_DROP_CHANCE and len(potions) < POTION_SLOTS:
-                pot = rng.choice(POTION_TYPES)
+                pot = _random_potion(rng)
                 potions.append(dict(pot))
 
-            # Card reward (not for boss — boss gives relic)
+            # Card reward (not for boss — boss gives relic only)
             if room_type != "boss":
                 offered = _offer_card_rewards(pools, deck)
-                # Use organic picker (rule-based + alpha-blended ML)
-                pick = _smart_pick_or_fallback(offered, deck, floor_num, hp, max_hp)
+                # Use organic picker — relics influence card value
+                pick = _smart_pick_or_fallback(
+                    offered, deck, floor_num, hp, max_hp,
+                    relics=frozenset(relics))
                 if pick:
                     deck.append(pick)
                     result.cards_picked.append(pick.name)
@@ -2015,8 +3097,28 @@ def simulate_act1(
                 else:
                     result.cards_skipped += 1
 
+            # Relic drops: elites always drop a Common/Uncommon/Rare relic,
+            # bosses always drop an Ancient (boss-pool) relic.  Normal and
+            # weak combats never drop relics — those only come from
+            # treasure rooms, shops, and events.
+            if room_type == "elite":
+                granted = _grant_relic_from_pool(
+                    _get_standard_relic_pool(), deck, relics, rng,
+                )
+                if granted is not None:
+                    relics.add(granted)
+                    if verbose:
+                        print(f"    Elite drop: {granted}")
+
             if room_type == "boss":
                 result.outcome = "win"
+                granted = _grant_relic_from_pool(
+                    _get_boss_relic_pool(), deck, relics, rng,
+                )
+                if granted is not None:
+                    relics.add(granted)
+                    if verbose:
+                        print(f"    Boss drop: {granted}")
 
         elif room_type == "rest":
             decision = _rest_site_decision(hp, max_hp, deck, card_db, rng,
@@ -2032,7 +3134,7 @@ def simulate_act1(
                     upgraded = card_db.get_upgraded(deck[idx].id)
                     if upgraded:
                         old_name = deck[idx].name
-                        deck[idx] = upgraded
+                        deck[idx] = copy.copy(upgraded)
                         result.upgrades_done += 1
                         if verbose:
                             print(f"    Smith: upgraded {old_name}")
@@ -2061,15 +3163,40 @@ def simulate_act1(
                 for card in changes["cards_added"]:
                     deck.append(card)
 
+                # Relic reward (only fires when the chosen option's
+                # description explicitly mentions gaining a relic).
+                if changes.get("grants_relic"):
+                    granted = _grant_relic_from_pool(
+                        _get_event_relic_pool(), deck, relics, rng,
+                    )
+                    if granted is not None:
+                        relics.add(granted)
+                        if verbose:
+                            print(f"    Event relic: {granted}")
+
                 result.events_visited += 1
                 if verbose:
                     print(f"    Event: {eid} (HP: {hp}/{max_hp})")
+
+        elif room_type == "treasure":
+            # Treasure chest: relic drop + gold reward (matches real game).
+            # Gold ranges from 50-75 for a standard chest.
+            granted = _grant_relic_from_pool(
+                _get_standard_relic_pool(), deck, relics, rng,
+            )
+            if granted is not None:
+                relics.add(granted)
+                if verbose:
+                    print(f"    Treasure: {granted}")
+            # Treasure gold reward (real game gives ~50-75 gold per chest)
+            gold += rng.randint(50, 75)
 
         elif room_type == "shop":
             shop_result = _simulate_shop(
                 deck, gold, card_db, pools, rng,
                 floor=floor_num, hp=hp, max_hp=max_hp,
                 character=character, potions=potions,
+                relics=frozenset(relics),
             )
             gold += shop_result["gold_delta"]
 
@@ -2088,6 +3215,7 @@ def simulate_act1(
                     print(f"    Shop bought card: {card.name}")
 
             for relic_name in shop_result.get("relics_bought", []):
+                relics.add(relic_name)
                 if verbose:
                     print(f"    Shop bought relic: {relic_name}")
 

@@ -89,6 +89,22 @@ class OptionSample:
     option_cards: list[int]   # Card vocab indices (0 when N/A)
     chosen_idx: int           # Which option was picked
     value: float              # Run outcome value (assigned after run ends)
+    # Shadow pick from the deterministic advisor computed at the same
+    # decision site. Used in training loss (Approach 2: shadow advisor
+    # signal) to push the shadow's preferred option toward the run value,
+    # plus consumed by tools/agreement_rate.py for diagnostics.
+    shadow_chosen_idx: int | None = None
+    # Deck card vocab IDs at decision time — used by the dedicated
+    # card_eval_head to encode deck composition context.  None for
+    # non-card-pick decisions (rest, map, shop, events).
+    deck_card_ids: list[int] | None = None
+    # Raw scores from network inference at pick time (card picks only).
+    # Used for score-spread diagnostics without re-running forward pass.
+    pick_scores: list[float] | None = None
+    # Relic context for card_eval_head relic-aware training
+    relic_ids: list[int] | None = None
+    relic_mask: list[bool] | None = None
+    synergy_features: list[float] | None = None
 
 
 # Option type constants (indices into option_type_embed)
@@ -106,6 +122,18 @@ OPTION_SHOP_LEAVE = 11
 OPTION_CARD_REWARD = 12
 OPTION_CARD_SKIP = 13
 OPTION_SHOP_BUY_POTION = 14
+# IMPROVEMENTS.md #4: event-choice decisions get their own option type so
+# the option-head network can learn per-event policies from outcome value.
+# opt_cards[i] carries the per-choice vocab id (see EVENT_CHOICE_VOCAB in
+# simulator.py). A new event seen for the first time maps to 0 (UNK) and
+# still gets a reasonable prior from the side-features wired through.
+OPTION_EVENT_CHOICE = 15
+# IMPROVEMENTS.md #18: shop relics were invisible to the option head.
+# Now enumerated in full_run's shop loop and bridge.shop_options_from_mcp.
+# opt_cards[i] carries the relic's vocab index from vocabs.relics.
+OPTION_SHOP_BUY_RELIC = 16
+# Boss/elite relic reward: 1-of-3 pick. opt_cards carries relic vocab IDs.
+OPTION_RELIC_PICK = 17
 
 ROOM_TYPE_TO_OPTION = {
     "weak": OPTION_MAP_WEAK,
@@ -303,7 +331,7 @@ def play_one_game(
     encounter_id: str | None = None,
     deck: list[Card] | None = None,
     max_turns: int = 30,
-    mcts_simulations: int = 50,
+    mcts_simulations: int = 100,
     temperature: float = 1.0,
     rng: random.Random | None = None,
 ) -> tuple[list[TrainingSample], str, int, str]:
@@ -371,7 +399,7 @@ def play_one_game(
             action_features, action_mask = encode_actions(actions, state, vocabs, config)
 
             scaled_sims = scale_simulations(mcts_simulations, len(actions))
-            action, policy, _root_value = mcts.search(
+            action, policy, _root_value, _mcts_actions = mcts.search(
                 state, num_simulations=scaled_sims,
                 temperature=temperature,
             )
@@ -521,12 +549,15 @@ def train_batch(
     samples: list[TrainingSample],
     option_samples: list | None = None,
     device: str = "cpu",
-) -> tuple[float, float, float, float]:
-    """Train on a batch. Returns (total, value, policy, option) losses."""
+    vocabs: "Vocabs | None" = None,
+) -> tuple[float, float, float, float, float, float]:
+    """Train on a batch. Returns (total, value, policy, option, card_pick, other_option) losses."""
     network.train()
     value_losses = []
     policy_losses = []
     option_losses = []
+    card_pick_losses = []
+    other_option_losses = []
     nan_combat = nan_option = 0
 
     # --- Combat samples: accumulate gradients, step once ---
@@ -569,9 +600,75 @@ def train_batch(
         optimizer.step()
 
     # --- Option samples (all non-combat decisions): accumulate gradients, step once ---
+    # Card-pick samples (deck_card_ids != None) are routed through the
+    # dedicated card_eval_head with ranking loss.  All other option samples
+    # (rest, map, shop, events) use the generic option_eval_head as before.
     optimizer.zero_grad()
     option_valid = 0
-    for sample in (option_samples or []):
+    SHADOW_ALPHA = 0.15
+    RANK_BETA = 0.20       # weight for ranking loss on card picks
+    RANK_MARGIN = 0.05     # minimum desired score gap between chosen and alternatives
+    # Skip encouragement: on losing runs with bloated decks, push the skip
+    # option's score down (toward 0) so the network learns that skipping would
+    # have been better.  Only fires when: (a) run lost, (b) deck had 18+ cards,
+    # (c) network picked a card (not skip).  Weight scales with deck bloat.
+    SKIP_BLOAT_ALPHA = 0.35  # base weight for skip encouragement loss
+    SKIP_BLOAT_DECK_THRESHOLD = 15  # deck size above which skip signal fires
+    # Empirical card lift: deck-win-rate relative to baseline (>1 = above avg).
+    # Used to boost ranking loss for win-correlated cards so the network
+    # gets stronger gradient toward picking proven winners.
+    _CARD_LIFT = {
+        "COORDINATE": 3.3, "JACKPOT": 2.9, "DARK_SHACKLES": 2.4,
+        "VOLLEY": 1.97, "NOXIOUS_FUMES": 1.86, "PIERCING_WAIL": 1.83,
+        "BOUNCING_FLASK": 1.73, "ANTICIPATE": 1.68, "EXPOSE": 1.67,
+        "AUTOMATION": 1.67, "SUCKER_PUNCH": 1.66, "THRUMMING_HATCHET": 1.62,
+        "OMNISLICE": 1.61, "PRECISE_CUT": 1.58, "EXPERTISE": 1.57,
+        "FINESSE": 1.48, "DEADLY_POISON": 1.47, "BLADE_DANCE": 1.46,
+        "PANIC_BUTTON": 1.44, "DAGGER_SPRAY": 1.41, "LEADING_STRIKE": 1.38,
+        "HIDDEN_DAGGERS": 1.37, "BACKSTAB": 1.37, "DAGGER_THROW": 1.35,
+        "DEFLECT": 1.29, "CLOAK_AND_DAGGER": 1.22, "DODGE_AND_ROLL": 1.2,
+        "SNAKEBITE": 1.11, "RICOCHET": 1.1, "POISONED_STAB": 1.07,
+    }
+    # ── V21: Weakened supervised skip bootstrapping ─────────────────────
+    # V20 thresholds (value<0.4, WR<0.28) created too much skip bias.
+    # V21: only bootstrap on clearly losing runs (value<0.2) with truly
+    # bad cards (WR<0.20). This is a gentle nudge, not a firehose.
+    BOOTSTRAP_WIN_THRESHOLD = 0.20  # V21: tightened from 0.28
+    BOOTSTRAP_MIN_PICKS = 20
+    BOOTSTRAP_SKIP_VALUE = 0.30    # V21: reduced from 0.35
+
+    _augmented_option_samples = list(option_samples or [])
+    try:
+        from .full_run import _card_quality
+        if _card_quality:
+            _bootstrap_count = 0
+            for _os in list(option_samples or []):
+                if (_os.deck_card_ids is not None          # is a card pick
+                        and _os.value < 0.2                # V21: only clear losses
+                        and _os.chosen_idx != len(_os.option_types) - 1):  # didn't skip
+                    _chosen_vid = _os.option_cards[_os.chosen_idx]
+                    _chosen_name = vocabs.cards.idx_to_token.get(_chosen_vid, "") if vocabs else ""
+                    _wr = _card_quality.get(_chosen_name)
+                    if _wr is not None and _wr < BOOTSTRAP_WIN_THRESHOLD:
+                        _syn = OptionSample(
+                            state_tensors=_os.state_tensors,
+                            option_types=_os.option_types,
+                            option_cards=_os.option_cards,
+                            chosen_idx=len(_os.option_types) - 1,  # skip
+                            value=BOOTSTRAP_SKIP_VALUE,
+                            shadow_chosen_idx=_os.shadow_chosen_idx,
+                            deck_card_ids=_os.deck_card_ids,
+                            pick_scores=_os.pick_scores,
+                            relic_ids=_os.relic_ids,
+                            relic_mask=_os.relic_mask,
+                            synergy_features=_os.synergy_features,
+                        )
+                        _augmented_option_samples.append(_syn)
+                        _bootstrap_count += 1
+    except Exception:
+        pass
+
+    for sample in _augmented_option_samples:
         try:
             state_tensors = {k: v.to(device) for k, v in sample.state_tensors.items()}
             hidden = network.encode_state(**state_tensors)
@@ -580,18 +677,115 @@ def train_batch(
             clamped_cards = [c if c <= max_card_id else 1 for c in sample.option_cards]  # 1=UNK
             types_t = torch.tensor([sample.option_types], dtype=torch.long, device=device)
             cards_t = torch.tensor([clamped_cards], dtype=torch.long, device=device)
-            mask = torch.zeros(1, len(sample.option_types), dtype=torch.bool, device=device)
-
-            scores = network.evaluate_options(hidden, types_t, cards_t, mask)
+            opt_mask = torch.zeros(1, len(sample.option_types), dtype=torch.bool, device=device)
 
             target = torch.tensor([[sample.value]], dtype=torch.float32, device=device)
-            chosen_score = scores[0, sample.chosen_idx].unsqueeze(0).unsqueeze(0)
-            o_loss = 0.25 * F.mse_loss(chosen_score, target)
+
+            # ---- Card-pick samples: dedicated head + ranking loss ----
+            if sample.deck_card_ids is not None:
+                deck_ids = [min(d, max_card_id) if d is not None else 1 for d in sample.deck_card_ids]
+                deck_t = torch.tensor([deck_ids], dtype=torch.long, device=device)
+                deck_mask = torch.zeros(1, len(deck_ids), dtype=torch.bool, device=device)
+
+                # Build relic tensors for relic-aware card evaluation
+                relic_t = None
+                rmask_t = None
+                syn_t = None
+                if sample.relic_ids is not None:
+                    relic_t = torch.tensor([sample.relic_ids], dtype=torch.long, device=device)
+                    rmask_t = torch.tensor([sample.relic_mask], dtype=torch.bool, device=device) if sample.relic_mask else torch.zeros(1, len(sample.relic_ids), dtype=torch.bool, device=device)
+                if sample.synergy_features is not None:
+                    syn_t = torch.tensor([sample.synergy_features], dtype=torch.float32, device=device)
+                scores = network.evaluate_card_picks(
+                    hidden, deck_t, deck_mask, types_t, cards_t, opt_mask,
+                    relic_ids=relic_t, relic_mask=rmask_t, synergy_features=syn_t)
+
+                # Primary loss: MSE on chosen option's score → run value
+                chosen_score = scores[0, sample.chosen_idx].unsqueeze(0).unsqueeze(0)
+                o_loss = 0.25 * F.mse_loss(chosen_score, target)
+
+                # Ranking loss: cards-vs-cards ONLY (skip excluded).
+                # This prevents the self-reinforcing skip collapse where
+                # 92% loss rate pushes all cards below skip.
+                #
+                # Empirical boost: cards with high deck-win-rate lift get
+                # a stronger ranking signal (up to 2x RANK_BETA), pushing
+                # the network harder toward picking proven winners.
+                num_opts = scores.shape[1]
+                skip_idx = num_opts - 1  # last option is always skip
+                if num_opts > 2 and sample.chosen_idx != skip_idx:
+                    # Look up empirical lift for the chosen card
+                    chosen_card_vid = sample.option_cards[sample.chosen_idx]
+                    chosen_card_name = vocabs.cards.idx_to_token.get(chosen_card_vid, "")
+                    card_lift = _CARD_LIFT.get(chosen_card_name, 1.0)
+                    # Boost beta: 1.0x at lift=1.0, up to 2.0x at lift=2.0+
+                    boosted_beta = RANK_BETA * min(2.0, max(0.5, card_lift))
+
+                    rank_loss = torch.tensor(0.0, device=device)
+                    chosen_s = scores[0, sample.chosen_idx]
+                    n_compared = 0
+                    for j in range(num_opts):
+                        if j == sample.chosen_idx or j == skip_idx:
+                            continue
+                        other_s = scores[0, j]
+                        if sample.value > 0.5:
+                            # Good run: chosen card should score > other card by margin
+                            rank_loss = rank_loss + F.relu(RANK_MARGIN - (chosen_s - other_s))
+                        else:
+                            # Bad run: other card should score > chosen card by margin
+                            rank_loss = rank_loss + F.relu(RANK_MARGIN - (other_s - chosen_s))
+                        n_compared += 1
+                    if n_compared > 0:
+                        rank_loss = rank_loss / n_compared
+                        o_loss = o_loss + boosted_beta * rank_loss
+
+                # Skip encouragement: on losing/mediocre runs with growing decks,
+                # add a loss term that pushes the chosen card's score DOWN
+                # (toward 0) to make skip relatively more attractive.
+                # Fires at 15+ cards (3 picks above starter deck).
+                # Scales with deck bloat: stronger signal for larger decks.
+                if (num_opts >= 2
+                        and sample.chosen_idx != skip_idx
+                        and sample.value < 0.5  # losing or mediocre run
+                        and sample.deck_card_ids is not None
+                        and len(sample.deck_card_ids) >= SKIP_BLOAT_DECK_THRESHOLD):
+                    bloat = len(sample.deck_card_ids) - SKIP_BLOAT_DECK_THRESHOLD
+                    bloat_weight = SKIP_BLOAT_ALPHA * min(2.0, 1.0 + bloat / 10.0)
+                    # Push chosen card score toward 0 (making skip win by default)
+                    chosen_s = scores[0, sample.chosen_idx]
+                    skip_target = torch.tensor([[0.0]], dtype=torch.float32, device=device)
+                    skip_loss = bloat_weight * F.mse_loss(
+                        chosen_s.unsqueeze(0).unsqueeze(0), skip_target)
+                    o_loss = o_loss + skip_loss
+
+            # ---- All other options: generic option_eval_head ----
+            else:
+                scores = network.evaluate_options(hidden, types_t, cards_t, opt_mask)
+
+                chosen_score = scores[0, sample.chosen_idx].unsqueeze(0).unsqueeze(0)
+                o_loss = 0.25 * F.mse_loss(chosen_score, target)
+
+            # ----------------------------------------------------------
+            # Approach 2: Shadow advisor signal (all option types)
+            # When the shadow (heuristic) advisor disagrees with the
+            # network's choice, also push the shadow's preferred option
+            # toward the run outcome value.
+            # ----------------------------------------------------------
+            if (sample.shadow_chosen_idx is not None
+                    and sample.shadow_chosen_idx != sample.chosen_idx
+                    and sample.shadow_chosen_idx < scores.shape[1]):
+                shadow_score = scores[0, sample.shadow_chosen_idx].unsqueeze(0).unsqueeze(0)
+                shadow_loss = SHADOW_ALPHA * F.mse_loss(shadow_score, target)
+                o_loss = o_loss + shadow_loss
 
             if torch.isnan(o_loss):
                 nan_option += 1
                 continue
             option_losses.append(o_loss.item())
+            if sample.deck_card_ids is not None:
+                card_pick_losses.append(o_loss.item())
+            else:
+                other_option_losses.append(o_loss.item())
             n_opt = max(1, len(option_samples or []))
             (o_loss / n_opt).backward()
             option_valid += 1
@@ -609,7 +803,9 @@ def train_batch(
     avg_v = sum(value_losses) / max(1, len(value_losses))
     avg_p = sum(policy_losses) / max(1, len(policy_losses))
     avg_o = sum(option_losses) / max(1, len(option_losses))
-    return avg_v + avg_p + avg_o, avg_v, avg_p, avg_o
+    avg_cp = sum(card_pick_losses) / max(1, len(card_pick_losses))
+    avg_oo = sum(other_option_losses) / max(1, len(other_option_losses))
+    return avg_v + avg_p + avg_o, avg_v, avg_p, avg_o, avg_cp, avg_oo
 
 
 # ---------------------------------------------------------------------------
@@ -618,6 +814,30 @@ def train_batch(
 
 def _default_progress_path() -> Path:
     return Path(__file__).resolve().parents[4] / "alphazero_progress.json"
+
+
+def _build_card_stats(
+    offered: dict[str, int],
+    picked: dict[str, int],
+    win_picked: dict[str, int],
+    top_n: int = 30,
+) -> list[dict]:
+    """Build per-card stats sorted by times offered (descending)."""
+    all_cards = sorted(offered.keys(), key=lambda c: offered[c], reverse=True)[:top_n]
+    result = []
+    for cname in all_cards:
+        o = offered[cname]
+        p = picked.get(cname, 0)
+        w = win_picked.get(cname, 0)
+        result.append({
+            "card": cname,
+            "offered": o,
+            "picked": p,
+            "pick_rate": round(p / max(1, o), 3),
+            "skip_rate": round(1 - p / max(1, o), 3),
+            "win_pick_rate": round(w / max(1, p), 3) if p > 0 else None,
+        })
+    return result
 
 
 def _write_progress(path: Path, stats: dict) -> None:
@@ -638,119 +858,20 @@ def _read_progress(path: Path) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# XGBoost card picker refresh
-# ---------------------------------------------------------------------------
-
-def _refresh_xgboost(card_db, games: int = 200) -> None:
-    """Collect fresh card pick data and retrain the XGBoost model.
-
-    Runs in a subprocess so a crash in the combat simulator doesn't
-    kill the entire training process.  Falls back to the existing model
-    (if any) on failure.
-    """
-    try:
-        from ..card_picker_xgb import MODEL_DIR
-    except ImportError as e:
-        print(f"[XGBoost] Skipping refresh — missing dependency: {e}", flush=True)
-        return
-
-    import subprocess
-    import sys
-
-    print(f"[XGBoost] Refreshing card picker model ({games} games in subprocess)...", flush=True)
-    t0 = time.time()
-
-    # Run data collection + training in a subprocess so segfaults
-    # in the combat solver don't take down AlphaZero training.
-    script = f"""
-import random, time, sys
-from src.sts2_solver.card_picker_xgb import (
-    CardPickCollector, CardPickerXGB, MODEL_DIR, records_to_training_data,
-)
-from src.sts2_solver.collect_card_picks import collect_one_run
-from src.sts2_solver.data_loader import load_cards
-
-card_db = load_cards()
-collector = CardPickCollector()
-wins = 0
-crashes = 0
-for i in range({games}):
-    try:
-        seed = random.randint(0, 2**31)
-        result = collect_one_run(run_id=i, collector=collector,
-                                 character="SILENT", seed=seed)
-        if result.outcome == "win":
-            wins += 1
-    except Exception as e:
-        crashes += 1
-        if crashes > 20:
-            print(f"[XGBoost] Too many crashes ({{crashes}}), stopping collection")
-            break
-
-n = len(collector.records)
-print(f"[XGBoost] Collected {{n}} records ({{wins}}/{games} wins, {{crashes}} crashes)")
-
-if n < 50:
-    print("[XGBoost] Too few records, skipping training")
-    sys.exit(0)
-
-data_path = str(MODEL_DIR.parent / "card_pick_data_latest.json")
-collector.save(data_path)
-
-X, y = records_to_training_data(data_path, card_db)
-print(f"[XGBoost] Training on {{len(X)}} samples (mean={{y.mean():.3f}})")
-
-model_path = MODEL_DIR / "card_picker.json"
-MODEL_DIR.mkdir(parents=True, exist_ok=True)
-picker = CardPickerXGB()
-picker.train(X, y, save_path=str(model_path))
-print("[XGBoost] Done")
-"""
-    # Run from the sts2-solver directory (same as training)
-    solver_dir = Path(__file__).resolve().parents[3]
-    result = subprocess.run(
-        [sys.executable, "-c", script],
-        cwd=str(solver_dir),
-        capture_output=True, text=True, timeout=600,
-    )
-
-    elapsed = time.time() - t0
-    if result.stdout:
-        for line in result.stdout.strip().split("\n"):
-            print(f"  {line}", flush=True)
-    if result.returncode != 0:
-        print(f"[XGBoost] Subprocess exited with code {result.returncode} "
-              f"({elapsed:.1f}s)", flush=True)
-        if result.stderr:
-            # Print last few lines of stderr for debugging
-            err_lines = result.stderr.strip().split("\n")
-            for line in err_lines[-5:]:
-                print(f"  stderr: {line}", flush=True)
-        print("[XGBoost] Will use existing model if available", flush=True)
-    else:
-        print(f"[XGBoost] Refresh completed ({elapsed:.1f}s)", flush=True)
-
-    # NOTE: Do NOT load the XGBoost model into this process.
-    # The training process uses the neural network option head for card
-    # decisions, not the card_picker.  Importing xgboost alongside PyTorch
-    # causes an OpenMP segfault on macOS.  The refreshed model will be
-    # picked up by the simulator and live advisor in their own processes.
-
-
-# ---------------------------------------------------------------------------
 # Worker: headless training loop
 # ---------------------------------------------------------------------------
 
 def train_worker(
     num_generations: int = 100,
-    games_per_generation: int = 10,
-    mcts_simulations: int = 50,
+    games_per_generation: int = 7,
+    mcts_simulations: int = 100,
     batch_size: int = 64,
     train_epochs: int = 3,
     lr: float = 1e-3,
     temperature: float = 1.0,
     save_dir: str | None = None,
     progress_file: str | None = None,
+    boss_log_file: str | None = None,
 ):
     """Headless training loop. Writes progress to JSON file."""
     card_db = load_cards()
@@ -783,11 +904,22 @@ def train_worker(
     # Load latest checkpoint if available (warm start)
     # Filter out keys with shape mismatches (e.g. trunk input dim changed)
     import torch as _torch
+    cumulative_gen_offset = 0  # how many gens were completed in prior runs
     ckpts = sorted(save_path.glob("gen_*.pt"), key=lambda p: p.stat().st_mtime)
     if ckpts:
         ckpt = _torch.load(ckpts[-1], map_location="cpu", weights_only=True)
         saved_state = ckpt["model_state"]
+        # Migrate card_eval_head weights if input dim changed (V14→V15: 336→357)
+        card_head_key = "card_eval_head.0.weight"
         current_state = network.state_dict()
+        _card_head_migrated = False
+        if (card_head_key in saved_state and card_head_key in current_state
+                and saved_state[card_head_key].shape[1] != current_state[card_head_key].shape[1]):
+            new_dim = current_state[card_head_key].shape[1]
+            old_dim = saved_state[card_head_key].shape[1]
+            saved_state = STS2Network.pad_card_eval_weights(saved_state, new_dim, old_dim)
+            _card_head_migrated = True
+            print(f"  [checkpoint] Migrated card_eval_head weights: {old_dim}→{new_dim} dims", flush=True)
         compatible = {
             k: v for k, v in saved_state.items()
             if k in current_state and v.shape == current_state[k].shape
@@ -804,7 +936,59 @@ def train_worker(
         msg = f"Warm start from {ckpts[-1].name} ({len(compatible)}/{len(saved_state)} params)"
         if skipped:
             msg += f", skipped {len(skipped)} shape-mismatched"
+
+        # Restore optimizer state if available and model was fully compatible.
+        # Skip if card_eval_head was migrated — optimizer momentum buffers have
+        # the old dimensions and will cause a shape mismatch at step().
+        if not skipped and not _card_head_migrated and "optimizer_state" in ckpt:
+            try:
+                optimizer.load_state_dict(ckpt["optimizer_state"])
+                msg += ", optimizer restored"
+            except Exception as _e:
+                msg += f", optimizer restore failed ({_e})"
+        elif _card_head_migrated and "optimizer_state" in ckpt:
+            msg += ", optimizer reset (card_eval_head migrated)"
+
+        # Cumulative generation tracking: figure out how many total gens
+        # have been trained so far.  Use the checkpoint's cumulative_gen
+        # field if present (new format), otherwise infer from the
+        # checkpoint filename (gen_NNNN.pt).
+        if "cumulative_gen" in ckpt:
+            cumulative_gen_offset = ckpt["cumulative_gen"]
+        else:
+            # Infer from filename: gen_0860.pt → 860 gens completed
+            try:
+                cumulative_gen_offset = int(ckpts[-1].stem.split("_")[1])
+            except (IndexError, ValueError):
+                cumulative_gen_offset = ckpt.get("generation", 0)
+        msg += f", cumulative gens so far: {cumulative_gen_offset}"
+
+        # Restore scheduler state: prefer saved state dict (exact),
+        # fall back to fast-forwarding by stepping N times.
+        # Skip scheduler restore when card_eval_head was migrated — the
+        # optimizer was reset so we want to start fresh with the CLI --lr.
+        if _card_head_migrated:
+            msg += f", scheduler reset (card_eval_head migrated), LR={scheduler.get_last_lr()[0]:.1e}"
+        elif "scheduler_state" in ckpt:
+            try:
+                scheduler.load_state_dict(ckpt["scheduler_state"])
+                msg += f", scheduler restored, LR={scheduler.get_last_lr()[0]:.1e}"
+            except Exception as _e:
+                msg += f", scheduler restore failed ({_e}), fast-forwarding"
+                if cumulative_gen_offset > 0:
+                    for _ in range(cumulative_gen_offset):
+                        scheduler.step()
+                    msg += f", LR={scheduler.get_last_lr()[0]:.1e}"
+        elif cumulative_gen_offset > 0:
+            for _ in range(cumulative_gen_offset):
+                scheduler.step()
+            msg += f", LR fast-forwarded to {scheduler.get_last_lr()[0]:.1e}"
+
         print(msg, flush=True)
+
+    # Total planned generations across ALL runs (for progress-based schedules).
+    # This is the cumulative gens already done + the new budget.
+    total_planned_gens = cumulative_gen_offset + num_generations
 
     progress_path = Path(progress_file) if progress_file else _default_progress_path()
 
@@ -812,39 +996,124 @@ def train_worker(
     t_start = time.time()
     total_wins = 0
     total_games = 0
+    total_boss_reached = 0   # runs where floor_reached >= BOSS_FLOOR
+    total_boss_wins = 0      # runs that beat the boss outright
+    BOSS_FLOOR = 15          # Act 1 boss floor (FIX 1: was 17, now 15 rooms)
     recent_games: list[dict] = []
 
-    from .full_run import play_full_run
+    # V8: relic telemetry (cumulative pickups across all runs)
+    from collections import Counter as _Counter
+    relic_counts: _Counter = _Counter()
+    total_relics_seen: int = 0  # total pickups (sum of counter)
+    try:
+        from .. import relic_effects as _relic_effects
+        relic_pool_size = len(_relic_effects.simulated_relic_ids())
+    except Exception:
+        relic_pool_size = 0
 
-    # --- Refresh XGBoost card picker model before training ---
-    _refresh_xgboost(card_db, games=200)
+    from .full_run import play_full_run
 
     # --- Boss-fight detail log (appended JSONL) ---
     # Each line: one run that reached the boss, with per-turn detail.
     # Lets us analyse play patterns, card usage, and loss modes.
-    boss_log_path = Path(__file__).resolve().parents[4] / "boss_fights.jsonl"
+    # By default the log sits next to the checkpoints so each training
+    # version gets its own log; --boss-log-file overrides.
+    if boss_log_file:
+        boss_log_path = Path(boss_log_file)
+    else:
+        boss_log_path = save_path / "boss_fights.jsonl"
+    boss_log_path.parent.mkdir(parents=True, exist_ok=True)
+    run_log_path = save_path / "run_logs.jsonl"
     print(f"Boss-fight log: {boss_log_path}", flush=True)
+    print(f"Run journey log: {run_log_path}", flush=True)
 
-    print(f"AlphaZero training (full runs): {num_generations} generations, {games_per_generation} runs/gen, {mcts_simulations} sims", flush=True)
+    sim_early = int(mcts_simulations * 0.4)
+    sim_late = int(mcts_simulations * 1.8)
+    print(f"AlphaZero training (full runs): {num_generations} generations, {games_per_generation} runs/gen, {mcts_simulations} base sims ({sim_early}→{sim_late} progressive)", flush=True)
     print(f"Checkpoints: {save_path}", flush=True)
     print(f"Progress: {progress_path}", flush=True)
+
+    # --- Value head probes ---
+    # Capture real state tensors from gameplay and periodically probe
+    # the value head to see if predictions are spread and directional.
+    # Probes are captured opportunistically: we grab state tensors from
+    # the first few wins and losses, plus early/late floor states.
+    # Once captured, they're frozen and reused every PROBE_INTERVAL gens.
+    PROBE_INTERVAL = 10
+    _probe_states: dict[str, dict[str, torch.Tensor]] = {}  # label → state_tensors
+    _probe_log: list[dict] = []  # [{gen, label→value}, ...]
+    _probe_log_path = save_path / "value_probes.jsonl"
+
+    def _capture_probe(label: str, sample: "TrainingSample"):
+        """Capture a state tensor for probing if we don't have one yet."""
+        if label not in _probe_states:
+            _probe_states[label] = {
+                k: v.clone() for k, v in sample.state_tensors.items()
+            }
+
+    def _run_probes(gen_num: int):
+        """Probe value head on all captured states, log results."""
+        if not _probe_states:
+            return
+        network.eval()
+        entry = {"gen": gen_num}
+        with torch.no_grad():
+            for label, st in sorted(_probe_states.items()):
+                st_dev = {k: v.to("cpu") for k, v in st.items()}
+                hidden = network.encode_state(**st_dev)
+                value = network.value_head(hidden).item()
+                entry[label] = round(value, 4)
+        network.train()
+        _probe_log.append(entry)
+        # Write to JSONL
+        try:
+            with open(_probe_log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry) + "\n")
+        except Exception:
+            pass
+        # Print summary
+        vals = {k: v for k, v in entry.items() if k != "gen"}
+        spread = max(vals.values()) - min(vals.values()) if len(vals) > 1 else 0
+        print(
+            f"  [probes] {' | '.join(f'{k}={v:+.3f}' for k, v in sorted(vals.items()))} "
+            f"(spread={spread:.3f})",
+            flush=True,
+        )
+
+    # --- Card-pick diagnostics ---
+    # Agreement: how often the network's card pick matches the shadow heuristic
+    _card_pick_total = 0
+    _card_pick_agree = 0
+    _card_skip_total = 0  # times network chose skip over all offered cards
+    # Score spread: avg gap between best-scored card and skip option
+    _card_pick_spread_sum = 0.0
+    _card_pick_spread_count = 0
+    # Per-card tracking: how often each card is offered vs picked vs skipped
+    _card_offered: dict[str, int] = {}   # card_name → times offered
+    _card_picked: dict[str, int] = {}    # card_name → times picked
+    _card_win_picked: dict[str, int] = {}  # card_name → times picked in winning runs
 
     for gen in range(1, num_generations + 1):
         gen_t0 = time.time()
 
         # --- Self-play: full Act 1 runs ---
         gen_wins = 0
-        progress = gen / num_generations
+        # Use cumulative progress for temperature and sim scaling so
+        # continuation runs don't re-do the "early exploration" phase.
+        cumulative_gen = cumulative_gen_offset + gen
+        progress = min(1.0, cumulative_gen / max(1, total_planned_gens))
         for game_num in range(games_per_generation):
             # Temperature: cosine decay, exploration → exploitation.
             # Stays above 0.5 for ~60% of training, floors at 0.2 late.
             game_temp = 0.2 + 0.8 * temperature * (1 + math.cos(math.pi * progress)) / 2
 
             # Progressive sim scaling: ramp up sims as training progresses.
-            # Early gens (network is random): base sims are sufficient.
-            # Late gens (network is trained): deeper search finds better plays.
-            # Scales from 60% → 140% of base sims over training.
-            sim_scale = 0.6 + 0.8 * progress
+            # Early gens (network is random): fewer sims are fine (saves compute).
+            # Late gens (network is trained): deeper search finds better plays
+            # and produces higher-quality policy/value targets.
+            # Scales from 40% → 180% of base sims over training.
+            # With base=100: early=40 sims, mid=110 sims, late=180 sims.
+            sim_scale = 0.4 + 1.4 * progress
             gen_sims = int(mcts_simulations * sim_scale)
 
             result = play_full_run(
@@ -860,13 +1129,78 @@ def train_worker(
                 replay_buffer.add(sample, is_win=is_win)
             for os in result.deck_samples:
                 option_buffer.add(os, is_win=is_win)
+                # Card-pick diagnostics
+                try:
+                    _card_pick_total += 1
+                    # Track skip rate: chosen_idx == last option means skip
+                    if os.chosen_idx == len(os.option_types) - 1:
+                        _card_skip_total += 1
+                    if (os.shadow_chosen_idx is not None
+                            and os.chosen_idx == os.shadow_chosen_idx):
+                        _card_pick_agree += 1
+                    # Score spread: best card score minus skip score
+                    if os.pick_scores and len(os.pick_scores) >= 2:
+                        skip_score = os.pick_scores[-1]  # last slot = skip
+                        best_card = max(os.pick_scores[:-1])  # best non-skip
+                        _card_pick_spread_sum += (best_card - skip_score)
+                        _card_pick_spread_count += 1
+                    # Per-card offer/pick tracking
+                    num_cards = len(os.option_cards) - 1  # last slot = skip
+                    for ci in range(num_cards):
+                        vid = os.option_cards[ci]
+                        cname = vocabs.cards.idx_to_token.get(vid, f"UNK_{vid}")
+                        _card_offered[cname] = _card_offered.get(cname, 0) + 1
+                        if os.chosen_idx == ci:
+                            _card_picked[cname] = _card_picked.get(cname, 0) + 1
+                            if is_win:
+                                _card_win_picked[cname] = _card_win_picked.get(cname, 0) + 1
+                except Exception:
+                    pass
             for os in result.option_samples:
                 option_buffer.add(os, is_win=is_win)
+                # Oversample relic picks 3x — they're rare (~0.7 per run)
+                # compared to card picks (~8 per run), so they get drowned
+                # out in the buffer without oversampling.
+                if OPTION_RELIC_PICK in os.option_types:
+                    for _ in range(2):  # already added once above → 3x total
+                        option_buffer.add(os, is_win=is_win)
+
+            # --- Capture value probes from real games ---
+            # We want ~6 diverse probes. Grab them opportunistically
+            # from the first game that matches each category.
+            try:
+                samples_list = result.samples
+                if samples_list:
+                    # Early game (first sample ≈ turn 1 of first combat)
+                    _capture_probe("early_turn", samples_list[0])
+                    # Mid game (middle sample)
+                    _capture_probe("mid_game", samples_list[len(samples_list) // 2])
+                    # Late game (last sample ≈ final turn)
+                    _capture_probe("late_game", samples_list[-1])
+                if is_win and samples_list:
+                    # A winning state (last turn of a winning run)
+                    _capture_probe("win_final", samples_list[-1])
+                    # A winning state early (how did the win start?)
+                    _capture_probe("win_early", samples_list[0])
+                elif not is_win and samples_list:
+                    # A losing state (last turn of a losing run)
+                    _capture_probe("lose_final", samples_list[-1])
+            except Exception:
+                pass  # never crash training for probes
 
             total_games += 1
             if result.outcome == "win":
                 gen_wins += 1
                 total_wins += 1
+
+            # Boss-fight tracking: a run that reached floor >= BOSS_FLOOR is
+            # a "boss fight attempted"; a run that won is a "boss fight won".
+            # (You can only win an Act 1 run by beating the boss, so total
+            # wins == total boss wins in practice.)
+            if result.floor_reached >= BOSS_FLOOR:
+                total_boss_reached += 1
+                if result.outcome == "win":
+                    total_boss_wins += 1
 
             # Persist boss-fight detail if the run reached the boss.
             # Written as one JSON object per line (JSONL) so we can stream-parse.
@@ -890,6 +1224,53 @@ def train_worker(
                     # Never crash training because of a log write.
                     print(f"[boss-log] write failed: {_e}", flush=True)
 
+            # Persist run journey log (every run, not just boss fights)
+            _run_log = getattr(result, "run_log", None)
+            if _run_log:
+                try:
+                    _rl_entry = {
+                        "gen": gen,
+                        "game_num": total_games,
+                        "run_outcome": result.outcome,
+                        "floor_reached": result.floor_reached,
+                        "final_hp": result.final_hp,
+                        "max_hp": result.max_hp,
+                        "final_deck": getattr(result, "final_deck", None),
+                        "final_relics": getattr(result, "final_relics", None),
+                        "archetype": getattr(result, "archetype", "unknown"),
+                        "archetype_commitment": round(
+                            getattr(result, "archetype_commitment", 0.0), 3),
+                        "journey": _run_log,
+                    }
+                    with open(run_log_path, "a", encoding="utf-8") as _rlf:
+                        _rlf.write(json.dumps(_rl_entry, default=str) + "\n")
+                except Exception as _e:
+                    print(f"[run-log] write failed: {_e}", flush=True)
+
+            # V8: record relic pickups for this run (excluding the starter)
+            _run_relics = getattr(result, "final_relics", None) or []
+            for _rid in _run_relics:
+                if _rid == "RING_OF_THE_SNAKE":
+                    continue  # starter relic, not informative
+                relic_counts[_rid] += 1
+                total_relics_seen += 1
+
+            # Per-game card-pick stats
+            _game_picks = len(result.deck_samples)
+            _game_agrees = sum(
+                1 for ds in result.deck_samples
+                if ds.shadow_chosen_idx is not None and ds.chosen_idx == ds.shadow_chosen_idx
+            )
+            _game_spreads = [
+                max(ds.pick_scores[:-1]) - ds.pick_scores[-1]
+                for ds in result.deck_samples
+                if ds.pick_scores and len(ds.pick_scores) >= 2
+            ]
+            _game_skips = sum(
+                1 for ds in result.deck_samples
+                if ds.chosen_idx == len(ds.option_types) - 1
+            )
+
             recent_games.append({
                 "num": total_games,
                 "encounter": f"Act1 ({result.combats_won}/{result.combats_fought})",
@@ -898,22 +1279,52 @@ def train_worker(
                 "hp": result.final_hp,
                 "archetype": getattr(result, 'archetype', 'unknown'),
                 "commitment": round(getattr(result, 'archetype_commitment', 0.0), 2),
+                "relics": [r for r in _run_relics if r != "RING_OF_THE_SNAKE"],
+                "card_picks": _game_picks,
+                "card_agrees": _game_agrees,
+                "card_skips": _game_skips,
+                "card_spread": round(sum(_game_spreads) / max(1, len(_game_spreads)), 3) if _game_spreads else 0,
             })
             if len(recent_games) > 50:
                 recent_games = recent_games[-50:]
 
         # --- Training ---
-        v_loss = p_loss = o_loss = total_loss = 0.0
+        v_loss = p_loss = o_loss = total_loss = cp_loss = oo_loss = 0.0
         if len(replay_buffer) >= batch_size:
             for epoch in range(train_epochs):
                 batch = replay_buffer.sample(batch_size)
-                option_batch = option_buffer.sample(min(48, len(option_buffer))) if len(option_buffer) > 0 else []
-                total_loss, v_loss, p_loss, o_loss = train_batch(
+                option_batch = option_buffer.sample(min(128, len(option_buffer))) if len(option_buffer) > 0 else []
+                total_loss, v_loss, p_loss, o_loss, cp_loss, oo_loss = train_batch(
                     network, optimizer, batch,
                     option_samples=option_batch,
                     device="cpu",
+                    vocabs=vocabs,
                 )
             scheduler.step()
+
+        # --- V21: Push generation counter + card quality to full_run ---
+        try:
+            from .full_run import set_training_generation
+            set_training_generation(gen)
+        except Exception:
+            pass
+        if gen % 10 == 0 and _card_picked:
+            try:
+                from .full_run import update_card_quality
+                _cq: dict[str, float] = {}
+                for cname, cnt in _card_picked.items():
+                    if cnt >= 20:  # need enough data for stable rate
+                        _cq[cname] = _card_win_picked.get(cname, 0) / cnt
+                update_card_quality(_cq)
+            except Exception:
+                pass
+
+        # --- Value head probes (every PROBE_INTERVAL gens) ---
+        if gen % PROBE_INTERVAL == 0 and _probe_states:
+            try:
+                _run_probes(cumulative_gen_offset + gen)
+            except Exception as _e:
+                print(f"  [probes] failed: {_e}", flush=True)
 
         gen_elapsed = time.time() - gen_t0
         total_elapsed = time.time() - t_start
@@ -938,6 +1349,17 @@ def train_worker(
                 "win_rate": round(_wins / max(1, _cnt), 3),
             }
 
+        # --- Boss-fight metrics (cumulative + recent-50 window) ---
+        boss_fight_wr = total_boss_wins / max(1, total_boss_reached)
+        _recent_boss_reached = sum(
+            1 for _g in _recent_50 if _g.get("floor", 0) >= BOSS_FLOOR
+        )
+        _recent_boss_wins = sum(
+            1 for _g in _recent_50
+            if _g.get("floor", 0) >= BOSS_FLOOR and _g.get("outcome") == "win"
+        )
+        recent_boss_fight_wr = _recent_boss_wins / max(1, _recent_boss_reached)
+
         # Write progress
         stats = {
             "generation": gen,
@@ -945,11 +1367,26 @@ def train_worker(
             "games_played": total_games,
             "win_rate": total_wins / max(1, total_games),
             "gen_win_rate": gen_wins / max(1, games_per_generation),
+            "boss_fights_reached": total_boss_reached,
+            "boss_fights_won": total_boss_wins,
+            "boss_fight_win_rate": round(boss_fight_wr, 4),
+            "recent_boss_fights_reached": _recent_boss_reached,
+            "recent_boss_fights_won": _recent_boss_wins,
+            "recent_boss_fight_win_rate": round(recent_boss_fight_wr, 4),
             "buffer_size": len(replay_buffer),
             "total_loss": round(total_loss, 4),
             "value_loss": round(v_loss, 4),
             "policy_loss": round(p_loss, 4),
             "option_loss": round(o_loss, 4),
+            "card_pick_loss": round(cp_loss, 4),
+            "other_option_loss": round(oo_loss, 4),
+            "card_pick_agreement": round(_card_pick_agree / max(1, _card_pick_total), 4),
+            "card_pick_total": _card_pick_total,
+            "card_skip_total": _card_skip_total,
+            "card_skip_rate": round(_card_skip_total / max(1, _card_pick_total), 4),
+            "card_pick_score_spread": round(
+                _card_pick_spread_sum / max(1, _card_pick_spread_count), 4
+            ),
             "option_buffer_size": len(option_buffer),
             "lr": round(scheduler.get_last_lr()[0], 6),
             "mcts_sims": mcts_simulations,
@@ -958,6 +1395,20 @@ def train_worker(
             "gen_time": round(gen_elapsed, 1),
             "recent_games": recent_games[-20:],
             "archetype_stats": _arch_stats,
+            # V8: relic telemetry
+            "relic_pool_size": relic_pool_size,
+            "unique_relics_seen": len(relic_counts),
+            "total_relics_picked": total_relics_seen,
+            "avg_relics_per_run": round(total_relics_seen / max(1, total_games), 2),
+            "top_relics": [
+                {"id": _rid, "count": _cnt}
+                for _rid, _cnt in relic_counts.most_common(20)
+            ],
+            # Per-card pick tracking
+            "card_stats": _build_card_stats(
+                _card_offered, _card_picked, _card_win_picked, top_n=30
+            ),
+            "value_probes": _probe_log[-1] if _probe_log else None,
             "status": f"Gen {gen}/{num_generations} complete",
             "timestamp": time.time(),
         }
@@ -966,9 +1417,12 @@ def train_worker(
         # Console output (minimal for headless)
         win_pct = total_wins / max(1, total_games) * 100
         cur_lr = scheduler.get_last_lr()[0]
+        cp_agree_pct = _card_pick_agree / max(1, _card_pick_total) * 100
+        cp_spread = _card_pick_spread_sum / max(1, _card_pick_spread_count)
         print(
             f"Gen {gen:4d} | games={total_games} win={win_pct:.0f}% | "
-            f"loss={total_loss:.3f} (v={v_loss:.3f} p={p_loss:.3f} o={o_loss:.3f}) | "
+            f"loss={total_loss:.3f} (v={v_loss:.3f} p={p_loss:.3f} o={o_loss:.3f} cp={cp_loss:.3f}) | "
+            f"cards: agree={cp_agree_pct:.0f}% spread={cp_spread:.3f} | "
             f"lr={cur_lr:.1e} | {gen_elapsed:.1f}s",
             flush=True,
         )
@@ -978,12 +1432,14 @@ def train_worker(
             ckpt_path = save_path / f"gen_{gen:04d}.pt"
             torch.save({
                 "generation": gen,
+                "cumulative_gen": cumulative_gen_offset + gen,
                 "model_state": network.state_dict(),
                 "optimizer_state": optimizer.state_dict(),
+                "scheduler_state": scheduler.state_dict(),
                 "games_played": total_games,
                 "win_rate": total_wins / max(1, total_games),
             }, ckpt_path)
-            print(f"  Saved checkpoint: {ckpt_path.name}")
+            print(f"  Saved checkpoint: {ckpt_path.name} (cumulative gen {cumulative_gen_offset + gen})")
 
     print(f"Training complete! {total_games} games, {total_wins/max(1,total_games):.1%} win rate")
 
@@ -1099,14 +1555,17 @@ if __name__ == "__main__":
     # Train command
     train_parser = subparsers.add_parser("train", help="Run headless training worker")
     train_parser.add_argument("--generations", type=int, default=100)
-    train_parser.add_argument("--games-per-gen", type=int, default=10)
-    train_parser.add_argument("--sims", type=int, default=50)
+    train_parser.add_argument("--games-per-gen", type=int, default=7)
+    train_parser.add_argument("--sims", type=int, default=100)
     train_parser.add_argument("--batch-size", type=int, default=64)
     train_parser.add_argument("--epochs", type=int, default=3)
     train_parser.add_argument("--lr", type=float, default=1e-3)
     train_parser.add_argument("--temperature", type=float, default=1.0)
     train_parser.add_argument("--save-dir", type=str, default=None)
     train_parser.add_argument("--progress-file", type=str, default=None)
+    train_parser.add_argument("--boss-log-file", type=str, default=None,
+                              help="Where to append boss-fight detail JSONL "
+                                   "(default: <save-dir>/boss_fights.jsonl)")
 
     # Monitor command
     monitor_parser = subparsers.add_parser("monitor", help="Live TUI dashboard")
@@ -1126,6 +1585,7 @@ if __name__ == "__main__":
             temperature=args.temperature,
             save_dir=args.save_dir,
             progress_file=args.progress_file,
+            boss_log_file=args.boss_log_file,
         )
     elif args.command == "monitor":
         train_monitor(

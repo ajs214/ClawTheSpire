@@ -114,13 +114,31 @@ def build_vocabs_from_card_db(card_db) -> Vocabs:
     relics = Vocabulary()
     relics.add("<PAD>")
     relics.add("<UNK>")
-    # Will be populated from relic data; for now add observed ones
-    for r in [
-        "Ring of the Snake", "Pomander", "Precise Scissors",
-        "New Leaf", "Arcane Scroll", "Golden Pearl", "Cloak Clasp",
-        "Eternal Feather", "Stone Humidifier", "Bone Tea", "Game Piece",
-    ]:
-        relics.add(r)
+    # Populate from relics.json so the option head can distinguish
+    # relic identities in shop/elite/treasure screens. Previously
+    # only 11 hardcoded relics were in the vocab — everything else
+    # collapsed to UNK (docs/shop_parity.md #18, IMPROVEMENTS #9).
+    try:
+        from ..data_loader import DEFAULT_DATA_DIR
+        _relic_path = DEFAULT_DATA_DIR / "relics.json"
+        if _relic_path.exists():
+            with open(_relic_path, encoding="utf-8") as _rf:
+                _relic_data = json.load(_rf)
+            if isinstance(_relic_data, dict):
+                _relic_data = _relic_data.get("relics", list(_relic_data.values()))
+            for _r in _relic_data:
+                if isinstance(_r, dict):
+                    _name = _r.get("name") or _r.get("id") or ""
+                    if _name:
+                        relics.add(_name)
+    except Exception:
+        # Fallback: add the original small set so tests still work
+        for r in [
+            "Ring of the Snake", "Pomander", "Precise Scissors",
+            "New Leaf", "Arcane Scroll", "Golden Pearl", "Cloak Clasp",
+            "Eternal Feather", "Stone Humidifier", "Bone Tea", "Game Piece",
+        ]:
+            relics.add(r)
 
     intent_types = Vocabulary()
     intent_types.add("<PAD>")
@@ -163,8 +181,13 @@ class EncoderConfig:
     potion_feature_dim: int = 6  # occupied(1) + type one-hot(5): heal/block/str/dmg/weak
 
     # Option evaluation
-    num_option_types: int = 16
+    num_option_types: int = 20  # bumped from 16 for OPTION_SHOP_BUY_RELIC (16) + headroom
     option_type_embed_dim: int = 16
+    # Event-choice embedding (V10): dedicated table for (event_id, option_idx)
+    # IDs, replacing the positional placeholder that abused card_embed.
+    # 256 slots covers 66 events × ~2.2 opts + 7 Neow blessings + headroom.
+    num_event_choices: int = 256
+    event_choice_embed_dim: int = 32  # match card_embed_dim so option head dims stay the same
 
     # Card stats vector: upgraded(1) + cost(1) + damage(1) + block(1) +
     # is_x_cost(1) + card_type_onehot(5) + target_type_onehot(5) +
@@ -236,6 +259,9 @@ class EncoderConfig:
 # Card type and target type to one-hot index
 CARD_TYPE_MAP = {"Attack": 0, "Skill": 1, "Power": 2, "Status": 3, "Curse": 4}
 TARGET_TYPE_MAP = {"Self": 0, "AnyEnemy": 1, "AllEnemies": 2, "RandomEnemy": 3, "AnyAlly": 4}
+
+# Relic synergy features dimension
+RELIC_SYNERGY_DIM = 13
 
 
 def card_stats_vector(card) -> list[float]:
@@ -322,3 +348,45 @@ def power_indices_and_amounts(
             indices.append(0)  # PAD
             amounts.append(0.0)
     return indices, amounts
+
+
+def compute_relic_synergy_features(relics: set[str] | list[str]) -> list[float]:
+    """Compute hand-crafted relic synergy features for card evaluation.
+
+    Returns a fixed-size float vector (length RELIC_SYNERGY_DIM) encoding
+    which synergy-relevant relics the player owns.
+    """
+    r = set(relics) if not isinstance(relics, set) else relics
+    return [
+        # Poison amplification
+        float(bool(r & {"SNECKO_SKULL", "TWISTED_FUNNEL"})),
+        # Vulnerable amplification
+        float(bool(r & {"PAPER_PHROG", "BAG_OF_MARBLES", "HAND_DRILL"})),
+        # Weak amplification
+        float(bool(r & {"PAPER_KRANE", "RED_MASK"})),
+        # Attack-play counter relics (count)
+        float(len(r & {"KUNAI", "SHURIKEN", "ORNAMENTAL_FAN", "KUSARIGAMA", "NUNCHAKU"})),
+        # Skill-play counter relics (count)
+        float(len(r & {"LETTER_OPENER", "TUNING_FORK"})),
+        # Power synergy relics (count)
+        float(len(r & {"GAME_PIECE", "PERMAFROST", "MUMMIFIED_HAND", "LOST_WISP"})),
+        # Shiv synergy
+        float(bool(r & {"HELICAL_DART", "NINJA_SCROLL"})),
+        # Exhaust synergy (count)
+        float(len(r & {"CHARONS_ASHES", "JOSS_PAPER", "BURNING_STICKS", "FORGOTTEN_SOUL"})),
+        # Discard synergy
+        float(bool(r & {"TINGSHA", "TOUGH_BANDAGES"})),
+        # Energy surplus (count of energy-granting relics)
+        float(len(r & {"LANTERN", "PRISMATIC_GEM", "ICE_CREAM", "HAPPY_FLOWER",
+                        "CHANDELIER", "CANDELABRA", "PAELS_FLESH", "ECTOPLASM",
+                        "SOZU", "SPIKED_GAUNTLETS", "BLESSED_ANTLER", "VELVET_CHOKER",
+                        "BLOOD_SOAKED_ROSE", "PUMPKIN_CANDLE", "PHILOSOPHERS_STONE",
+                        "WHISPERING_EARRING", "BRILLIANT_SCARF"})),
+        # Draw surplus (count of draw-granting relics)
+        float(len(r & {"BAG_OF_PREPARATION", "RING_OF_THE_SNAKE", "SNECKO_EYE",
+                        "PAELS_BLOOD", "FIDDLE", "RING_OF_THE_DRAKE"})),
+        # Block persistence
+        float(bool(r & {"STURDY_CLAMP"})),
+        # Hand retention
+        float(bool(r & {"RUNIC_PYRAMID", "RINGING_TRIANGLE"})),
+    ]

@@ -23,6 +23,8 @@ CardEffect = Callable[[CombatState, int | None], None]
 
 def calculate_attack_damage(base: int, state: CombatState, target: EnemyState) -> int:
     """Calculate per-hit damage for an attack card."""
+    from . import relic_effects  # local to avoid import cycles
+
     player = state.player
     raw = base + player.powers.get("Strength", 0)
     if raw < 0:
@@ -33,19 +35,34 @@ def calculate_attack_damage(base: int, state: CombatState, target: EnemyState) -
     if player.powers.get("Shrink", 0) < 0:
         raw = math.floor(raw * 0.7)
     if target.powers.get("Vulnerable", 0) > 0:
-        raw = math.floor(raw * 1.5)
+        # Paper Phrog: Vulnerable = 75% more damage instead of 50%
+        vuln_mult = 1.75 if "PAPER_PHROG" in state.relics else 1.5
+        raw = math.floor(raw * vuln_mult)
     # Double Damage: player deals double damage (e.g. from Twig Slime buff)
     if player.powers.get("Double Damage", 0) > 0:
         raw *= 2
+    # Relic proxy multiplier (upgrade-on-pickup, card transforms, etc.)
+    dmg_mult = relic_effects.get_damage_multiplier(state.relics)
+    if dmg_mult != 1.0 and raw > 0:
+        raw = math.floor(raw * dmg_mult)
     return max(0, raw)
 
 
 def calculate_block_gain(base: int, state: CombatState) -> int:
     """Calculate block gained from a card."""
+    from . import relic_effects  # local to avoid import cycles
+
     player = state.player
     effective = base + player.powers.get("Dexterity", 0)
     if player.powers.get("Frail", 0) > 0:
         effective = math.floor(effective * 0.75)
+    # Shadowmeld: double block gain this turn
+    if player.powers.get("Shadowmeld", 0) > 0:
+        effective *= 2
+    # Relic proxy multiplier (Sturdy Clamp, Paper Krane, etc.)
+    blk_mult = relic_effects.get_block_multiplier(state.relics)
+    if blk_mult != 1.0 and effective > 0:
+        effective = math.floor(effective * blk_mult)
     return max(0, effective)
 
 
@@ -99,6 +116,7 @@ def deal_damage(state: CombatState, target_idx: int, base_damage: int, hits: int
         if enemy.powers.get("Slow", 0) > 0 and per_hit > 0:
             slow_mult = 1.0 + 0.1 * max(0, state.cards_played_this_turn - 1)
             per_hit = math.floor(per_hit * slow_mult)
+        block_before = enemy.block
         if enemy.block > 0:
             if per_hit >= enemy.block:
                 per_hit -= enemy.block
@@ -106,6 +124,12 @@ def deal_damage(state: CombatState, target_idx: int, base_damage: int, hits: int
             else:
                 enemy.block -= per_hit
                 per_hit = 0
+        # Hand Drill: apply 2 Vulnerable if block was broken
+        if block_before > 0 and enemy.block == 0 and "HAND_DRILL" in state.relics:
+            enemy.powers["Vulnerable"] = enemy.powers.get("Vulnerable", 0) + 2
+        # The Boot: minimum 5 unblocked damage
+        if per_hit > 0 and per_hit < 5 and "THE_BOOT" in state.relics:
+            per_hit = 5
         # Slippery: caps damage to 1 per hit while stacks remain
         slippery = enemy.powers.get("Slippery", 0)
         if slippery > 0 and per_hit > 0:
@@ -143,11 +167,27 @@ def apply_power_to_enemy(state: CombatState, target_idx: int, power: str, amount
     enemy = state.enemies[target_idx]
     if not enemy.is_alive:
         return
+    # Unsettling Lamp: double debuff powers on first use per combat
+    if power in ("Weak", "Vulnerable", "Poison", "Frail", "Slow"):
+        if "UNSETTLING_LAMP" in state.relics and not state.player.powers.get("_unsettling_lamp_used"):
+            amount *= 2
+            state.player.powers["_unsettling_lamp_used"] = 1
+    # Snecko Skull: +1 Poison whenever Poison is applied
+    if power == "Poison" and "SNECKO_SKULL" in state.relics:
+        amount += 1
     enemy.powers[power] = enemy.powers.get(power, 0) + amount
 
 
 def apply_power_to_all_enemies(state: CombatState, power: str, amount: int) -> None:
     """Apply a power/debuff to all living enemies."""
+    # Unsettling Lamp: double debuff powers on first use per combat
+    if power in ("Weak", "Vulnerable", "Poison", "Frail", "Slow"):
+        if "UNSETTLING_LAMP" in state.relics and not state.player.powers.get("_unsettling_lamp_used"):
+            amount *= 2
+            state.player.powers["_unsettling_lamp_used"] = 1
+    # Snecko Skull: +1 Poison whenever Poison is applied
+    if power == "Poison" and "SNECKO_SKULL" in state.relics:
+        amount += 1
     for enemy in state.enemies:
         if enemy.is_alive:
             enemy.powers[power] = enemy.powers.get(power, 0) + amount
@@ -164,6 +204,9 @@ def draw_cards(state: CombatState, count: int) -> None:
     Hellraiser: when a Strike is drawn and Hellraiser power is active,
     the Strike is immediately played against the first alive enemy and discarded.
     """
+    # FIXED: Bullet Time prevents drawing cards
+    if state.player.no_draw_this_turn:
+        return
     state.cards_drawn_this_turn += count  # Track for evaluator scoring
     for _ in range(count):
         if not state.player.draw_pile and state.player.discard_pile:
@@ -178,7 +221,8 @@ def draw_cards(state: CombatState, count: int) -> None:
                     and ("Strike" in card.tags or "Strike" in card.name)):
                 alive = [i for i, e in enumerate(state.enemies) if e.is_alive]
                 if alive:
-                    target = alive[0]  # deterministic for solver
+                    # FIXED: Use random.choice instead of deterministic alive[0]
+                    target = random.choice(alive)
                     per_hit = calculate_attack_damage(
                         card.damage or 0, state, state.enemies[target]
                     )
@@ -202,6 +246,9 @@ def gain_energy(state: CombatState, amount: int) -> None:
 
 def lose_hp(state: CombatState, amount: int) -> None:
     """Player loses HP (not blocked, e.g. Blood Wall self-damage)."""
+    # Tungsten Rod: reduce HP loss by 1 (minimum 0)
+    if "TUNGSTEN_ROD" in state.relics and amount > 0:
+        amount = max(0, amount - 1)
     state.player.hp -= amount
 
 
@@ -239,6 +286,7 @@ def discard_card_from_hand(state: CombatState, card_idx: int) -> Card:
     """
     card = state.player.hand.pop(card_idx)
     state.player.discard_pile.append(card)
+    state.discards_this_turn += 1  # Track for Memento Mori and other effects
     _on_discard_from_hand(state, card)
     return card
 

@@ -229,6 +229,9 @@ def play_turn_by_names(
 
         if match_idx is None:
             # Card not found in hand — could be drawn mid-turn or name mismatch
+            hand_names = [c.name for c in current.player.hand]
+            print(f"[sim_step] Card name mismatch: logged card '{card_name}' not found in hand. "
+                  f"Current hand: {hand_names}")
             continue
 
         card = current.player.hand[match_idx]

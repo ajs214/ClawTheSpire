@@ -19,10 +19,16 @@ Architecture:
         - Score = dot(hidden_projected, action_embed)
         - Supports play_card, end_turn, use_potion, and choose_card actions
 
-    Option evaluation head (all non-combat decisions):
+    Option evaluation head (non-combat decisions except card picks):
         hidden + option_type_embed + card_embed → Linear(304→64) → ReLU → Linear(64→1)
-        Handles card rewards, rest/smith, map pathing, shop buy/remove/leave.
+        Handles rest/smith, map pathing, shop buy/remove/leave.
         Type embedding carries context (free reward vs gold cost vs removal).
+
+    Card-pick evaluation head (deck-aware):
+        hidden + deck_summary + card_embed + type_embed → 128 → 64 → 1
+        Dedicated head for card reward picks with deck composition context.
+        Deck summary is mean-pooled card embeddings → linear projection.
+        Trained with MSE + ranking loss for better relative card evaluation.
 """
 
 from __future__ import annotations
@@ -40,10 +46,15 @@ from .encoding import (
     CARD_TYPE_MAP,
     TARGET_TYPE_MAP,
     PAD_IDX,
+    RELIC_SYNERGY_DIM,
 )
 
 if TYPE_CHECKING:
     pass
+
+# Mirror of self_play.OPTION_EVENT_CHOICE — duplicated here to avoid
+# circular import (self_play imports STS2Network).
+_OPTION_EVENT_CHOICE = 15
 
 
 class CardSetEncoder(nn.Module):
@@ -160,8 +171,29 @@ class STS2Network(nn.Module):
         # map pathing, and shop (buy/remove/leave). Option type embedding
         # carries context (free reward vs 75g purchase vs 50g removal).
         self.option_type_embed = nn.Embedding(cfg.num_option_types, cfg.option_type_embed_dim, padding_idx=0)
+        # V10: dedicated embedding for event-choice options, replacing the
+        # positional placeholder that abused card_embed indices.
+        self.event_choice_embed = nn.Embedding(
+            cfg.num_event_choices, cfg.event_choice_embed_dim, padding_idx=0)
         self.option_eval_head = nn.Sequential(
             nn.Linear(256 + cfg.option_type_embed_dim + cfg.card_embed_dim, 64),
+            nn.ReLU(),
+            nn.Linear(64, 1),
+        )
+
+        # --- Dedicated card-pick evaluation head ---
+        # Richer than the generic option_eval_head: incorporates a learned
+        # deck composition summary so the network can reason about synergy,
+        # curve, and bloat when choosing which card to add (or skip).
+        #
+        # Input: hidden(256) + deck_summary(32) + relic_embed(8) + synergy_features(13) + card_embed(32) + type_embed(16) = 357
+        # Two hidden layers (128→64) for modelling deck×card×relic interactions.
+        self.deck_summary_project = nn.Linear(cfg.card_embed_dim, cfg.card_embed_dim)
+        _card_head_input_dim = 256 + cfg.card_embed_dim + cfg.relic_embed_dim + RELIC_SYNERGY_DIM + cfg.card_embed_dim + cfg.option_type_embed_dim  # 357
+        self.card_eval_head = nn.Sequential(
+            nn.Linear(_card_head_input_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, 64),
             nn.ReLU(),
             nn.Linear(64, 1),
         )
@@ -301,17 +333,28 @@ class STS2Network(nn.Module):
         self,
         hidden: torch.Tensor,         # (batch, 256)
         option_types: torch.Tensor,    # (batch, num_options) — option type indices
-        option_cards: torch.Tensor,    # (batch, num_options) — card vocab indices (0 if N/A)
+        option_cards: torch.Tensor,    # (batch, num_options) — card/event-choice vocab indices
         option_mask: torch.Tensor,     # (batch, num_options) — True = invalid/padded
     ) -> torch.Tensor:
         """Score a set of discrete options. Returns (batch, num_options) scores (unbounded)."""
         type_embeds = self.option_type_embed(option_types)      # (B, N, 16)
-        card_embeds = self.card_embed(option_cards)              # (B, N, 32)
+
+        # V10: event-choice options use a dedicated embedding table instead
+        # of the card embedding.  We compute both lookups and select per-slot
+        # based on whether option_type == OPTION_EVENT_CHOICE.
+        is_event = (option_types == _OPTION_EVENT_CHOICE)       # (B, N)
+        # Clamp indices to valid range for each table to avoid OOB
+        card_idx = option_cards.clamp(0, self.card_embed.num_embeddings - 1)
+        evt_idx = option_cards.clamp(0, self.event_choice_embed.num_embeddings - 1)
+        card_embeds = self.card_embed(card_idx)                 # (B, N, 32)
+        evt_embeds = self.event_choice_embed(evt_idx)           # (B, N, 32)
+        opt_embeds = torch.where(
+            is_event.unsqueeze(-1), evt_embeds, card_embeds)    # (B, N, 32)
 
         batch, num_opts, _ = type_embeds.shape
         hidden_exp = hidden.unsqueeze(1).expand(-1, num_opts, -1)  # (B, N, 256)
 
-        combined = torch.cat([hidden_exp, type_embeds, card_embeds], dim=-1)  # (B, N, 304)
+        combined = torch.cat([hidden_exp, type_embeds, opt_embeds], dim=-1)  # (B, N, 304)
         scores = self.option_eval_head(combined).squeeze(-1)      # (B, N)
 
         # Mask invalid options with large negative
@@ -334,3 +377,144 @@ class STS2Network(nn.Module):
             scores_list = scores[0].tolist()
             best_idx = max(range(len(scores_list)), key=lambda i: scores_list[i])
             return best_idx, scores_list
+
+    # ------------------------------------------------------------------
+    # Dedicated card-pick evaluation (deck-aware)
+    # ------------------------------------------------------------------
+
+    def _encode_deck_summary(
+        self,
+        deck_card_ids: torch.Tensor,  # (batch, max_deck)
+        deck_mask: torch.Tensor,      # (batch, max_deck) — True = padded
+    ) -> torch.Tensor:
+        """Mean-pool deck card embeddings → project → (batch, card_embed_dim)."""
+        embeds = self.card_embed(deck_card_ids)            # (B, D, 32)
+        valid = (~deck_mask).unsqueeze(-1).float()         # (B, D, 1)
+        count = valid.sum(dim=1).clamp(min=1)              # (B, 1)
+        meaned = (embeds * valid).sum(dim=1) / count       # (B, 32)
+        return self.deck_summary_project(meaned)           # (B, 32)
+
+    def evaluate_card_picks(
+        self,
+        hidden: torch.Tensor,          # (batch, 256)
+        deck_card_ids: torch.Tensor,    # (batch, max_deck)
+        deck_mask: torch.Tensor,        # (batch, max_deck)
+        option_types: torch.Tensor,     # (batch, num_options)
+        option_cards: torch.Tensor,     # (batch, num_options)
+        option_mask: torch.Tensor,      # (batch, num_options)
+        relic_ids: torch.Tensor | None = None,    # (batch, max_relics)
+        relic_mask: torch.Tensor | None = None,   # (batch, max_relics)
+        synergy_features: torch.Tensor | None = None,  # (batch, RELIC_SYNERGY_DIM)
+    ) -> torch.Tensor:
+        """Score card-pick options with deck-composition and relic-synergy awareness.
+
+        NOTE: Callers should pass relic_ids/relic_mask/synergy_features for
+        relic-aware card evaluation. If omitted, zeros are used (backward compatible).
+        See encoding.compute_relic_synergy_features() for the synergy vector.
+
+        Returns (batch, num_options) unbounded scores.
+        """
+        deck_summary = self._encode_deck_summary(deck_card_ids, deck_mask)  # (B, 32)
+        type_embeds = self.option_type_embed(option_types)                   # (B, N, 16)
+        card_idx = option_cards.clamp(0, self.card_embed.num_embeddings - 1)
+        card_embeds = self.card_embed(card_idx)                              # (B, N, 32)
+
+        batch, num_opts, _ = type_embeds.shape
+        hidden_exp = hidden.unsqueeze(1).expand(-1, num_opts, -1)            # (B, N, 256)
+        deck_exp = deck_summary.unsqueeze(1).expand(-1, num_opts, -1)        # (B, N, 32)
+
+        # Relic context: mean-pooled relic embeddings + synergy features
+        if relic_ids is not None and relic_mask is not None:
+            r_embeds = self.relic_embed(relic_ids)
+            r_valid = (~relic_mask).unsqueeze(-1).float()
+            r_count = r_valid.sum(dim=1).clamp(min=1)
+            relic_vec = (r_embeds * r_valid).sum(dim=1) / r_count  # (B, 8)
+        else:
+            relic_vec = torch.zeros(batch, self.config.relic_embed_dim, device=hidden.device)
+
+        if synergy_features is None:
+            synergy_features = torch.zeros(batch, RELIC_SYNERGY_DIM, device=hidden.device)
+
+        relic_context = torch.cat([relic_vec, synergy_features], dim=-1)  # (B, 8+13=21)
+        relic_exp = relic_context.unsqueeze(1).expand(-1, num_opts, -1)   # (B, N, 21)
+
+        # [hidden(256) + deck_summary(32) + relic_context(21) + card_embed(32) + type_embed(16)] = 357
+        combined = torch.cat([hidden_exp, deck_exp, relic_exp, card_embeds, type_embeds], dim=-1)
+        scores = self.card_eval_head(combined).squeeze(-1)                   # (B, N)
+
+        scores = scores.masked_fill(option_mask, -1e9)
+        return scores
+
+    def pick_best_card(
+        self,
+        hidden: torch.Tensor,
+        deck_card_ids: list[int],
+        option_types: list[int],
+        option_cards: list[int],
+        relic_ids: list[int] | None = None,
+        relic_mask: list[bool] | None = None,
+        synergy_features: list[float] | None = None,
+    ) -> tuple[int, list[float]]:
+        """Pick the highest-scoring card option (deck and relic-aware). Returns (best_index, all_scores)."""
+        with torch.no_grad():
+            device = hidden.device
+            types_t = torch.tensor([option_types], dtype=torch.long, device=device)
+            cards_t = torch.tensor([option_cards], dtype=torch.long, device=device)
+            opt_mask = torch.zeros(1, len(option_types), dtype=torch.bool, device=device)
+
+            # Build deck tensor with padding
+            if deck_card_ids:
+                deck_t = torch.tensor([deck_card_ids], dtype=torch.long, device=device)
+                deck_mask = torch.zeros(1, len(deck_card_ids), dtype=torch.bool, device=device)
+            else:
+                deck_t = torch.zeros(1, 1, dtype=torch.long, device=device)
+                deck_mask = torch.ones(1, 1, dtype=torch.bool, device=device)
+
+            # Build relic tensors
+            if relic_ids is not None:
+                relic_t = torch.tensor([relic_ids], dtype=torch.long, device=device)
+                rmask_t = torch.tensor([relic_mask], dtype=torch.bool, device=device) if relic_mask else torch.zeros(1, len(relic_ids), dtype=torch.bool, device=device)
+            else:
+                relic_t = None
+                rmask_t = None
+
+            syn_t = torch.tensor([synergy_features], dtype=torch.float32, device=device) if synergy_features else None
+
+            scores = self.evaluate_card_picks(
+                hidden, deck_t, deck_mask, types_t, cards_t, opt_mask,
+                relic_ids=relic_t, relic_mask=rmask_t, synergy_features=syn_t)
+            scores_list = scores[0].tolist()
+
+            # Pick bonus: mild bias toward taking a card over skipping
+            # for the very first few picks (starter deck genuinely wants
+            # almost any card).  Fades to zero by 6 drafted cards so the
+            # network can skip freely once the deck has a core.
+            # V21: moderate pick_bonus through mid-game (0.08/10).
+            # V20's 0.06/6 vanished too early — agent needs cards through
+            # ~10 drafted.  Still well below V19's 0.15/15 that blocked skip.
+            n_drafted = len(deck_card_ids)  # base cards already filtered out
+            pick_bonus = max(0.0, 0.08 * (1.0 - n_drafted / 10.0))
+            if pick_bonus > 0 and len(scores_list) >= 2:
+                skip_idx = len(scores_list) - 1
+                best_card_idx = max(range(skip_idx), key=lambda i: scores_list[i])
+                scores_list[best_card_idx] += pick_bonus
+
+            best_idx = max(range(len(scores_list)), key=lambda i: scores_list[i])
+            return best_idx, scores_list
+
+    @staticmethod
+    def pad_card_eval_weights(old_state_dict: dict, new_input_dim: int, old_input_dim: int = 336) -> dict:
+        """Pad card_eval_head weights to accommodate new relic features.
+
+        Copies old weights and zero-initializes new feature columns,
+        preserving all previously learned behavior.
+        """
+        import copy
+        state = copy.deepcopy(old_state_dict)
+        key = "card_eval_head.0.weight"  # First linear layer
+        if key in state and state[key].shape[1] == old_input_dim:
+            old_w = state[key]
+            new_w = torch.zeros(old_w.shape[0], new_input_dim, device=old_w.device, dtype=old_w.dtype)
+            new_w[:, :old_input_dim] = old_w
+            state[key] = new_w
+        return state

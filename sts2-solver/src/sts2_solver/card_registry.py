@@ -12,6 +12,7 @@ Usage:
 from __future__ import annotations
 
 import math
+import random
 from typing import TYPE_CHECKING, Callable
 
 from .constants import CardType, TargetType
@@ -43,6 +44,7 @@ if TYPE_CHECKING:
 
 # Maps card_id -> factory that takes (Card, CardDB | None) and returns CardEffect
 _custom_effects: dict[str, Callable[[Card, CardDB | None], CardEffect]] = {}
+_warned_cards: set[str] = set()  # One-time warning guard for missing implementations
 
 
 def register(card_id: str):
@@ -61,6 +63,23 @@ def get_effect(card: Card, card_db: CardDB | None = None) -> CardEffect:
     base_id = card.id.rstrip("+")  # Handle upgraded IDs
     if base_id in _custom_effects:
         return _custom_effects[base_id](card, card_db)
+
+    # Log truly complex cards that likely need custom implementations.
+    # Standard patterns handled fine by generate_card_effect:
+    #   - damage + 1 power (e.g., Neutralize: 3 dmg + 1 Weak)
+    #   - block + draw (e.g., Backflip: 5 block + 2 draw)
+    # Only flag cards with 2+ powers or spawns — and only once per card.
+    from .constants import CardType
+    if card.card_type in (CardType.ATTACK, CardType.SKILL):
+        is_complex = (
+            card.spawns_cards
+            or len(card.powers_applied or []) >= 2
+        )
+        if is_complex and card.id not in _warned_cards:
+            _warned_cards.add(card.id)
+            print(f"[card_registry] Missing custom implementation for {card.card_type.name} '{card.id}' "
+                  f"(powers={len(card.powers_applied or [])}, spawns={bool(card.spawns_cards)})")
+
     return generate_card_effect(card)
 
 
@@ -212,7 +231,8 @@ def _havoc(card: Card, card_db: CardDB | None) -> CardEffect:
             t = None
             if top_card.target in (TargetType.ANY_ENEMY, TargetType.RANDOM_ENEMY):
                 alive = [i for i, e in enumerate(state.enemies) if e.is_alive]
-                t = alive[0] if alive else None
+                # FIXED: Use random.choice instead of deterministic alive[0]
+                t = random.choice(alive) if alive else None
             card_effect(state, t)
             state.player.exhaust_pile.append(top_card)
     return effect
@@ -231,7 +251,8 @@ def _cascade(card: Card, card_db: CardDB | None) -> CardEffect:
             t = None
             if top_card.target in (TargetType.ANY_ENEMY, TargetType.RANDOM_ENEMY):
                 alive = [i for i, e in enumerate(state.enemies) if e.is_alive]
-                t = alive[0] if alive else None
+                # FIXED: Use random.choice instead of deterministic alive[0]
+                t = random.choice(alive) if alive else None
             card_effect(state, t)
             state.player.discard_pile.append(top_card)
     return effect
@@ -241,10 +262,18 @@ def _cascade(card: Card, card_db: CardDB | None) -> CardEffect:
 def _infernal_blade(card: Card, card_db: CardDB | None) -> CardEffect:
     """Add a random Attack to hand, free this turn. Exhaust."""
     def effect(state: CombatState, target_idx: int | None = None) -> None:
-        # In the sim, we can't easily generate a truly random attack.
-        # Stub: this is a no-op for sim search purposes.
-        # The solver will treat this conservatively.
-        pass
+        # Create a generic attack approximation: Pummel-like 8-damage attack
+        # This represents a random attack that costs 0 this turn.
+        # FIXED: Added approximation of random attack generation for solver.
+        attack_card = Card(
+            id="INFERNAL_BLADE_ATTACK",
+            name="Infernal Blade Attack",
+            cost=0,
+            card_type=CardType.ATTACK,
+            target=TargetType.ANY_ENEMY,
+            damage=8,
+        )
+        add_card_to_hand(state, attack_card)
     return effect
 
 
@@ -520,9 +549,9 @@ def _burst(card: Card, card_db: CardDB | None) -> CardEffect:
     count = 1 if not card.upgraded else 2
 
     def effect(state: CombatState, target_idx: int | None = None) -> None:
-        # Track as a power — the combat engine would need to handle double-play
-        # For now, approximate as energy gain (playing a skill twice ~= 1 free energy)
-        apply_power_to_player(state, "Burst", count)
+        # FIXED: Set burst_count flag for double-play. Combat engine will check
+        # this when playing Skills and apply the card effect twice.
+        state.player.burst_count += count
     return effect
 
 
@@ -605,27 +634,26 @@ def _finisher(card: Card, card_db: CardDB | None) -> CardEffect:
 def _bullet_time(card: Card, card_db: CardDB | None) -> CardEffect:
     """X-cost: All cards in hand are free to play this turn. No more draws."""
     def effect(state: CombatState, target_idx: int | None = None) -> None:
-        # Make all cards in hand cost 0 by giving enough energy
-        # (approximation: the real effect modifies card costs)
+        # FIXED: Set flags to make cards free and block drawing
+        state.player.all_cards_free = True
+        state.player.no_draw_this_turn = True
+        # Refund the X cost and add energy since all cards are now free
         x = state.last_x_cost
-        state.player.energy += x  # Refund the X cost since cards are free
-        # In practice, this means the player has unlimited plays this turn
-        # The solver will handle the actual card plays
+        state.player.energy += x
     return effect
 
 
 @register("FOLLOW_THROUGH")
 def _follow_through(card: Card, card_db: CardDB | None) -> CardEffect:
-    """Deal 6(9) damage to ALL enemies. If last card was Skill, apply 1 Weak to ALL."""
+    """Deal 6(9) damage to ALL enemies. If 5+ other cards in hand, hit again. (v0.103)"""
     dmg = 6 if not card.upgraded else 9
 
     def effect(state: CombatState, target_idx: int | None = None) -> None:
         deal_damage_all(state, dmg)
-        # Conditional Weak: check if previous card was a Skill
-        # We approximate by checking if attacks_played < cards_played
-        # (meaning a non-attack was played before this)
-        if state.cards_played_this_turn > 1 and state.attacks_played_this_turn <= 1:
-            apply_power_to_all_enemies(state, "Weak", 1)
+        # v0.103 rework: extra hit if 5+ other cards remain in hand
+        # (this card has already been removed from hand when played)
+        if len(state.player.hand) >= 5:
+            deal_damage_all(state, dmg)
     return effect
 
 
@@ -657,7 +685,8 @@ def _bouncing_flask(card: Card, card_db: CardDB | None) -> CardEffect:
         alive = [i for i, e in enumerate(state.enemies) if e.is_alive]
         if alive:
             for _ in range(hits):
-                t = alive[0]  # Deterministic for solver
+                # FIXED: Use random.choice instead of deterministic alive[0]
+                t = random.choice(alive)
                 apply_power_to_enemy(state, t, "Poison", poison)
     return effect
 
@@ -677,16 +706,15 @@ def _bubble_bubble(card: Card, card_db: CardDB | None) -> CardEffect:
 
 @register("MEMENTO_MORI")
 def _memento_mori(card: Card, card_db: CardDB | None) -> CardEffect:
-    """Deal 12 damage. +4 per card discarded this turn."""
-    calc_base = 8 if not card.upgraded else 10
+    """Deal damage. +4 per card discarded this turn. (v0.103: 8→9 / 10→11)"""
+    calc_base = 9 if not card.upgraded else 11
     extra_per = 4 if not card.upgraded else 5
 
     def effect(state: CombatState, target_idx: int | None = None) -> None:
         if target_idx is not None:
-            # Approximate discards this turn from discard pile growth
-            # This is imprecise but functional
-            total = calc_base + extra_per * 0  # TODO: track discards_this_turn
-            deal_damage(state, target_idx, max(calc_base, total))
+            # FIXED: Now uses actual discards_this_turn counter
+            total = calc_base + extra_per * state.discards_this_turn
+            deal_damage(state, target_idx, total)
     return effect
 
 
@@ -713,7 +741,8 @@ def _ricochet(card: Card, card_db: CardDB | None) -> CardEffect:
         alive = [i for i, e in enumerate(state.enemies) if e.is_alive]
         if alive:
             for _ in range(hits):
-                t = alive[0]  # Deterministic for solver
+                # FIXED: Use random.choice instead of deterministic alive[0]
+                t = random.choice(alive)
                 deal_damage(state, t, dmg, 1)
     return effect
 
@@ -784,4 +813,416 @@ def _fan_of_knives(card: Card, card_db: CardDB | None) -> CardEffect:
     def effect(state: CombatState, target_idx: int | None = None) -> None:
         deal_damage_all(state, dmg)
         draw_cards(state, 1)
+    return effect
+
+
+@register("HIDDEN_DAGGERS")
+def _hidden_daggers(card: Card, card_db: CardDB | None) -> CardEffect:
+    """Discard 2 cards. Add 2 Shivs to your hand."""
+    shiv_count = 2 if not card.upgraded else 2
+
+    def effect(state: CombatState, target_idx: int | None = None) -> None:
+        # Discard up to 2 cards from hand
+        hand_size = len(state.player.hand)
+        discard_count = min(2, hand_size)
+        for _ in range(discard_count):
+            if state.player.hand:
+                # Discard first card (or we could randomize, but first is simpler)
+                card_to_discard = state.player.hand.pop(0)
+                state.player.discard_pile.append(card_to_discard)
+                state.discards_this_turn += 1
+        # Add 2 Shivs to hand
+        for _ in range(shiv_count):
+            add_card_to_hand(state, _make_shiv())
+    return effect
+
+
+@register("FLECHETTES")
+def _flechettes(card: Card, card_db: CardDB | None) -> CardEffect:
+    """Deal 5 damage for each Skill in your hand."""
+    dmg_per_skill = 5 if not card.upgraded else 7
+
+    def effect(state: CombatState, target_idx: int | None = None) -> None:
+        if target_idx is not None:
+            # Count Skill cards in hand
+            skill_count = sum(1 for c in state.player.hand if c.card_type == CardType.SKILL)
+            total_damage = dmg_per_skill * skill_count
+            if total_damage > 0:
+                deal_damage(state, target_idx, total_damage)
+    return effect
+
+
+@register("DODGE_AND_ROLL")
+def _dodge_and_roll(card: Card, card_db: CardDB | None) -> CardEffect:
+    """Gain 4 Block. Next turn, gain 4 Block."""
+    block_val = 4 if not card.upgraded else 6
+
+    def effect(state: CombatState, target_idx: int | None = None) -> None:
+        # Gain block now
+        gain_block(state, block_val)
+        # Apply power to gain block next turn
+        # The combat engine may not trigger this yet, but we record it
+        apply_power_to_player(state, "DodgeAndRoll", block_val)
+    return effect
+
+
+@register("PREDATOR")
+def _predator(card: Card, card_db: CardDB | None) -> CardEffect:
+    """Deal 15 damage. Draw 2 additional cards next turn."""
+    dmg = 15 if not card.upgraded else 20
+
+    def effect(state: CombatState, target_idx: int | None = None) -> None:
+        if target_idx is not None:
+            deal_damage(state, target_idx, dmg)
+        # Apply power to draw 2 cards next turn
+        apply_power_to_player(state, "DrawCardNextTurn", 2)
+    return effect
+
+
+@register("BLUR")
+def _blur(card: Card, card_db: CardDB | None) -> CardEffect:
+    """Gain 5 Block. Block is not removed at the start of your next turn."""
+    block_val = 5 if not card.upgraded else 8
+
+    def effect(state: CombatState, target_idx: int | None = None) -> None:
+        gain_block(state, block_val)
+        # Apply Blur power to prevent block loss next turn
+        apply_power_to_player(state, "Blur", 1)
+    return effect
+
+
+@register("SHADOW_STEP")
+def _shadow_step(card: Card, card_db: CardDB | None) -> CardEffect:
+    """Discard your hand. Your Attacks deal double damage next turn."""
+    def effect(state: CombatState, target_idx: int | None = None) -> None:
+        # Discard all cards in hand
+        hand_cards = list(state.player.hand)
+        hand_size = len(hand_cards)
+        for card_in_hand in hand_cards:
+            state.player.hand.remove(card_in_hand)
+            state.player.discard_pile.append(card_in_hand)
+            state.discards_this_turn += 1
+        # Apply DoubleDamage power for next turn
+        apply_power_to_player(state, "DoubleDamage", 1)
+    return effect
+
+
+@register("HAND_TRICK")
+def _hand_trick(card: Card, card_db: CardDB | None) -> CardEffect:
+    """Gain 7 Block. A random Skill in your hand gains Sly."""
+    block_val = 7 if not card.upgraded else 10
+
+    def effect(state: CombatState, target_idx: int | None = None) -> None:
+        gain_block(state, block_val)
+        # Find all Skills in hand
+        skills_in_hand = [c for c in state.player.hand if c.card_type == CardType.SKILL]
+        if skills_in_hand:
+            # Pick a random Skill and add Sly effect
+            # NOTE: Sly keyword implementation is complex and requires engine changes.
+            # For now, we just gain the block. In the future, we should:
+            # - Mark a random Skill with Sly
+            # - Engine should trigger Sly effect when that Skill is discarded
+            pass
+    return effect
+
+
+# ---------------------------------------------------------------------------
+# Custom Neutral card implementations
+# ---------------------------------------------------------------------------
+
+@register("MURDER")
+def _murder(card: Card, card_db: CardDB | None) -> CardEffect:
+    """Deal 2 damage base + 1 per card drawn this combat."""
+    base = 2
+
+    def effect(state: CombatState, target_idx: int | None = None) -> None:
+        if target_idx is not None:
+            total = base + state.cards_drawn_this_turn
+            deal_damage(state, target_idx, total)
+    return effect
+
+
+@register("EXPOSE")
+def _expose(card: Card, card_db: CardDB | None) -> CardEffect:
+    """Remove all Artifact and Block from the enemy. Apply 2 Vulnerable."""
+    vuln = 2
+
+    def effect(state: CombatState, target_idx: int | None = None) -> None:
+        if target_idx is not None:
+            enemy = state.enemies[target_idx]
+            # Remove artifact from enemy (modeled as Artifact power)
+            if "Artifact" in enemy.powers:
+                del enemy.powers["Artifact"]
+            # Remove block
+            enemy.block = 0
+            # Apply Vulnerable
+            apply_power_to_enemy(state, target_idx, "Vulnerable", vuln)
+    return effect
+
+
+@register("WELL_LAID_PLANS")
+def _well_laid_plans(card: Card, card_db: CardDB | None) -> CardEffect:
+    """At end of turn, Retain up to 1 card. Approximated as power that engine handles."""
+    def effect(state: CombatState, target_idx: int | None = None) -> None:
+        apply_power_to_player(state, "Well-Laid Plans", 1)
+    return effect
+
+
+@register("KNIFE_TRAP")
+def _knife_trap(card: Card, card_db: CardDB | None) -> CardEffect:
+    """Play every Shiv in Exhaust Pile on the enemy."""
+    def effect(state: CombatState, target_idx: int | None = None) -> None:
+        if target_idx is not None:
+            # Find all Shivs in exhaust pile
+            shivs = [c for c in state.player.exhaust_pile if c.id == "SHIV"]
+            # Play each Shiv against the target
+            for shiv in shivs:
+                accuracy = state.player.powers.get("Accuracy", 0)
+                dmg = 4 + accuracy
+                deal_damage(state, target_idx, dmg)
+    return effect
+
+
+@register("AUTOMATION")
+def _automation(card: Card, card_db: CardDB | None) -> CardEffect:
+    """Every 10 cards drawn, gain 1 energy. Apply the power, engine handles the trigger."""
+    def effect(state: CombatState, target_idx: int | None = None) -> None:
+        apply_power_to_player(state, "Automation", 1)
+    return effect
+
+
+@register("SHADOWMELD")
+def _shadowmeld(card: Card, card_db: CardDB | None) -> CardEffect:
+    """Double your Block gain this turn. If you have 0 block, gain 12 additional block."""
+    def effect(state: CombatState, target_idx: int | None = None) -> None:
+        apply_power_to_player(state, "Shadowmeld", 1)
+    return effect
+
+
+@register("ACCELERANT")
+def _accelerant(card: Card, card_db: CardDB | None) -> CardEffect:
+    """Poison is triggered 1 additional time. Apply power, engine handles trigger."""
+    def effect(state: CombatState, target_idx: int | None = None) -> None:
+        apply_power_to_player(state, "Accelerant", 1)
+    return effect
+
+
+@register("NIGHTMARE")
+def _nightmare(card: Card, card_db: CardDB | None) -> CardEffect:
+    """Choose a card. Next turn, add 3 copies of that card into your Hand.
+
+    Approximated: Add 3 copies of the cheapest card currently in hand to hand.
+    This is a simplification since actual card selection requires user input.
+    """
+    def effect(state: CombatState, target_idx: int | None = None) -> None:
+        if not state.player.hand:
+            return
+        # Find cheapest card in hand
+        cheapest = min(state.player.hand, key=lambda c: c.cost)
+        # Add 3 copies to hand
+        for _ in range(3):
+            # Create a copy of the card
+            copy_card = Card(
+                id=cheapest.id,
+                name=cheapest.name,
+                cost=cheapest.cost,
+                card_type=cheapest.card_type,
+                target=cheapest.target,
+                damage=cheapest.damage,
+                block=cheapest.block,
+                upgraded=cheapest.upgraded,
+            )
+            add_card_to_hand(state, copy_card)
+    return effect
+
+
+@register("STORM_OF_STEEL")
+def _storm_of_steel(card: Card, card_db: CardDB | None) -> CardEffect:
+    """Discard your Hand. Add 1 Shiv into your Hand for each card discarded."""
+    def effect(state: CombatState, target_idx: int | None = None) -> None:
+        # Count cards in hand (excluding the card being played)
+        hand_size = len(state.player.hand)
+        # Discard all cards from hand
+        for _ in range(hand_size):
+            if state.player.hand:
+                card_to_discard = state.player.hand.pop(0)
+                state.player.discard_pile.append(card_to_discard)
+        # Add Shiv for each card discarded
+        for _ in range(hand_size):
+            add_card_to_hand(state, _make_shiv())
+    return effect
+
+
+# ---------------------------------------------------------------------------
+# Colorless card implementations
+# ---------------------------------------------------------------------------
+
+@register("RESTLESSNESS")
+def _restlessness(card: Card, card_db: CardDB | None) -> CardEffect:
+    """If hand is empty, draw 2 and gain 2 energy."""
+    draw_count = card.cards_draw or 2
+    energy_amount = card.energy_gain or 2
+
+    def effect(state: CombatState, target_idx: int | None = None) -> None:
+        # Conditional: only fires if hand is empty (card was already removed)
+        if len(state.player.hand) == 0:
+            draw_cards(state, draw_count)
+            gain_energy(state, energy_amount)
+    return effect
+
+
+@register("IMPATIENCE")
+def _impatience(card: Card, card_db: CardDB | None) -> CardEffect:
+    """If no Attacks in hand, draw 2."""
+    draw_count = card.cards_draw or 2
+
+    def effect(state: CombatState, target_idx: int | None = None) -> None:
+        has_attack = any(c.card_type == CardType.ATTACK for c in state.player.hand)
+        if not has_attack:
+            draw_cards(state, draw_count)
+    return effect
+
+
+@register("PURITY")
+def _purity(card: Card, card_db: CardDB | None) -> CardEffect:
+    """Exhaust up to 3 cards from hand. Approximation: exhaust worst 3."""
+    exhaust_count = 3
+
+    def effect(state: CombatState, target_idx: int | None = None) -> None:
+        # Heuristic: exhaust junk/status/curse cards first, then cheapest
+        hand = state.player.hand
+        if not hand:
+            return
+        # Score cards: lower = more expendable
+        scored = []
+        for i, c in enumerate(hand):
+            score = 0
+            if c.is_junk or c.is_carry_cargo:
+                score = -100
+            elif c.card_type == CardType.STATUS:
+                score = -90
+            elif c.card_type == CardType.CURSE:
+                score = -95
+            else:
+                score = (c.damage or 0) + (c.block or 0) + c.cards_draw * 3
+            scored.append((score, i))
+        scored.sort()
+        # Exhaust the worst ones
+        to_exhaust = min(exhaust_count, len(scored))
+        indices_to_remove = sorted([scored[j][1] for j in range(to_exhaust)], reverse=True)
+        for idx in indices_to_remove:
+            exhausted = hand.pop(idx)
+            state.player.exhaust_pile.append(exhausted)
+    return effect
+
+
+@register("THINKING_AHEAD")
+def _thinking_ahead(card: Card, card_db: CardDB | None) -> CardEffect:
+    """Draw 2 cards, put 1 card from hand on top of draw pile."""
+    draw_count = card.cards_draw or 2
+
+    def effect(state: CombatState, target_idx: int | None = None) -> None:
+        draw_cards(state, draw_count)
+        if not state.player.hand:
+            return
+        # Put back the least useful card (junk/status first, then lowest value)
+        worst_idx = 0
+        worst_score = float('inf')
+        for i, c in enumerate(state.player.hand):
+            score = 0
+            if c.is_junk or c.is_carry_cargo:
+                score = -100
+            elif c.card_type == CardType.STATUS:
+                score = -90
+            elif c.card_type == CardType.CURSE:
+                score = -95
+            else:
+                score = (c.damage or 0) + (c.block or 0) + c.cards_draw * 3
+            if score < worst_score:
+                worst_score = score
+                worst_idx = i
+        put_back = state.player.hand.pop(worst_idx)
+        state.player.draw_pile.append(put_back)  # top of draw pile
+    return effect
+
+
+@register("PANIC_BUTTON")
+def _panic_button(card: Card, card_db: CardDB | None) -> CardEffect:
+    """Gain 30 block. Cannot gain block from cards for 2 turns."""
+    base_block = card.block or 30
+
+    def effect(state: CombatState, target_idx: int | None = None) -> None:
+        gain_block(state, base_block)
+        # Prevent future block gains for 2 turns (approximation via power)
+        apply_power_to_player(state, "Panic Button", 2)
+    return effect
+
+
+@register("VOLLEY")
+def _volley(card: Card, card_db: CardDB | None) -> CardEffect:
+    """Deal 10 damage to a random enemy X times (X = energy spent)."""
+    base_damage = card.damage or 10
+
+    def effect(state: CombatState, target_idx: int | None = None) -> None:
+        x = getattr(state, 'last_x_cost', 0)
+        alive = [i for i, e in enumerate(state.enemies) if e.is_alive]
+        if alive and x > 0:
+            for _ in range(x):
+                idx = random.choice(alive)
+                deal_damage(state, idx, base_damage, 1)
+    return effect
+
+
+@register("DARK_SHACKLES")
+def _dark_shackles(card: Card, card_db: CardDB | None) -> CardEffect:
+    """Enemy loses 9 Strength this turn."""
+    str_loss = 9 if not card.upgraded else 15
+
+    def effect(state: CombatState, target_idx: int | None = None) -> None:
+        if target_idx is not None:
+            apply_power_to_enemy(state, target_idx, "Strength", -str_loss)
+            # Mark as temporary so it expires at end of turn
+            apply_power_to_enemy(state, target_idx, "Dark Shackles Str", str_loss)
+    return effect
+
+
+@register("SHOCKWAVE")
+def _shockwave(card: Card, card_db: CardDB | None) -> CardEffect:
+    """Apply 3 Weak and Vulnerable to ALL enemies."""
+    amount = 3 if not card.upgraded else 5
+
+    def effect(state: CombatState, target_idx: int | None = None) -> None:
+        apply_power_to_all_enemies(state, "Weak", amount)
+        apply_power_to_all_enemies(state, "Vulnerable", amount)
+    return effect
+
+
+@register("MASTER_OF_STRATEGY")
+def _master_of_strategy(card: Card, card_db: CardDB | None) -> CardEffect:
+    """Draw 3 cards. Exhaust."""
+    draw_count = card.cards_draw or 3
+
+    def effect(state: CombatState, target_idx: int | None = None) -> None:
+        draw_cards(state, draw_count)
+    return effect
+
+
+@register("PROWESS")
+def _prowess(card: Card, card_db: CardDB | None) -> CardEffect:
+    """Gain 1 Strength and 1 Dexterity."""
+    amount = 1 if not card.upgraded else 2
+
+    def effect(state: CombatState, target_idx: int | None = None) -> None:
+        apply_power_to_player(state, "Strength", amount)
+        apply_power_to_player(state, "Dexterity", amount)
+    return effect
+
+
+@register("NOT_YET")
+def _not_yet(card: Card, card_db: CardDB | None) -> CardEffect:
+    """Heal 10(13) HP. Exhaust. (v0.102 new Rare Skill, cost 2)"""
+    heal = 10 if not card.upgraded else 13
+
+    def effect(state: CombatState, target_idx: int | None = None) -> None:
+        state.player.hp = min(state.player.hp + heal, state.player.max_hp)
     return effect

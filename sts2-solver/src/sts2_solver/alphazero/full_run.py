@@ -11,6 +11,7 @@ much damage get lower values because the run died later.
 
 from __future__ import annotations
 
+import copy
 import math
 import random
 import time
@@ -33,6 +34,7 @@ from ..combat_engine import (
     tick_enemy_powers,
 )
 from ..card_picker import classify_deck
+from ..constants import CardType
 from ..data_loader import CardDB, load_cards
 from ..models import Card, CombatState, EnemyState, PlayerState
 from ..simulator import (
@@ -58,37 +60,516 @@ from ..simulator import (
     POTION_DROP_CHANCE,
     POTION_SLOTS,
     POTION_TYPES,
+    _random_potion,
     SHOP_CARD_REMOVE_COST,
     SHOP_CARD_COSTS,
     SHOP_POTION_COST,
+    SHOP_RELIC_COST,
+    _get_shop_relic_pool,
 )
 
-from .encoding import EncoderConfig, Vocabs
+from .encoding import EncoderConfig, Vocabs, compute_relic_synergy_features
 from .mcts import MCTS, scale_simulations
 from .network import STS2Network
 from .self_play import (
     TrainingSample, OptionSample,
     OPTION_REST, OPTION_SMITH, OPTION_SHOP_REMOVE, OPTION_SHOP_BUY,
     OPTION_SHOP_LEAVE, OPTION_CARD_REWARD, OPTION_CARD_SKIP,
-    OPTION_SHOP_BUY_POTION, ROOM_TYPE_TO_OPTION,
+    OPTION_SHOP_BUY_POTION, OPTION_EVENT_CHOICE, OPTION_SHOP_BUY_RELIC,
+    OPTION_RELIC_PICK,
+    ROOM_TYPE_TO_OPTION,
     _affordable_play_actions,
 )
+from . import shadow_advisor as _shadow
 from ..effects import discard_card_from_hand
+from .. import relic_effects
 from .state_tensor import encode_state, encode_actions
 
-# Relics that can drop from elites (effects implemented in combat_engine.py)
-ELITE_RELIC_POOL = [
-    "ANCHOR", "BLOOD_VIAL", "BAG_OF_PREPARATION", "BRONZE_SCALES",
-    "BAG_OF_MARBLES", "FESTIVE_POPPER", "LANTERN", "ODDLY_SMOOTH_STONE",
-    "STRIKE_DUMMY", "CLOAK_CLASP", "ART_OF_WAR", "MEAT_ON_THE_BONE",
-    "KUNAI", "ORNAMENTAL_FAN", "NUNCHAKU", "LETTER_OPENER", "SHURIKEN",
-]
+# Relic IDs that are class-locked to non-Silent characters and must never
+# be offered to the Silent training pool.  Burning Blood / Black Blood
+# are Ironclad starter/upgrade, the others are defect/regent/necrobinder
+# starters or upgrades.
+_NON_SILENT_RELIC_IDS: set[str] = {
+    "BURNING_BLOOD", "BLACK_BLOOD",            # Ironclad
+    "CRACKED_CORE", "FROZEN_CORE",             # Defect
+    "PURE_WATER", "GLASS_MARBLE",              # Watcher / Defect variants
+    "NECRONOMICURSE",                          # Necrobinder flavour
+}
+
+# Build the full Silent-relevant relic pool from the relic_effects
+# registry.  Any relic with a behavioural entry anywhere in
+# relic_effects.py is eligible to drop except the class-locked ones
+# above.  The full run and mcts_combat never award the starter Ring of
+# the Snake (granted in setup) so we strip it from the drop pool too.
+def _build_silent_relic_pool() -> list[str]:
+    pool = sorted(
+        rid for rid in relic_effects.simulated_relic_ids()
+        if rid not in _NON_SILENT_RELIC_IDS
+        and rid != "RING_OF_THE_SNAKE"
+    )
+    return pool
+
+
+IMPLEMENTED_RELIC_POOL = _build_silent_relic_pool()
+# Alias for backwards compatibility with any external callers.
+ELITE_RELIC_POOL = IMPLEMENTED_RELIC_POOL
+
+# ── V20: Rarity-correct relic pools ─────────────────────────────────
+# The real game separates relics by rarity tier. Build ID-based pools
+# from relics.json so training matches live play distribution.
+_RELIC_POOLS_BY_RARITY: dict[str, list[str]] | None = None
+
+def _build_rarity_pools() -> dict[str, list[str]]:
+    """Build relic ID pools separated by game rarity tier."""
+    from ..data_loader import DEFAULT_DATA_DIR
+    import json as _json
+    relics_path = DEFAULT_DATA_DIR / "relics.json"
+    if not relics_path.exists():
+        # Fallback: use flat pool for everything
+        return {
+            "standard": list(IMPLEMENTED_RELIC_POOL),
+            "boss": list(IMPLEMENTED_RELIC_POOL),
+            "shop": list(IMPLEMENTED_RELIC_POOL),
+            "event": list(IMPLEMENTED_RELIC_POOL),
+        }
+    with open(relics_path, encoding="utf-8") as f:
+        all_relics = _json.load(f)
+
+    sim_ids = relic_effects.simulated_relic_ids()
+    silent_sim = sim_ids - _NON_SILENT_RELIC_IDS - {"RING_OF_THE_SNAKE"}
+
+    standard_rarities = {"Common Relic", "Uncommon Relic", "Rare Relic"}
+    shop_rarities = standard_rarities | {"Shop Relic"}
+    boss_rarities = {"Ancient Relic"}
+    event_rarities = standard_rarities | {"Event Relic"}
+
+    pools: dict[str, list[str]] = {"standard": [], "boss": [], "shop": [], "event": []}
+    for r in all_relics:
+        rid = r["id"]
+        if rid not in silent_sim:
+            continue
+        rarity = r.get("rarity", "")
+        if rarity in standard_rarities:
+            pools["standard"].append(rid)
+            pools["shop"].append(rid)
+            pools["event"].append(rid)
+        if rarity in boss_rarities:
+            pools["boss"].append(rid)
+        if rarity == "Shop Relic":
+            pools["shop"].append(rid)
+        if rarity == "Event Relic":
+            pools["event"].append(rid)
+
+    # Sort for determinism
+    for k in pools:
+        pools[k] = sorted(pools[k])
+
+    return pools
+
+
+def _get_relic_pool(pool_type: str) -> list[str]:
+    """Get rarity-appropriate relic pool. Types: standard, boss, shop, event."""
+    global _RELIC_POOLS_BY_RARITY
+    if _RELIC_POOLS_BY_RARITY is None:
+        _RELIC_POOLS_BY_RARITY = _build_rarity_pools()
+    return _RELIC_POOLS_BY_RARITY.get(pool_type, IMPLEMENTED_RELIC_POOL)
+
+
+# ── V20: Card quality stats (updated by self_play.py training loop) ──
+# Maps card_id → win_when_picked rate. Used by quality-aware skip
+# exploration to skip more aggressively when offered mediocre cards.
+_card_quality: dict[str, float] = {}
+_training_generation: int = 0  # V21: updated by self_play for anneal
+
+def update_card_quality(card_win_rates: dict[str, float]) -> None:
+    """Called by self_play.py to push latest card win rates."""
+    global _card_quality
+    _card_quality = dict(card_win_rates)
+
+def set_training_generation(gen: int) -> None:
+    """Called by self_play.py so skip exploration can anneal."""
+    global _training_generation
+    _training_generation = gen
+
+# STS relic ID → display name, used to bridge combat_engine's ID-keyed
+# relics set to relic_synergy.score_relic_for_deck's name-keyed scorer.
+_RELIC_ID_TO_NAME: dict[str, str] = {
+    "ANCHOR":             "Anchor",
+    "ART_OF_WAR":         "Art of War",
+    "BAG_OF_MARBLES":     "Bag of Marbles",
+    "BAG_OF_PREPARATION": "Bag of Preparation",
+    "BLOOD_VIAL":         "Blood Vial",
+    "BRONZE_SCALES":      "Bronze Scales",
+    "CLOAK_CLASP":        "Cloak Clasp",
+    "FESTIVE_POPPER":     "Festive Popper",
+    "KUNAI":              "Kunai",
+    "LANTERN":            "Lantern",
+    "LETTER_OPENER":      "Letter Opener",
+    "MEAT_ON_THE_BONE":   "Meat on the Bone",
+    "NUNCHAKU":           "Nunchaku",
+    "ODDLY_SMOOTH_STONE": "Oddly Smooth Stone",
+    "ORNAMENTAL_FAN":     "Ornamental Fan",
+    "SHURIKEN":           "Shuriken",
+    "STRIKE_DUMMY":       "Strike Dummy",
+}
+
+
+def _pick_best_relic(
+    pool: list[str],
+    deck: list[Card],
+    owned: set[str],
+    rng: random.Random,
+    sample_size: int = 3,
+) -> tuple[str | None, list[str]]:
+    """Draw up to ``sample_size`` relics from ``pool`` and return the
+    one that scores highest against the current deck, plus the full set
+    of offered options.
+
+    Mirrors the in-game 1-of-3 drop choice the player would see, and
+    uses :func:`relic_synergy.score_relic_for_deck` so the pick is
+    deck-aware (prefers Kunai for shiv decks, Art of War for heavy
+    skill decks, etc).  Returns ``(None, [])`` if the pool is empty or
+    the player already owns everything.  Otherwise returns
+    ``(best_relic_id, offered_list)`` where ``offered_list`` includes
+    the picked relic and all alternatives offered.
+    """
+    eligible = [r for r in pool if r not in owned]
+    if not eligible:
+        return None, []
+    sample = rng.sample(eligible, min(sample_size, len(eligible)))
+    try:
+        from ..relic_synergy import score_relic_for_deck
+        best_id, best_score = sample[0], float("-inf")
+        for rid in sample:
+            display = _RELIC_ID_TO_NAME.get(rid, rid)
+            score = score_relic_for_deck(display, deck)
+            if score > best_score:
+                best_id, best_score = rid, score
+        return best_id, sample
+    except Exception:
+        # If scoring blows up for any reason, fall back to a random
+        # pick so we never silently drop a relic grant.
+        chosen = rng.choice(sample)
+        return chosen, sample
+
+
+def _pick_relic_with_network(
+    pool: list[str],
+    deck: list[Card],
+    owned: set[str],
+    rng: random.Random,
+    *,
+    mcts,
+    vocabs,
+    config,
+    hp: int,
+    max_hp: int,
+    gold: int,
+    floor_num: int,
+    option_samples: list,
+    source: str = "elite",
+    sample_size: int = 3,
+) -> tuple[str | None, list[str]]:
+    """Network-driven 1-of-N relic pick with OptionSample for training.
+
+    Uses option_eval_head with OPTION_RELIC_PICK type and relic vocab IDs.
+    Falls back to deterministic _pick_best_relic on any error.
+    Always emits an OptionSample (even when falling back) so the head
+    accumulates training data from game outcomes.
+    """
+    import torch
+
+    # First, draw the offered relics (same sampling as _pick_best_relic)
+    eligible = [r for r in pool if r not in owned]
+    if not eligible:
+        return None, []
+    sample = rng.sample(eligible, min(sample_size, len(eligible)))
+
+    if len(sample) == 1:
+        # Only one option — no decision to make, but still emit a sample
+        # so the head sees what a single-option relic pick looks like.
+        granted = sample[0]
+        try:
+            network = mcts.network
+            player = PlayerState(hp=hp, max_hp=max_hp, energy=3, max_energy=3,
+                                 draw_pile=list(deck))
+            dummy = CombatState(player=player, enemies=[], floor=floor_num,
+                                gold=gold, relics=frozenset(owned))
+            st = encode_state(dummy, vocabs, config)
+            st = {k: v.to(mcts.device) for k, v in st.items()}
+
+            opt_types = [OPTION_RELIC_PICK]
+            opt_cards = [vocabs.relics.get(granted) or 0]
+            option_samples.append(OptionSample(
+                state_tensors={k: v.cpu() for k, v in st.items()},
+                option_types=opt_types, option_cards=opt_cards,
+                chosen_idx=0, value=0.0,
+            ))
+        except Exception:
+            pass
+        return granted, sample
+
+    # Multiple options — use network to pick
+    try:
+        network = mcts.network
+        player = PlayerState(hp=hp, max_hp=max_hp, energy=3, max_energy=3,
+                             draw_pile=list(deck))
+        dummy = CombatState(player=player, enemies=[], floor=floor_num,
+                            gold=gold, relics=frozenset(owned))
+        st = encode_state(dummy, vocabs, config)
+        st = {k: v.to(mcts.device) for k, v in st.items()}
+
+        opt_types = [OPTION_RELIC_PICK] * len(sample)
+        opt_cards = [vocabs.relics.get(r) or 0 for r in sample]
+
+        with torch.no_grad():
+            hidden = network.encode_state(**st)
+            best_idx, scores = network.pick_best_option(
+                hidden, opt_types, opt_cards)
+
+        # Shadow heuristic index for exploration comparison
+        shadow_idx = 0
+        try:
+            from ..relic_synergy import score_relic_for_deck
+            best_shadow_score = float("-inf")
+            for si, rid in enumerate(sample):
+                display = _RELIC_ID_TO_NAME.get(rid, rid)
+                score = score_relic_for_deck(display, deck)
+                if score > best_shadow_score:
+                    best_shadow_score = score
+                    shadow_idx = si
+        except Exception:
+            shadow_idx = 0
+
+        option_samples.append(OptionSample(
+            state_tensors={k: v.cpu() for k, v in st.items()},
+            option_types=opt_types, option_cards=opt_cards,
+            chosen_idx=best_idx, value=0.0,
+            shadow_chosen_idx=shadow_idx,
+        ))
+
+        granted = sample[best_idx]
+        return granted, sample
+
+    except Exception:
+        # Fallback to deterministic pick, still emit sample if possible
+        granted, offered = _pick_best_relic(pool, deck, owned, rng, sample_size)
+        return granted, offered
+
 
 # Character starter relics
 STARTER_RELICS = {
     "SILENT": "RING_OF_THE_SNAKE",
     "IRONCLAD": "BURNING_BLOOD",
 }
+
+
+def _apply_relic_pickup(
+    relic_id: str,
+    *,
+    hp: int,
+    max_hp: int,
+    gold: int,
+    potions: list[dict],
+    potion_slots: int,
+) -> tuple[int, int, int, int]:
+    """Apply out-of-combat relic pickup effects (max HP / gold / potions / slots).
+
+    Returns updated ``(hp, max_hp, gold, potion_slots)``.  ``potions`` is
+    mutated in place when the relic adds free potions or slots.  Starter
+    relics (Ring of the Snake / Burning Blood) also flow through here
+    and are harmless because they aren't in any pickup table.
+    """
+    # Max HP bonuses are applied additively and also top up current HP
+    # so the player can't lose effective HP on pickup.
+    mhp_bonus = relic_effects.MAX_HP_ON_PICKUP.get(relic_id)
+    if mhp_bonus:
+        max_hp += mhp_bonus
+        hp = min(hp + mhp_bonus, max_hp)
+
+    # One-off gold bonuses.
+    gold_bonus = relic_effects.GOLD_ON_PICKUP.get(relic_id)
+    if gold_bonus:
+        gold += gold_bonus
+
+    # Potion slots.
+    slot_bonus = relic_effects.POTION_SLOTS_ON_PICKUP.get(relic_id)
+    if slot_bonus:
+        potion_slots += slot_bonus
+
+    return hp, max_hp, gold, potion_slots
+
+
+def _grant_relic(
+    relics: set[str],
+    relic_id: str,
+    *,
+    hp: int,
+    max_hp: int,
+    gold: int,
+    potions: list[dict],
+    potion_slots: int,
+) -> tuple[int, int, int, int]:
+    """Add a relic to the owned set and apply its pickup effects.
+
+    Returns the updated ``(hp, max_hp, gold, potion_slots)`` tuple so
+    callers can rebind their own locals.
+    """
+    if relic_id in relics:
+        return hp, max_hp, gold, potion_slots
+    relics.add(relic_id)
+    return _apply_relic_pickup(
+        relic_id,
+        hp=hp, max_hp=max_hp, gold=gold,
+        potions=potions, potion_slots=potion_slots,
+    )
+
+
+# ---------------------------------------------------------------------------
+# OOC Relic Effect Helpers
+# ---------------------------------------------------------------------------
+
+def _upgrade_card(card: Card, card_db: CardDB) -> None:
+    """Upgrade a card in place using card_db, or fall back to approximation."""
+    if card.upgraded:
+        return
+    try:
+        upgraded = card_db.get_upgraded(card.id)
+        if upgraded:
+            card.damage = upgraded.damage
+            card.block = upgraded.block
+            card.cards_draw = upgraded.cards_draw
+            card.energy_gain = upgraded.energy_gain
+            card.hp_loss = upgraded.hp_loss
+            card.hit_count = upgraded.hit_count
+            card.powers_applied = upgraded.powers_applied
+            card.cost = upgraded.cost
+            card.upgraded = True
+            return
+    except Exception:
+        pass
+    # Fallback: approximate upgrade by bumping damage/block by 25%
+    card.upgraded = True
+    if card.damage and card.damage > 0:
+        card.damage += max(1, card.damage // 4)
+    if card.block and card.block > 0:
+        card.block += max(1, card.block // 4)
+
+
+def _remove_worst_cards(deck: list[Card], count: int) -> None:
+    """Remove the worst cards from deck (Strikes first, then Defends)."""
+    for _ in range(min(count, len(deck))):
+        # Prioritize removing Strikes, then Defends, then first card
+        strikes = [i for i, c in enumerate(deck) if "Strike" in c.name]
+        if strikes:
+            deck.pop(strikes[0])
+            continue
+        defends = [i for i, c in enumerate(deck) if "Defend" in c.name]
+        if defends:
+            deck.pop(defends[0])
+            continue
+        if deck:
+            deck.pop(0)
+
+
+def _transform_starters(deck: list[Card], card_db: CardDB) -> None:
+    """Replace all Strikes and Defends with random non-starter cards."""
+    try:
+        all_cards = list(card_db.all_cards())
+        non_starters = [
+            c for c in all_cards
+            if "Strike" not in c.name and "Defend" not in c.name
+            and c.card_type in (CardType.ATTACK, CardType.SKILL, CardType.POWER)
+            and c.cost >= 0
+        ]
+    except Exception:
+        return
+
+    indices_to_replace = [
+        i for i, c in enumerate(deck)
+        if "Strike" in c.name or "Defend" in c.name
+    ]
+    for idx in indices_to_replace:
+        if non_starters:
+            replacement = copy.copy(random.choice(non_starters))
+            deck[idx] = replacement
+
+
+def _apply_relic_ooc_effects(
+    relic_id: str,
+    deck: list[Card],
+    card_db: CardDB,
+    hp: int,
+    max_hp: int,
+) -> tuple[int, int]:
+    """Apply out-of-combat relic effects that modify the deck.
+
+    Returns updated (hp, max_hp) tuple.
+    """
+    if relic_id == "WHETSTONE":
+        # Upgrade 2 random Attacks in deck
+        attacks = [c for c in deck if c.card_type == CardType.ATTACK and not c.upgraded]
+        for c in random.sample(attacks, min(2, len(attacks))):
+            _upgrade_card(c, card_db)
+
+    elif relic_id == "WAR_PAINT":
+        # Upgrade 2 random Skills
+        skills = [c for c in deck if c.card_type == CardType.SKILL and not c.upgraded]
+        for c in random.sample(skills, min(2, len(skills))):
+            _upgrade_card(c, card_db)
+
+    elif relic_id == "YUMMY_COOKIE":
+        # Upgrade 4 random cards
+        upgradeable = [c for c in deck if not c.upgraded]
+        for c in random.sample(upgradeable, min(4, len(upgradeable))):
+            _upgrade_card(c, card_db)
+
+    elif relic_id == "SAND_CASTLE":
+        # Upgrade 6 random cards
+        upgradeable = [c for c in deck if not c.upgraded]
+        for c in random.sample(upgradeable, min(6, len(upgradeable))):
+            _upgrade_card(c, card_db)
+
+    elif relic_id == "POMANDER":
+        # Upgrade 1 random card
+        upgradeable = [c for c in deck if not c.upgraded]
+        if upgradeable:
+            _upgrade_card(random.choice(upgradeable), card_db)
+
+    elif relic_id == "FRAGRANT_MUSHROOM":
+        # Lose 15 HP, upgrade 3 random cards
+        hp = max(1, hp - 15)
+        upgradeable = [c for c in deck if not c.upgraded]
+        for c in random.sample(upgradeable, min(3, len(upgradeable))):
+            _upgrade_card(c, card_db)
+
+    elif relic_id == "PANDORAS_BOX":
+        # Transform ALL Strikes and Defends into random cards
+        _transform_starters(deck, card_db)
+
+    elif relic_id == "EMPTY_CAGE":
+        # Remove 2 cards (remove worst — Strikes/Defends first)
+        _remove_worst_cards(deck, 2)
+
+    elif relic_id == "PRECISE_SCISSORS":
+        _remove_worst_cards(deck, 1)
+
+    elif relic_id == "PRECARIOUS_SHEARS":
+        hp = max(1, hp - 13)
+        _remove_worst_cards(deck, 2)
+
+    elif relic_id == "PRESERVED_FOG":
+        _remove_worst_cards(deck, 5)
+        # Should add Folly curse but we don't have curse cards — skip
+
+    elif relic_id == "GHOST_SEED":
+        # Strikes and Defends gain Ethereal
+        for c in deck:
+            if "Strike" in c.name or "Defend" in c.name:
+                if "Ethereal" not in c.keywords:
+                    c.keywords = c.keywords | frozenset({"Ethereal"})
+
+    return hp, max_hp
 
 
 # ---------------------------------------------------------------------------
@@ -112,7 +593,9 @@ def mcts_combat(
     potions: list[dict] | None = None,
     relics: frozenset[str] | None = None,
     is_boss: bool = False,
+    is_elite: bool = False,
     detail_log: bool = False,
+    tea_set_bonus: int = 0,
 ) -> tuple[list[TrainingSample], str, int, int, list[dict], dict | None]:
     """Run one combat using MCTS.
 
@@ -137,14 +620,78 @@ def mcts_combat(
 
     draw_pile = list(deck)
     rng.shuffle(draw_pile)
+
+    # Apply tea set bonus before combat starts
+    combat_max_energy = player_max_energy
+    if tea_set_bonus > 0:
+        combat_max_energy += tea_set_bonus
+
     player = PlayerState(
         hp=player_hp, max_hp=player_max_hp,
-        energy=player_max_energy, max_energy=player_max_energy,
+        energy=combat_max_energy, max_energy=combat_max_energy,
         draw_pile=draw_pile,
         potions=[dict(p) for p in (potions or [])],
     )
     state = CombatState(player=player, enemies=enemies, relics=relics or frozenset())
-    start_combat(state)
+    start_combat(state, is_elite=is_elite, is_boss=is_boss)
+
+    # Apply pre-combat relic effects (after start_combat so relics are in state)
+    if relics:
+        relics_set = set(relics) if not isinstance(relics, set) else relics
+
+        # BELLOWS: upgrade starting hand
+        if "BELLOWS" in relics_set:
+            for c in state.player.hand:
+                _upgrade_card(c, card_db)
+
+        # STONE_CRACKER: at boss start, upgrade 3 random draw pile cards
+        if is_boss and "STONE_CRACKER" in relics_set:
+            upgradeable = [c for c in state.player.draw_pile if not c.upgraded]
+            for c in random.sample(upgradeable, min(3, len(upgradeable))):
+                _upgrade_card(c, card_db)
+
+        # RINGING_TRIANGLE: retain hand on turn 1
+        # (implementation deferred to combat turn 1 logic if needed)
+
+        # VEXING_PUZZLEBOX: random card from draw pile to hand, cost 0
+        if "VEXING_PUZZLEBOX" in relics_set and state.player.draw_pile:
+            chosen = random.choice(state.player.draw_pile)
+            state.player.draw_pile.remove(chosen)
+            free_copy = copy.copy(chosen)
+            free_copy.cost = 0
+            state.player.hand.append(free_copy)
+
+        # JEWELED_MASK: find Power in draw pile, move to hand, free
+        if "JEWELED_MASK" in relics_set:
+            powers = [c for c in state.player.draw_pile if c.card_type == CardType.POWER]
+            if powers:
+                chosen = random.choice(powers)
+                state.player.draw_pile.remove(chosen)
+                free_copy = copy.copy(chosen)
+                free_copy.cost = 0
+                state.player.hand.append(free_copy)
+
+        # CHOICES_PARADOX: random card to hand with Retain
+        if "CHOICES_PARADOX" in relics_set and state.player.draw_pile:
+            chosen = random.choice(state.player.draw_pile)
+            state.player.draw_pile.remove(chosen)
+            free_copy = copy.copy(chosen)
+            free_copy.keywords = chosen.keywords | frozenset({"Retain"})
+            state.player.hand.append(free_copy)
+
+        # GAMBLING_CHIP: discard hand and redraw
+        if "GAMBLING_CHIP" in relics_set:
+            hand_size = len(state.player.hand)
+            state.player.discard_pile.extend(state.player.hand)
+            state.player.hand.clear()
+            from ..effects import draw_cards
+            draw_cards(state, hand_size)
+
+        # FAKE_SNECKO_EYE: randomize card costs (Confused)
+        if "FAKE_SNECKO_EYE" in relics_set:
+            for c in state.player.hand + state.player.draw_pile:
+                if c.cost >= 0:
+                    c.cost = random.randint(0, 3)
 
     # --- Initialise detail log (boss fights use this) ---
     detail: dict | None = None
@@ -193,6 +740,7 @@ def mcts_combat(
     samples: list[TrainingSample] = []
     turn_sample_ranges: list[tuple[int, int]] = []  # (start_idx, end_idx) per turn
     outcome = None
+    _lizard_tail_used = False  # Track one-time LIZARD_TAIL use
 
     for turn_num in range(1, max_turns + 1):
         start_turn(state)
@@ -235,7 +783,7 @@ def mcts_combat(
             action_card_ids, action_features, action_mask = encode_actions(actions, state, vocabs, config)
 
             scaled_sims = scale_simulations(mcts_simulations, len(actions), is_boss=is_boss)
-            action, policy, _root_value = mcts.search(
+            action, policy, _root_value, _mcts_actions = mcts.search(
                 state, num_simulations=scaled_sims,
                 temperature=temperature,
             )
@@ -378,6 +926,11 @@ def mcts_combat(
         _resolve_sim_intents(state, enemy_ais)
         tick_enemy_powers(state)
 
+        # LIZARD_TAIL: prevent death (one-time use)
+        if state.player.hp <= 0 and "LIZARD_TAIL" in (relics or frozenset()) and not _lizard_tail_used:
+            state.player.hp = max(1, state.player.max_hp // 2)
+            _lizard_tail_used = True
+
         hp_after_enemy = state.player.hp
         damage_taken = max(0, hp_before_enemy - hp_after_enemy)
 
@@ -393,21 +946,35 @@ def mcts_combat(
         # Signal 3: Intent-weighted blocking — penalise based on how
         # far actual block was from optimal (matching incoming damage).
         # Under-blocking penalises harder than over-blocking.
+        #
+        # Both directions now skip the penalty when the player had no
+        # real choice: under-block is only "wrong" if enough affordable
+        # block was in hand to actually close the gap, and over-block
+        # is only "wrong" if there were attacks the player could have
+        # played instead. We don't punish forced decisions.
         if turn_start_sample < turn_end_sample and incoming_damage > 0:
             if player_block_played < incoming_damage:
                 # Under-blocked: took avoidable damage
                 gap = incoming_damage - player_block_played
                 under_penalty = min(0.15, gap / max(1, player_max_hp) * 0.4)
-                # Only penalise if they had block cards available
-                if hand_block_available > 0:
+                # Only penalise if they had enough affordable block in
+                # hand to fully close the gap. If total possible block
+                # was less than incoming damage, the under-block was
+                # forced by deck/energy, not a bad decision.
+                if hand_block_available >= gap:
                     for idx in range(turn_start_sample, turn_end_sample):
                         samples[idx].value_penalty += under_penalty
             elif player_block_played > incoming_damage * 1.5:
-                # Over-blocked by >50%: wasted resources on defence
-                excess = player_block_played - incoming_damage
-                over_penalty = min(0.06, excess / max(1, player_max_hp) * 0.15)
-                for idx in range(turn_start_sample, turn_end_sample):
-                    samples[idx].value_penalty += over_penalty
+                # Over-blocked by >50%: wasted resources on defence —
+                # but only if there was something else to do. If the
+                # player had no affordable attacks left in hand, then
+                # over-blocking was the only legal play and shouldn't
+                # be punished.
+                if hand_damage_available > 0:
+                    excess = player_block_played - incoming_damage
+                    over_penalty = min(0.06, excess / max(1, player_max_hp) * 0.15)
+                    for idx in range(turn_start_sample, turn_end_sample):
+                        samples[idx].value_penalty += over_penalty
 
         outcome = is_combat_over(state)
         if outcome:
@@ -443,26 +1010,37 @@ def _network_pick_card(
     vocabs: Vocabs,
     config: EncoderConfig,
     card_db: CardDB,
+    relics: frozenset[str] | set[str] | None = None,
+    *,
+    organic_warm_start: bool = False,
 ) -> tuple[Card | None, OptionSample | None]:
-    """Pick a card reward using the organic card picker.
+    """Pick a card reward via the option-head network (IMPROVEMENTS.md #3).
 
-    The organic picker uses property-based archetype detection, momentum
-    scoring, and alpha-blended ML handoff — it's designed to build coherent
-    decks from game one. The neural network's option head still trains on
-    the card picks (via OptionSample) so it can learn deck-building over
-    time, but the actual decision comes from the organic system.
+    Historical behavior: the organic ``card_picker.pick_card`` made the
+    actual decision and the network's option head was trained via
+    supervised learning on the organic picker's output. That was
+    imitation learning, not self-play — the network's ceiling was
+    exactly the heuristic's ceiling.
+
+    New behavior (self-play): the network's option head makes the pick
+    directly via ``pick_best_option``. The resulting ``OptionSample``
+    gets its ``value`` field filled in by ``_assign_run_values`` at run
+    end, so the option head learns from actual run outcomes instead of
+    mimicking the heuristic.
+
+    ``organic_warm_start`` switches back to the old imitation mode.
+    Set True during the first generation of a fresh training run to
+    hand the network a reasonable starting policy; flip to False after
+    the network's agreement rate with the organic picker climbs past
+    ~70% (measured via ``tools/agreement_rate.py``).
 
     Returns (picked_card_or_None, training_sample_or_None).
     """
     if not offered:
         return None, None
 
-    # --- Organic picker makes the decision ---
-    from ..card_picker import pick_card as organic_pick
-    pick = organic_pick(offered, deck, floor, hp, max_hp)
-
-    # --- Build a training sample for the option head (learns from the pick) ---
     sample = None
+    pick: Card | None = None
     try:
         network = mcts.network
         player = PlayerState(
@@ -481,24 +1059,88 @@ def _network_pick_card(
             opt_cards.append(vocabs.cards.get(base_id))
         opt_cards.append(0)  # PAD for skip
 
-        # Record which index the organic picker chose
-        if pick is None:
-            chosen_idx = len(offered)  # skip
+        # Build deck card vocab IDs for the dedicated card_eval_head.
+        # Exclude unupgraded starter cards so the deck_summary reflects
+        # only drafted cards — otherwise 12 base cards drown out the
+        # signal from the 1-3 cards actually picked.
+        _BASE_CARD_IDS = {"STRIKE_SILENT", "DEFEND_SILENT", "NEUTRALIZE", "SURVIVOR"}
+        deck_card_ids = []
+        for c in deck:
+            base_id = c.id.rstrip("+")
+            is_upgraded = c.id.endswith("+")
+            if base_id in _BASE_CARD_IDS and not is_upgraded:
+                continue  # skip unmodified starter card
+            deck_card_ids.append(vocabs.cards.get(base_id))  # UNK_IDX if missing
+
+        # Shadow pick = what the organic heuristic would have chosen.
+        # Now that the network makes the actual pick, this is a real
+        # agreement signal (not self-comparison) and surfaces in the
+        # agreement-rate diagnostic (IMPROVEMENTS.md #10).
+        shadow_idx = _shadow.shadow_pick_card_reward(
+            offered, deck, hp, max_hp, floor, relics=relics,
+        )
+
+        _scores = None  # populated in self-play mode for score-spread diagnostics
+        if organic_warm_start:
+            # Imitation mode: defer to the organic picker for the
+            # actual choice. Useful for seeding a fresh network with
+            # a sensible starting policy. Turn this off once the
+            # network has learned enough to drive itself.
+            from ..card_picker import pick_card as organic_pick
+            pick = organic_pick(offered, deck, floor, hp, max_hp, relics=relics)
+            if pick is None:
+                chosen_idx = len(offered)  # skip slot
+            else:
+                chosen_idx = next(
+                    (i for i, c in enumerate(offered) if c.id == pick.id),
+                    len(offered),
+                )
         else:
-            chosen_idx = next(
-                (i for i, c in enumerate(offered) if c.id == pick.id),
-                len(offered),
-            )
+            # Self-play mode: the dedicated card_eval_head picks,
+            # using deck composition and relic synergy for context.
+            relic_id_list = None
+            relic_mask_list = None
+            syn_feats = None
+            if relics:
+                relic_id_list = [vocabs.relics.get(r) for r in relics]
+                relic_mask_list = [False] * len(relic_id_list)  # all valid
+                syn_feats = compute_relic_synergy_features(relics)
+            with torch.no_grad():
+                hidden = network.encode_state(**state_tensors)
+                best_idx, _scores = network.pick_best_card(
+                    hidden, deck_card_ids, opt_types, opt_cards,
+                    relic_ids=relic_id_list, relic_mask=relic_mask_list,
+                    synergy_features=syn_feats)
+            chosen_idx = int(best_idx)
+            if chosen_idx >= len(offered):
+                pick = None  # skip slot
+            else:
+                pick = offered[chosen_idx]
 
         sample = OptionSample(
             state_tensors={k: v.cpu() for k, v in state_tensors.items()},
             option_types=opt_types,
             option_cards=opt_cards,
             chosen_idx=chosen_idx,
-            value=0.0,  # Filled after run ends
+            value=0.0,  # Filled after run ends by _assign_run_values
+            shadow_chosen_idx=shadow_idx,
+            deck_card_ids=deck_card_ids,
+            pick_scores=_scores if not organic_warm_start else None,
+            relic_ids=relic_id_list if not organic_warm_start else None,
+            relic_mask=relic_mask_list if not organic_warm_start else None,
+            synergy_features=syn_feats if not organic_warm_start else None,
         )
-    except Exception:
-        pass  # Sample building failed — pick still valid
+    except Exception as _card_err:
+        # On any failure, fall back to the organic picker with no
+        # training sample. This keeps training runs from crashing on
+        # edge cases the network hasn't seen.
+        print(f"  [card-pick] fallback: {_card_err}", flush=True)
+        try:
+            from ..card_picker import pick_card as organic_pick
+            pick = organic_pick(offered, deck, floor, hp, max_hp, relics=relics)
+        except Exception:
+            pick = offered[0] if offered else None
+        sample = None
 
     return pick, sample
 
@@ -520,10 +1162,12 @@ class FullRunResult:
     deck_samples: list  # OptionSample list (card rewards, routed through option head)
     option_samples: list  # OptionSample list (rest/map/shop)
     combat_log: list[dict]
+    run_log: list[dict] | None = None  # Per-floor journey log for the viewer
     archetype: str = "undecided"     # emergent archetype of final deck
     archetype_commitment: float = 0.0  # 0.0–1.0
     boss_detail: dict | None = None  # Rich per-turn log of the boss combat
     final_deck: list[str] | None = None  # Card IDs in deck at boss-fight time
+    final_relics: list[str] | None = None  # Relic IDs owned at end of run (V8)
 
 
 def play_full_run(
@@ -556,7 +1200,7 @@ def play_full_run(
         card_id = _normalize_card_id(raw_id)
         card = card_db.get(card_id) or card_db.get(raw_id)
         if card:
-            deck.append(card)
+            deck.append(copy.copy(card))
 
     if not deck:
         # Fallback: Silent starter
@@ -564,7 +1208,14 @@ def play_full_run(
                             ("NEUTRALIZE", 1), ("SURVIVOR", 1)]:
             c = card_db.get(name)
             if c:
-                deck.extend([c] * count)
+                deck.extend([copy.copy(c) for _ in range(count)])
+
+    # Card exploration tracking: count how many times each card has been
+    # picked across this run. Used for decaying exploration (Option D).
+    _card_explore_counts: dict[str, int] = {}  # card_id → times picked in this run
+
+    # Shop removal counter: cost escalates 75 → 100 → 125 → ... per removal
+    _removals_done: int = 0
 
     # Card pools
     char_color = char_data.get("color", "green")
@@ -577,11 +1228,17 @@ def play_full_run(
     act_data = _ACTS_BY_ID.get("OVERGROWTH", {})
     room_sequence = _generate_act1_map_with_choices(rng)
 
-    # Starter relic
+    # Starter relic + dynamic potion slot cap (lifted by Potion Belt etc.)
     relics: set[str] = set()
+    potion_slots_cap: int = POTION_SLOTS
     starter_relic = STARTER_RELICS.get(character)
     if starter_relic:
         relics.add(starter_relic)
+        hp, max_hp, gold, potion_slots_cap = _apply_relic_pickup(
+            starter_relic,
+            hp=hp, max_hp=max_hp, gold=gold,
+            potions=[], potion_slots=potion_slots_cap,
+        )
 
     # Run state
     all_samples: list[TrainingSample] = []
@@ -591,6 +1248,7 @@ def play_full_run(
     combat_hp_data: dict[int, tuple[int, int, int]] = {}  # floor -> (hp_before, hp_after, potions_used)
     boss_floors: set[int] = set()
     combat_log: list[dict] = []
+    run_log: list[dict] = []  # Per-floor journey for the viewer
     combats_won = 0
     combats_fought = 0
     boss_detail_holder: dict | None = None
@@ -600,6 +1258,109 @@ def play_full_run(
     rng.shuffle(events_list)
     event_idx = 0
     floor_reached = 0
+
+    # IMPROVEMENTS.md #7: Neow blessing. Exposed to training as an event-choice
+    # style OptionSample so the option head learns cold-start opening policy
+    # from run outcomes instead of a hand-rolled priority list. Reuses
+    # OPTION_EVENT_CHOICE so no new option-type slot is needed in the network
+    # embedding table (no checkpoint break). The per-blessing vocab ids are
+    # registered under the ``__neow__`` sentinel event id.
+    try:
+        from ..simulator import enumerate_neow_options
+
+        neow_choices = enumerate_neow_options(
+            deck, hp, max_hp, gold, card_db, rng)
+        if neow_choices:
+            chosen_neow_changes: dict | None = None
+            try:
+                network = mcts.network
+                player = PlayerState(
+                    hp=hp, max_hp=max_hp,
+                    energy=3, max_energy=3,
+                    draw_pile=list(deck),
+                )
+                dummy = CombatState(
+                    player=player, enemies=[],
+                    floor=0, gold=gold,
+                    relics=frozenset(relics),
+                )
+                st = encode_state(dummy, vocabs, config)
+                st = {k: v.to(mcts.device) for k, v in st.items()}
+
+                opt_types = [OPTION_EVENT_CHOICE] * len(neow_choices)
+                # V10: use real EVENT_CHOICE_VOCAB ids from the
+                # dedicated event_choice_embed table.
+                opt_cards = [c["vocab_id"] for c in neow_choices]
+
+                with torch.no_grad():
+                    hidden = network.encode_state(**st)
+                    best_idx, _scores = network.pick_best_option(
+                        hidden, opt_types, opt_cards)
+
+                shadow_idx = _shadow.shadow_pick_neow(
+                    hp, max_hp, gold, deck)
+
+                option_samples.append(OptionSample(
+                    state_tensors={k: v.cpu() for k, v in st.items()},
+                    option_types=opt_types,
+                    option_cards=opt_cards,
+                    chosen_idx=int(best_idx), value=0.0,
+                    shadow_chosen_idx=shadow_idx,
+                ))
+                chosen_neow_changes = neow_choices[int(best_idx)]["changes"]
+            except Exception:
+                shadow_idx = _shadow.shadow_pick_neow(
+                    hp, max_hp, gold, deck)
+                chosen_neow_changes = neow_choices[shadow_idx]["changes"]
+
+            # Apply Neow effects atomically using the same event-changes
+            # dict shape — keeps a single code path for "event-like" state
+            # mutations.
+            _c = chosen_neow_changes or {}
+            max_hp += _c.get("max_hp_delta", 0)
+            if max_hp < 1:
+                max_hp = 1
+            hp = max(1, min(hp + _c.get("hp_delta", 0), max_hp))
+            gold = max(0, gold + _c.get("gold_delta", 0))
+            for idx in sorted(_c.get("cards_removed", []), reverse=True):
+                if 0 <= idx < len(deck):
+                    deck.pop(idx)
+            for card in _c.get("cards_added", []):
+                # Apply egg auto-upgrades
+                if "FROZEN_EGG" in relics and card.card_type == CardType.POWER:
+                    _upgrade_card(card, card_db)
+                elif "MOLTEN_EGG" in relics and card.card_type == CardType.ATTACK:
+                    _upgrade_card(card, card_db)
+                elif "TOXIC_EGG" in relics and card.card_type == CardType.SKILL:
+                    _upgrade_card(card, card_db)
+
+                # BING_BONG: add TWO copies instead of one
+                if "BING_BONG" in relics:
+                    deck.append(card)
+                    deck.append(copy.copy(card))
+                else:
+                    deck.append(card)
+            if _c.get("grants_relic"):
+                granted, offered = _pick_best_relic(
+                    _get_relic_pool("event"), deck, relics, rng,
+                )
+                if granted is not None:
+                    hp, max_hp, gold, potion_slots_cap = _grant_relic(
+                        relics, granted,
+                        hp=hp, max_hp=max_hp, gold=gold,
+                        potions=potions, potion_slots=potion_slots_cap,
+                    )
+                    # Apply OOC relic effects
+                    hp, max_hp = _apply_relic_ooc_effects(
+                        granted, deck, card_db, hp, max_hp)
+    except Exception:
+        # If anything goes wrong during the Neow step, silently skip it
+        # rather than failing the whole run — keeps training robust to
+        # future refactors that touch enumerate_neow_options.
+        pass
+
+    # Track tea set bonus for next combat
+    _tea_set_bonus: int = 0
 
     for floor_num, room_entry in enumerate(room_sequence, 1):
         floor_reached = floor_num
@@ -622,14 +1383,29 @@ def play_full_run(
                     best_idx, scores = network.pick_best_option(
                         hidden, opt_types, opt_cards)
 
+                shadow_idx = _shadow.shadow_pick_map(
+                    room_entry, hp, max_hp, gold, len(deck), floor_num,
+                )
                 option_samples.append(OptionSample(
                     state_tensors={k: v.cpu() for k, v in st.items()},
                     option_types=opt_types, option_cards=opt_cards,
                     chosen_idx=best_idx, value=0.0,
+                    shadow_chosen_idx=shadow_idx,
                 ))
                 room_type = room_entry[best_idx]
+                run_log.append({
+                    "floor": floor_num, "type": "map_choice",
+                    "options": list(room_entry),
+                    "chosen": room_type,
+                })
             except Exception:
                 room_type = rng.choice(room_entry)
+                run_log.append({
+                    "floor": floor_num, "type": "map_choice",
+                    "options": list(room_entry),
+                    "chosen": room_type,
+                    "fallback": True,
+                })
         else:
             room_type = room_entry
 
@@ -639,6 +1415,7 @@ def play_full_run(
                 continue
 
             _is_boss = (room_type == "boss")
+            _is_elite = (room_type == "elite")
             potions_before = len([p for p in potions if p])
             samples, outcome, turns, hp_after, potions, combat_detail = mcts_combat(
                 deck=deck, player_hp=hp, player_max_hp=max_hp,
@@ -648,8 +1425,12 @@ def play_full_run(
                 temperature=temperature, potions=potions,
                 relics=frozenset(relics),
                 is_boss=_is_boss,
+                is_elite=_is_elite,
                 detail_log=_is_boss,  # only log boss combats (overhead)
+                tea_set_bonus=_tea_set_bonus,
             )
+            # Reset tea set bonus after combat
+            _tea_set_bonus = 0
             if _is_boss and combat_detail is not None:
                 boss_detail_holder = combat_detail  # captured into FullRunResult below
             potions_after = len([p for p in potions if p])
@@ -668,13 +1449,26 @@ def play_full_run(
                 "turns": turns, "hp_before": hp, "hp_after": hp_after,
             })
 
+            # Journey log: combat result
+            run_log.append({
+                "floor": floor_num, "type": "combat",
+                "room_type": room_type, "encounter": enc_id,
+                "outcome": outcome, "turns": turns,
+                "hp_before": hp, "hp_after": hp_after,
+                "potions_used": potions_used,
+                "deck_snapshot": [c.id for c in deck],
+                "relics": sorted(relics),
+                "gold": gold,
+            })
+
             if outcome == "lose":
                 # Assign values: run died here
                 _assign_run_values(combat_samples_by_floor, floor_reached,
                                    len(room_sequence), 0, max_hp,
                                    deck_change_samples, option_samples,
                                    combat_hp_data=combat_hp_data,
-                                   boss_floors=boss_floors)
+                                   boss_floors=boss_floors,
+                                   outcome="lose")
                 _arch = classify_deck(deck)
                 return FullRunResult(
                     outcome="lose", floor_reached=floor_reached,
@@ -683,10 +1477,12 @@ def play_full_run(
                     deck_size=len(deck), samples=all_samples,
                     deck_samples=deck_change_samples,
                     option_samples=option_samples, combat_log=combat_log,
+                    run_log=run_log,
                     archetype=_arch.archetype,
                     archetype_commitment=_arch.commitment,
                     boss_detail=boss_detail_holder,
                     final_deck=[c.id for c in deck],
+                    final_relics=sorted(relics),
                 )
 
             combats_won += 1
@@ -702,33 +1498,184 @@ def play_full_run(
             gold_range = GOLD_REWARDS.get(room_type, (10, 20))
             gold += rng.randint(*gold_range)
 
-            if rng.random() < POTION_DROP_CHANCE and len(potions) < POTION_SLOTS:
-                pot = rng.choice(POTION_TYPES)
+            if rng.random() < POTION_DROP_CHANCE and len(potions) < potion_slots_cap:
+                pot = _random_potion(rng)
                 potions.append(dict(pot))
 
-            # Elite relic drop
+            # Elite relic drop — network-driven 1-of-3 pick with
+            # OptionSample for training the option_eval_head on relic
+            # preferences.  Falls back to deterministic _pick_best_relic
+            # if network scoring fails.
             if room_type == "elite":
-                available = [r for r in ELITE_RELIC_POOL if r not in relics]
-                if available:
-                    relics.add(rng.choice(available))
+                granted, offered = _pick_relic_with_network(
+                    _get_relic_pool("standard"), deck, relics, rng,
+                    mcts=mcts, vocabs=vocabs, config=config,
+                    hp=hp, max_hp=max_hp, gold=gold, floor_num=floor_num,
+                    option_samples=option_samples, source="elite",
+                )
+                if granted is not None:
+                    hp, max_hp, gold, potion_slots_cap = _grant_relic(
+                        relics, granted,
+                        hp=hp, max_hp=max_hp, gold=gold,
+                        potions=potions, potion_slots=potion_slots_cap,
+                    )
+                    # Apply OOC relic effects
+                    hp, max_hp = _apply_relic_ooc_effects(
+                        granted, deck, card_db, hp, max_hp)
+                    run_log.append({
+                        "floor": floor_num, "type": "relic_reward",
+                        "source": "elite", "relic": granted,
+                        "offered": offered,
+                        "deck_size": len(deck),
+                        "deck_cards": [c.id for c in deck],
+                        "hp": hp,
+                        "max_hp": max_hp,
+                    })
 
             if room_type != "boss":
                 offered = _offer_card_rewards(pools, deck)
                 pick, deck_sample = _network_pick_card(
                     offered, deck, hp, max_hp, floor_num,
                     mcts, vocabs, config, card_db,
+                    relics=frozenset(relics),
                 )
+
+                # ----------------------------------------------------------
+                # Decaying exploration for underpicked cards (Option D).
+                # If the network picked a card, sometimes override to an
+                # alternative that has high empirical win correlation but
+                # few picks so far. Exploration rate decays as the card
+                # accumulates picks: rate = 0.3 / sqrt(1 + times_picked).
+                # At 0 picks: 30%, at 4 picks: 13%, at 9 picks: 10%,
+                # at 25 picks: 6%, at 100 picks: 3%.
+                # ----------------------------------------------------------
+                _EXPLORE_CARD_LIFT = {
+                    "BLADE_DANCE": 1.46, "HIDDEN_DAGGERS": 1.37,
+                    "DAGGER_THROW": 1.35, "LEADING_STRIKE": 1.38,
+                    "PANIC_BUTTON": 1.44, "CLOAK_AND_DAGGER": 1.22,
+                    "SUCKER_PUNCH": 1.66, "DARK_SHACKLES": 2.4,
+                    "BOUNCING_FLASK": 1.73, "EXPOSE": 1.67,
+                    "PRECISE_CUT": 1.58, "BACKSTAB": 1.37,
+                }
+                if pick is not None and offered and rng.random() < 0.3:
+                    # Find underexplored high-lift alternatives
+                    explore_candidates = []
+                    for i, card in enumerate(offered):
+                        if card.id == (pick.id if pick else ""):
+                            continue
+                        lift = _EXPLORE_CARD_LIFT.get(card.id, 0)
+                        if lift >= 1.2:
+                            picks_so_far = _card_explore_counts.get(card.id, 0)
+                            explore_rate = 0.3 / (1 + picks_so_far) ** 0.5
+                            if rng.random() < explore_rate:
+                                explore_candidates.append((card, i))
+                    if explore_candidates:
+                        explore_card, explore_idx = rng.choice(explore_candidates)
+                        pick = explore_card
+                        if deck_sample is not None:
+                            deck_sample.chosen_idx = explore_idx
+
+                # ----------------------------------------------------------
+                # V21 Skip exploration — fixes V20 over-skipping:
+                #  (1) Hard floor: never force-skip when deck < 13
+                #  (2) Protect good cards: no skip if card WR >= 0.25
+                #  (3) Halved rates: bloat 5-15%, quality 8-12%
+                #  (6) Anneal: full rates gen 0-200, decay to 50% by gen 600
+                # ----------------------------------------------------------
+                _SKIP_DECK_FLOOR = 13
+                _SKIP_BLOAT_THRESHOLD = 15
+                _SKIP_QUALITY_THRESHOLD = 0.25
+                _SKIP_PROTECT_THRESHOLD = 0.25
+                if pick is not None and len(deck) >= _SKIP_DECK_FLOOR:
+                    skip_explore_rate = 0.0
+
+                    # (A) Deck bloat trigger (halved: 5-15%)
+                    if len(deck) >= _SKIP_BLOAT_THRESHOLD:
+                        bloat = len(deck) - _SKIP_BLOAT_THRESHOLD
+                        skip_explore_rate = min(0.15, 0.05 + bloat * 0.01)
+
+                    # (B) Card quality trigger (halved: 8-12%)
+                    # Only fires on cards BELOW the protect threshold
+                    if _card_quality:
+                        picked_wr = _card_quality.get(pick.id)
+                        if (picked_wr is not None
+                                and picked_wr < _SKIP_QUALITY_THRESHOLD
+                                and picked_wr < _SKIP_PROTECT_THRESHOLD):
+                            quality_rate = 0.08 + 0.04 * (_SKIP_QUALITY_THRESHOLD - picked_wr) / _SKIP_QUALITY_THRESHOLD
+                            skip_explore_rate = max(skip_explore_rate, quality_rate)
+                        elif picked_wr is not None and picked_wr >= _SKIP_PROTECT_THRESHOLD:
+                            skip_explore_rate = 0.0
+
+                    # (6) Anneal: full rate for gen 0-200, linear decay
+                    # to 50% by gen 600, flat after that
+                    if _training_generation > 200 and skip_explore_rate > 0:
+                        anneal = max(0.5, 1.0 - (_training_generation - 200) / 800.0)
+                        skip_explore_rate *= anneal
+
+                    if skip_explore_rate > 0 and rng.random() < skip_explore_rate:
+                        pick = None  # force skip
+                        if deck_sample is not None:
+                            deck_sample.chosen_idx = len(deck_sample.option_types) - 1
+
+                # Track picks for exploration decay
+                if pick is not None:
+                    _card_explore_counts[pick.id] = _card_explore_counts.get(pick.id, 0) + 1
+
+                run_log.append({
+                    "floor": floor_num, "type": "card_reward",
+                    "offered": [c.id for c in offered],
+                    "picked": pick.id if pick else None,
+                    "skipped": pick is None,
+                })
                 if pick:
-                    deck.append(pick)
+                    # Apply egg auto-upgrades
+                    if "FROZEN_EGG" in relics and pick.card_type == CardType.POWER:
+                        _upgrade_card(pick, card_db)
+                    elif "MOLTEN_EGG" in relics and pick.card_type == CardType.ATTACK:
+                        _upgrade_card(pick, card_db)
+                    elif "TOXIC_EGG" in relics and pick.card_type == CardType.SKILL:
+                        _upgrade_card(pick, card_db)
+
+                    # BING_BONG: add TWO copies instead of one
+                    if "BING_BONG" in relics:
+                        deck.append(pick)
+                        deck.append(copy.copy(pick))
+                    else:
+                        deck.append(pick)
                 if deck_sample:
                     deck_change_samples.append(deck_sample)
 
             if room_type == "boss":
+                granted, offered = _pick_relic_with_network(
+                    _get_relic_pool("boss"), deck, relics, rng,
+                    mcts=mcts, vocabs=vocabs, config=config,
+                    hp=hp, max_hp=max_hp, gold=gold, floor_num=floor_num,
+                    option_samples=option_samples, source="boss",
+                )
+                if granted is not None:
+                    hp, max_hp, gold, potion_slots_cap = _grant_relic(
+                        relics, granted,
+                        hp=hp, max_hp=max_hp, gold=gold,
+                        potions=potions, potion_slots=potion_slots_cap,
+                    )
+                    # Apply OOC relic effects
+                    hp, max_hp = _apply_relic_ooc_effects(
+                        granted, deck, card_db, hp, max_hp)
+                    run_log.append({
+                        "floor": floor_num, "type": "relic_reward",
+                        "source": "boss", "relic": granted,
+                        "offered": offered,
+                        "deck_size": len(deck),
+                        "deck_cards": [c.id for c in deck],
+                        "hp": hp,
+                        "max_hp": max_hp,
+                    })
                 _assign_run_values(combat_samples_by_floor, floor_reached,
                                    len(room_sequence), hp, max_hp,
                                    deck_change_samples, option_samples,
                                    combat_hp_data=combat_hp_data,
-                                   boss_floors=boss_floors)
+                                   boss_floors=boss_floors,
+                                   outcome="win")
                 _arch = classify_deck(deck)
                 return FullRunResult(
                     outcome="win", floor_reached=floor_reached,
@@ -737,10 +1684,12 @@ def play_full_run(
                     deck_size=len(deck), samples=all_samples,
                     deck_samples=deck_change_samples,
                     option_samples=option_samples, combat_log=combat_log,
+                    run_log=run_log,
                     archetype=_arch.archetype,
                     archetype_commitment=_arch.commitment,
                     boss_detail=boss_detail_holder,
                     final_deck=[c.id for c in deck],
+                    final_relics=sorted(relics),
                 )
 
         elif room_type == "rest":
@@ -770,31 +1719,94 @@ def play_full_run(
                     best_idx, scores = network.pick_best_option(
                         hidden, opt_types, opt_cards)
 
+                shadow_idx = _shadow.shadow_pick_rest(
+                    opt_types, deck_indices, deck, hp, max_hp, floor_num,
+                    relics=frozenset(relics),
+                )
+
+                # ----------------------------------------------------------
+                # Approach 3: HP-aware exploration forcing for REST
+                # Override the network to REST when the shadow recommends it.
+                # Rate scales with how damaged the player is:
+                #   - Below 40% HP: 40% chance (critical — need healing data)
+                #   - 40-60% HP:    25% chance (gray zone — need both outcomes)
+                #   - Above 60% HP: 10% chance (light exploration)
+                # This ensures the training buffer has episodes where the
+                # agent healed at different HP thresholds, so the value
+                # signal teaches correct rest-vs-smith tradeoffs.
+                # ----------------------------------------------------------
+                hp_ratio = hp / max(1, max_hp)
+                if hp_ratio < 0.4:
+                    rest_explore_rate = 0.40
+                elif hp_ratio < 0.6:
+                    rest_explore_rate = 0.25
+                else:
+                    rest_explore_rate = 0.10
+                if (best_idx != 0
+                        and shadow_idx == 0
+                        and rng.random() < rest_explore_rate):
+                    best_idx = 0  # force REST for exploration
+
                 option_samples.append(OptionSample(
                     state_tensors={k: v.cpu() for k, v in st.items()},
                     option_types=opt_types, option_cards=opt_cards,
                     chosen_idx=best_idx, value=0.0,
+                    shadow_chosen_idx=shadow_idx,
                 ))
 
                 if best_idx == 0:
                     hp = min(hp + int(max_hp * 0.3), max_hp)
+                    # Apply tea set bonus for next combat
+                    if "VENERABLE_TEA_SET" in relics:
+                        _tea_set_bonus = 2
+                    elif "FAKE_VENERABLE_TEA_SET" in relics:
+                        _tea_set_bonus = 1
+                    run_log.append({
+                        "floor": floor_num, "type": "rest",
+                        "action": "rest", "hp_before": hp - int(max_hp * 0.3),
+                        "hp_after": hp, "max_hp": max_hp,
+                    })
                 else:
                     di = deck_indices[best_idx]
+                    _smithed_card = None
                     if di is not None and di < len(deck):
+                        _smithed_card = deck[di].id
                         upgraded = card_db.get_upgraded(deck[di].id)
                         if upgraded:
-                            deck[di] = upgraded
+                            deck[di] = copy.copy(upgraded)
+                    run_log.append({
+                        "floor": floor_num, "type": "rest",
+                        "action": "smith", "card_upgraded": _smithed_card,
+                        "hp": hp, "max_hp": max_hp,
+                    })
             except Exception:
                 # Fallback to heuristic
                 decision = _rest_site_decision(hp, max_hp, deck, card_db, rng)
                 if decision["action"] == "rest":
+                    hp_before_rest = hp
                     hp = min(hp + decision["hp_delta"], max_hp)
+                    # Apply tea set bonus for next combat
+                    if "VENERABLE_TEA_SET" in relics:
+                        _tea_set_bonus = 2
+                    elif "FAKE_VENERABLE_TEA_SET" in relics:
+                        _tea_set_bonus = 1
+                    run_log.append({
+                        "floor": floor_num, "type": "rest",
+                        "action": "rest", "hp_before": hp_before_rest,
+                        "hp_after": hp, "max_hp": max_hp,
+                    })
                 else:
                     idx = decision["upgrade_card_idx"]
+                    _smithed_card = deck[idx].id if idx is not None and idx < len(deck) else None
                     if idx is not None and idx < len(deck):
                         upgraded = card_db.get_upgraded(deck[idx].id)
                         if upgraded:
-                            deck[idx] = upgraded
+                            deck[idx] = copy.copy(upgraded)
+                    run_log.append({
+                        "floor": floor_num, "type": "rest",
+                        "action": "smith", "card_upgraded": _smithed_card,
+                        "hp": hp, "max_hp": max_hp,
+                    })
 
         elif room_type == "event":
             if event_idx < len(events_list):
@@ -803,7 +1815,64 @@ def play_full_run(
             else:
                 eid = rng.choice(events_list) if events_list else None
             if eid:
-                changes = _simulate_event(eid, deck, hp, max_hp, gold, card_db, rng)
+                # IMPROVEMENTS.md #4: network picks the event choice.
+                # Enumerate all options with their resolved effect tuples,
+                # forward-pass the option head, and apply the chosen one.
+                # Build an OptionSample so the run outcome back-propagates
+                # into this decision via _assign_run_values.
+                from ..simulator import enumerate_event_options
+                from .self_play import OPTION_EVENT_CHOICE
+
+                choices = enumerate_event_options(
+                    eid, deck, hp, max_hp, gold, card_db, rng)
+                chosen_changes: dict | None = None
+                if choices:
+                    try:
+                        network = mcts.network
+                        player = PlayerState(
+                            hp=hp, max_hp=max_hp,
+                            energy=3, max_energy=3,
+                            draw_pile=list(deck),
+                        )
+                        dummy = CombatState(
+                            player=player, enemies=[],
+                            floor=floor_num, gold=gold,
+                            relics=frozenset(relics),
+                        )
+                        st = encode_state(dummy, vocabs, config)
+                        st = {k: v.to(mcts.device) for k, v in st.items()}
+
+                        opt_types = [OPTION_EVENT_CHOICE] * len(choices)
+                        # V10: use real EVENT_CHOICE_VOCAB ids — each
+                        # (event_id, option_idx) pair maps to a unique
+                        # slot in the dedicated event_choice_embed table.
+                        opt_cards = [c["vocab_id"] for c in choices]
+
+                        with torch.no_grad():
+                            hidden = network.encode_state(**st)
+                            best_idx, _scores = network.pick_best_option(
+                                hidden, opt_types, opt_cards)
+
+                        shadow_idx = _shadow.shadow_pick_event(
+                            eid, hp, max_hp, gold, deck)
+
+                        option_samples.append(OptionSample(
+                            state_tensors={k: v.cpu() for k, v in st.items()},
+                            option_types=opt_types,
+                            option_cards=opt_cards,
+                            chosen_idx=best_idx, value=0.0,
+                            shadow_chosen_idx=shadow_idx,
+                        ))
+                        chosen_changes = choices[best_idx]["changes"]
+                    except Exception:
+                        # Fallback to heuristic pick on any network error
+                        shadow_idx = _shadow.shadow_pick_event(
+                            eid, hp, max_hp, gold, deck)
+                        chosen_changes = choices[shadow_idx]["changes"]
+
+                # Apply effects atomically (None → no-op)
+                changes = chosen_changes or _simulate_event(
+                    eid, deck, hp, max_hp, gold, card_db, rng)
                 hp = max(1, min(hp + changes["hp_delta"], max_hp + changes["max_hp_delta"]))
                 max_hp += changes["max_hp_delta"]
                 gold = max(0, gold + changes["gold_delta"])
@@ -811,13 +1880,86 @@ def play_full_run(
                     if idx < len(deck):
                         deck.pop(idx)
                 for card in changes["cards_added"]:
-                    deck.append(card)
+                    # Apply egg auto-upgrades
+                    if "FROZEN_EGG" in relics and card.card_type == CardType.POWER:
+                        _upgrade_card(card, card_db)
+                    elif "MOLTEN_EGG" in relics and card.card_type == CardType.ATTACK:
+                        _upgrade_card(card, card_db)
+                    elif "TOXIC_EGG" in relics and card.card_type == CardType.SKILL:
+                        _upgrade_card(card, card_db)
+
+                    # BING_BONG: add TWO copies instead of one
+                    if "BING_BONG" in relics:
+                        deck.append(card)
+                        deck.append(copy.copy(card))
+                    else:
+                        deck.append(card)
+                # V7: relic reward if event option grants a relic.
+                _event_relic = None
+                _event_relic_offered = []
+                if changes.get("grants_relic"):
+                    granted, offered = _pick_best_relic(
+                        _get_relic_pool("event"), deck, relics, rng,
+                    )
+                    if granted is not None:
+                        _event_relic = granted
+                        _event_relic_offered = offered
+                        hp, max_hp, gold, potion_slots_cap = _grant_relic(
+                            relics, granted,
+                            hp=hp, max_hp=max_hp, gold=gold,
+                            potions=potions, potion_slots=potion_slots_cap,
+                        )
+                        # Apply OOC relic effects
+                        hp, max_hp = _apply_relic_ooc_effects(
+                            granted, deck, card_db, hp, max_hp)
+
+                run_log.append({
+                    "floor": floor_num, "type": "event",
+                    "event_id": eid,
+                    "hp_delta": changes.get("hp_delta", 0),
+                    "max_hp_delta": changes.get("max_hp_delta", 0),
+                    "gold_delta": changes.get("gold_delta", 0),
+                    "cards_removed": changes.get("cards_removed", []),
+                    "cards_added": [c.id if hasattr(c, 'id') else str(c) for c in changes.get("cards_added", [])],
+                    "relic_granted": _event_relic,
+                    "relic_offered": _event_relic_offered,
+                    "hp_after": hp, "max_hp": max_hp, "gold": gold,
+                })
+
+        elif room_type == "treasure":
+            granted, offered = _pick_best_relic(
+                _get_relic_pool("standard"), deck, relics, rng,
+            )
+            if granted is not None:
+                hp, max_hp, gold, potion_slots_cap = _grant_relic(
+                    relics, granted,
+                    hp=hp, max_hp=max_hp, gold=gold,
+                    potions=potions, potion_slots=potion_slots_cap,
+                )
+                # Apply OOC relic effects
+                hp, max_hp = _apply_relic_ooc_effects(
+                    granted, deck, card_db, hp, max_hp)
+            # Treasure gold reward (real game gives ~50-75 gold per chest)
+            treasure_gold = rng.randint(50, 75)
+            gold += treasure_gold
+            run_log.append({
+                "floor": floor_num, "type": "treasure",
+                "relic": granted,
+                "offered": offered if granted else [],
+                "gold_earned": treasure_gold,
+                "deck_size": len(deck),
+                "deck_cards": [c.id for c in deck],
+                "hp": hp,
+                "max_hp": max_hp,
+            })
 
         elif room_type == "shop":
             # Network-driven multi-step shop
             try:
                 network = mcts.network
-                shop_cards = _offer_card_rewards(pools, deck, 3)
+                # V10: bumped from 3 → 6 to match STS2's real shop size
+                # (parity fix from docs/shop_parity.md #17).
+                shop_cards = _offer_card_rewards(pools, deck, 6)
                 shop_costs = []
                 for sc in shop_cards:
                     cost = 75
@@ -828,28 +1970,52 @@ def play_full_run(
                     shop_costs.append(cost)
 
                 # Offer 2 random potions at the shop
-                shop_potions = [rng.choice(POTION_TYPES) for _ in range(2)]
+                shop_potions = [_random_potion(rng) for _ in range(2)]
 
+                # Offer up to 3 relics (parity fix from docs/shop_parity.md #18).
+                # Filter out already-owned relics, same as _simulate_shop.
+                shop_relic_pool = _get_shop_relic_pool()
+                eligible_relics = [r for r in shop_relic_pool if r not in relics]
+                shop_relics: list[str | None] = []
+                if eligible_relics:
+                    shop_relics = list(rng.sample(
+                        eligible_relics, min(3, len(eligible_relics))))
+
+                _shop_actions = []  # track for run_log
                 for _step in range(6):
                     player = PlayerState(hp=hp, max_hp=max_hp, energy=3,
                                          max_energy=3, draw_pile=list(deck),
                                          potions=[dict(p) for p in potions])
                     dummy = CombatState(player=player, enemies=[],
-                                        floor=floor_num, gold=gold)
+                                        floor=floor_num, gold=gold,
+                                        relics=frozenset(relics))
                     st = encode_state(dummy, vocabs, config)
                     st = {k: v.to(mcts.device) for k, v in st.items()}
 
                     opt_types = []
                     opt_cards = []
-                    actions = []  # ("remove", deck_idx) | ("buy", shop_idx, cost) | ("potion", pot_idx) | ("leave",)
+                    actions = []  # ("remove", di) | ("buy", si, cost) | ("potion", pi) | ("relic", ri) | ("leave",)
 
                     # Remove options (Strike/Defend only)
-                    if gold >= SHOP_CARD_REMOVE_COST:
+                    # Cost escalates: 75, 100, 125, ... per removal this run
+                    _current_remove_cost = SHOP_CARD_REMOVE_COST + _removals_done * 25
+                    if gold >= _current_remove_cost:
                         for di, card in enumerate(deck):
                             if card.name in ("Strike", "Defend") and not card.upgraded:
                                 opt_types.append(OPTION_SHOP_REMOVE)
                                 opt_cards.append(vocabs.cards.get(card.id.rstrip("+")))
                                 actions.append(("remove", di))
+
+                    # Buy relic options — relics go before cards because
+                    # they're the highest-impact shop decision (see
+                    # _simulate_shop's priority order and boss-log data).
+                    if gold >= SHOP_RELIC_COST:
+                        for ri, rname in enumerate(shop_relics):
+                            if rname is not None:
+                                opt_types.append(OPTION_SHOP_BUY_RELIC)
+                                opt_cards.append(
+                                    vocabs.relics.get(rname) or 0)
+                                actions.append(("relic", ri))
 
                     # Buy card options
                     for si, (sc, cost) in enumerate(zip(shop_cards, shop_costs)):
@@ -879,43 +2045,117 @@ def play_full_run(
                         best_idx, scores = network.pick_best_option(
                             hidden, opt_types, opt_cards)
 
+                    shadow_idx = _shadow.shadow_pick_shop(
+                        opt_types, actions, deck, hp, max_hp, gold,
+                        floor_num, relics=frozenset(relics),
+                    )
                     option_samples.append(OptionSample(
                         state_tensors={k: v.cpu() for k, v in st.items()},
                         option_types=opt_types, option_cards=opt_cards,
                         chosen_idx=best_idx, value=0.0,
+                        shadow_chosen_idx=shadow_idx,
                     ))
 
                     action = actions[best_idx]
                     if action[0] == "leave":
                         break
                     elif action[0] == "remove":
+                        _shop_actions.append({"action": "remove", "card": deck[action[1]].id, "cost": _current_remove_cost})
                         deck.pop(action[1])
-                        gold -= SHOP_CARD_REMOVE_COST
+                        gold -= _current_remove_cost
+                        _removals_done += 1
+                    elif action[0] == "relic":
+                        rname = shop_relics[action[1]]
+                        shop_relics[action[1]] = None  # sold out
+                        if rname:
+                            _shop_actions.append({"action": "buy_relic", "relic": rname, "cost": SHOP_RELIC_COST})
+                            hp, max_hp, gold_after, potion_slots_cap = _grant_relic(
+                                relics, rname,
+                                hp=hp, max_hp=max_hp, gold=gold,
+                                potions=potions, potion_slots=potion_slots_cap,
+                            )
+                            # Apply OOC relic effects
+                            hp, max_hp = _apply_relic_ooc_effects(
+                                rname, deck, card_db, hp, max_hp)
+                            gold = gold_after - SHOP_RELIC_COST
                     elif action[0] == "buy":
-                        deck.append(shop_cards[action[1]])
+                        card_to_buy = shop_cards[action[1]]
+                        _shop_actions.append({"action": "buy_card", "card": card_to_buy.id, "cost": action[2]})
+                        # Apply egg auto-upgrades
+                        if "FROZEN_EGG" in relics and card_to_buy.card_type == CardType.POWER:
+                            _upgrade_card(card_to_buy, card_db)
+                        elif "MOLTEN_EGG" in relics and card_to_buy.card_type == CardType.ATTACK:
+                            _upgrade_card(card_to_buy, card_db)
+                        elif "TOXIC_EGG" in relics and card_to_buy.card_type == CardType.SKILL:
+                            _upgrade_card(card_to_buy, card_db)
+
+                        # BING_BONG: add TWO copies instead of one
+                        if "BING_BONG" in relics:
+                            deck.append(card_to_buy)
+                            deck.append(copy.copy(card_to_buy))
+                        else:
+                            deck.append(card_to_buy)
                         gold -= action[2]
                         shop_cards[action[1]] = None  # sold out
                     elif action[0] == "potion":
+                        _shop_actions.append({"action": "buy_potion", "potion": shop_potions[action[1]].get("name", "?"), "cost": SHOP_POTION_COST})
                         potions.append(dict(shop_potions[action[1]]))
                         gold -= SHOP_POTION_COST
                         shop_potions[action[1]] = None  # sold out
 
+                run_log.append({
+                    "floor": floor_num, "type": "shop",
+                    "gold_before": gold + sum(a.get("cost", 0) for a in _shop_actions),
+                    "gold_after": gold,
+                    "actions": _shop_actions,
+                })
+
             except Exception:
                 # Fallback to heuristic
-                shop_result = _simulate_shop(deck, gold, card_db, pools, rng)
+                shop_result = _simulate_shop(
+                    deck, gold, card_db, pools, rng,
+                    relics=frozenset(relics))
                 gold += shop_result["gold_delta"]
                 for idx in sorted(shop_result.get("cards_removed", []), reverse=True):
                     if idx < len(deck):
                         deck.pop(idx)
                 for card in shop_result.get("cards_added", []):
-                    deck.append(card)
+                    # Apply egg auto-upgrades
+                    if "FROZEN_EGG" in relics and card.card_type == CardType.POWER:
+                        _upgrade_card(card, card_db)
+                    elif "MOLTEN_EGG" in relics and card.card_type == CardType.ATTACK:
+                        _upgrade_card(card, card_db)
+                    elif "TOXIC_EGG" in relics and card.card_type == CardType.SKILL:
+                        _upgrade_card(card, card_db)
+
+                    # BING_BONG: add TWO copies instead of one
+                    if "BING_BONG" in relics:
+                        deck.append(card)
+                        deck.append(copy.copy(card))
+                    else:
+                        deck.append(card)
+                for relic_name in shop_result.get("relics_bought", []):
+                    hp, max_hp, gold, potion_slots_cap = _grant_relic(
+                        relics, relic_name,
+                        hp=hp, max_hp=max_hp, gold=gold,
+                        potions=potions, potion_slots=potion_slots_cap,
+                    )
+                    # Apply OOC relic effects
+                    hp, max_hp = _apply_relic_ooc_effects(
+                        relic_name, deck, card_db, hp, max_hp)
+                run_log.append({
+                    "floor": floor_num, "type": "shop",
+                    "gold_delta": shop_result.get("gold_delta", 0),
+                    "actions": [{"action": "heuristic_fallback"}],
+                })
 
     # Completed all floors without boss (shouldn't happen normally)
     _assign_run_values(combat_samples_by_floor, floor_reached,
                        len(room_sequence), hp, max_hp,
                        deck_change_samples, option_samples,
                        combat_hp_data=combat_hp_data,
-                       boss_floors=boss_floors)
+                       boss_floors=boss_floors,
+                       outcome="lose")
     _arch = classify_deck(deck)
     return FullRunResult(
         outcome="lose", floor_reached=floor_reached,
@@ -924,10 +2164,12 @@ def play_full_run(
         deck_size=len(deck), samples=all_samples,
         deck_samples=deck_change_samples,
         option_samples=option_samples, combat_log=combat_log,
+        run_log=run_log,
         archetype=_arch.archetype,
         archetype_commitment=_arch.commitment,
         boss_detail=boss_detail_holder,
         final_deck=[c.id for c in deck],
+        final_relics=sorted(relics),
     )
 
 
@@ -941,6 +2183,7 @@ def _assign_run_values(
     option_samples: list | None = None,
     combat_hp_data: dict[int, tuple[int, int, int]] | None = None,
     boss_floors: set[int] | None = None,
+    outcome: str = "lose",
 ) -> None:
     """Assign training values blending per-combat HP conservation with run outcome.
 
@@ -949,12 +2192,34 @@ def _assign_run_values(
     This teaches the network that winning a combat at 5 HP is worse than at 40 HP.
 
     Boss fights are treated differently: HP conservation doesn't matter (HP resets
-    next act), only winning and potion conservation count.
+    next act), only winning counts. Potion use is barely penalised because losing
+    is much worse than dumping consumables.
+
+    Run-level scoring (2026-04-10 rebalance):
+    - Beating the boss is worth a flat +1.0 regardless of final HP — winning
+      is the only thing that matters. This creates a large cliff between
+      "died at floor 16" and "beat the boss" so the network valorises wins
+      over incremental progress.
+    - Losing is scored on a compressed [-0.5, ~+0.1] scale based on how far
+      the run got, keeping enough signal to teach "floor 12 is better than
+      floor 3" without letting good-but-losing runs look comparable to wins.
     """
     # --- Run-level value (sparse, based on overall outcome) ---
-    base = floor_reached / max(1, total_floors)
-    hp_bonus = final_hp / max(1, max_hp) * 0.3
-    run_value = base + hp_bonus - 0.5  # [-0.5, +0.8]
+    # Outcome is always passed explicitly by play_full_run's three call
+    # sites; the equality check is authoritative.
+    won = (outcome == "win")
+    if won:
+        # Flat maximum reward for beating the boss. HP doesn't matter —
+        # 3/70 and 70/70 are the same story: "you won Act 1".
+        run_value = 1.0
+    else:
+        # Losses: scale by floor reached. Max loss-value is ~+0.1 at
+        # boss-floor death, min is ~-0.5 at floor-1 death. HP on loss
+        # gets a small bonus (surviving longer at each floor is still
+        # informative), but the floor weight dominates.
+        base = floor_reached / max(1, total_floors) * 0.6
+        hp_bonus = final_hp / max(1, max_hp) * 0.1
+        run_value = base + hp_bonus - 0.5  # [~-0.5, ~+0.2]
     run_value = max(-1.0, min(1.0, run_value))
 
     # --- Per-combat values (dense, based on HP conservation) ---
@@ -974,13 +2239,19 @@ def _assign_run_values(
         is_boss = floor in boss_floors
 
         if is_boss:
-            # Boss fights: only winning matters, HP conservation is irrelevant
-            # (HP resets in the next act). Reward winning and potion conservation.
+            # Boss fights: winning is everything. The loss penalty is
+            # scaled by entering HP — arriving at the boss crippled (say
+            # 15/80 HP) means the loss was mostly baked in by prior Act 1
+            # combats, not by boss play. Teaching the network "you lost
+            # with -1.0 regardless of how you got there" adds noise.
+            #
+            # Formula: full-HP loss = -1.0, zero-HP loss = -0.3.
+            # A floor of -0.3 keeps some loss signal even when broken.
             if floor in combat_hp_data:
                 hp_before, hp_after, potions_used = combat_hp_data[floor]
                 if hp_after <= 0:
-                    # Lost the boss fight — strong negative signal
-                    combat_value = -1.0
+                    entry_ratio = max(0.0, min(1.0, hp_before / max(1, max_hp)))
+                    combat_value = -(0.3 + 0.7 * entry_ratio)
                 else:
                     # Won the boss fight — strong positive signal.
                     # No potion penalty: using potions at the boss is the
@@ -992,7 +2263,10 @@ def _assign_run_values(
             # Boss: weight toward win/lose outcome, less run-level blend
             blended = 0.7 * combat_value + 0.3 * run_component
         else:
-            # Non-boss: HP conservation matters for surviving the run
+            # Non-boss: HP conservation matters for surviving the run.
+            # Potion use is a small nudge (0.03 per potion, down from
+            # 0.10) — we'd rather the network cashes potions to survive
+            # than hoards them into a loss.
             if floor in combat_hp_data:
                 hp_before, hp_after, potions_used = combat_hp_data[floor]
                 if hp_before <= 0:
@@ -1000,8 +2274,17 @@ def _assign_run_values(
                 else:
                     hp_retained = hp_after / max(1, hp_before)
                     damage_fraction = (hp_before - hp_after) / max(1, max_hp)
-                    potion_penalty = potions_used * 0.1
-                    combat_value = hp_retained - damage_fraction * 0.5 - potion_penalty
+                    potion_penalty = potions_used * 0.03
+                    # Cross-fight HP preservation bonus: reward ending
+                    # fights with high absolute HP so the agent learns
+                    # to manage health as a multi-fight resource.
+                    # +0.15 at full HP, 0 at half, -0.15 at near-death.
+                    hp_abs_ratio = hp_after / max(1, max_hp)
+                    hp_preservation_bonus = (hp_abs_ratio - 0.5) * 0.3
+                    combat_value = (hp_retained
+                                    - damage_fraction * 0.5
+                                    - potion_penalty
+                                    + hp_preservation_bonus)
                     combat_value = max(-1.0, min(1.0, combat_value))
             else:
                 combat_value = 0.0
@@ -1020,10 +2303,34 @@ def _assign_run_values(
             if penalty > 0:
                 sample.value = max(-1.0, sample.value - penalty)
 
-    # Deck change and option samples get the full run value
+    # Deck change and option samples get a run value with HP preservation bonus.
+    #
+    # The base run_value is binary-ish (+1 win, scaled loss). But for NON-combat
+    # decisions (rest/map/shop/card picks), we want the agent to learn that
+    # arriving at the boss with more HP is better. A rest-site heal that lets
+    # you enter the boss at 55/70 HP instead of 25/70 should score higher even
+    # if both runs ultimately lost.
+    #
+    # HP preservation bonus: for runs that reached the boss floor (floor >= 16),
+    # add up to +0.15 for arriving with full HP, 0 at half HP, -0.15 at low HP.
+    # This is on top of run_value, so a loss-at-boss with good HP management
+    # gets a less negative value than a loss-at-boss with poor HP management.
+    hp_preservation = 0.0
+    if floor_reached >= total_floors - 1 and max_hp > 0:
+        # Boss was reached — reward HP at boss entry
+        boss_floor = max(sorted_floors) if sorted_floors else floor_reached
+        if boss_floor in combat_hp_data:
+            boss_entry_hp = combat_hp_data[boss_floor][0]  # hp_before boss
+        else:
+            boss_entry_hp = final_hp
+        hp_ratio = boss_entry_hp / max(1, max_hp)
+        hp_preservation = (hp_ratio - 0.5) * 0.3  # [-0.15, +0.15]
+
+    option_value = max(-1.0, min(1.0, run_value + hp_preservation))
+
     if deck_change_samples:
         for sample in deck_change_samples:
-            sample.value = run_value
+            sample.value = option_value
     if option_samples:
         for sample in option_samples:
-            sample.value = run_value
+            sample.value = option_value

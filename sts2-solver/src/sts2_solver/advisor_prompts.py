@@ -522,8 +522,8 @@ def build_rest_message(state: dict, game_data: GameDataDB) -> str:
     floor = run.get("floor", 0)
     hp_pct = hp / max_hp if max_hp > 0 else 0
 
-    # Boss floors are typically 17, 34, 52
-    pre_boss = floor in (15, 16, 33, 34, 51, 52)
+    # Boss floors are 15, 32, 50 (Act 1 has 15 rooms)
+    pre_boss = floor in (14, 15, 31, 32, 49, 50)
     character = detect_character(state)
 
     # Silent has lower max HP (70) — use more aggressive rest thresholds
@@ -675,7 +675,11 @@ def detect_screen_type(available_actions: list[str]) -> str:
     if "choose_rest_option" in actions_set:
         return "rest"
     if "choose_treasure_relic" in actions_set:
-        return "boss_relic"
+        return "treasure"
+    if "choose_bundle" in actions_set:
+        return "bundle"
+    if "open_chest" in actions_set:
+        return "chest"
 
     # Check for auto-actions
     for action in available_actions:
