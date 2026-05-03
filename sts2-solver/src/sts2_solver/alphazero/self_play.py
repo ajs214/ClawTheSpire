@@ -549,6 +549,7 @@ def train_batch(
     samples: list[TrainingSample],
     option_samples: list | None = None,
     device: str = "cpu",
+    vocabs: "Vocabs | None" = None,
 ) -> tuple[float, float, float, float, float, float]:
     """Train on a batch. Returns (total, value, policy, option, card_pick, other_option) losses."""
     network.train()
@@ -611,8 +612,8 @@ def train_batch(
     # option's score down (toward 0) so the network learns that skipping would
     # have been better.  Only fires when: (a) run lost, (b) deck had 18+ cards,
     # (c) network picked a card (not skip).  Weight scales with deck bloat.
-    SKIP_BLOAT_ALPHA = 0.10  # base weight for skip encouragement loss
-    SKIP_BLOAT_DECK_THRESHOLD = 18  # deck size above which skip signal fires
+    SKIP_BLOAT_ALPHA = 0.35  # base weight for skip encouragement loss
+    SKIP_BLOAT_DECK_THRESHOLD = 15  # deck size above which skip signal fires
     # Empirical card lift: deck-win-rate relative to baseline (>1 = above avg).
     # Used to boost ranking loss for win-correlated cards so the network
     # gets stronger gradient toward picking proven winners.
@@ -628,7 +629,46 @@ def train_batch(
         "DEFLECT": 1.29, "CLOAK_AND_DAGGER": 1.22, "DODGE_AND_ROLL": 1.2,
         "SNAKEBITE": 1.11, "RICOCHET": 1.1, "POISONED_STAB": 1.07,
     }
-    for sample in (option_samples or []):
+    # ── V21: Weakened supervised skip bootstrapping ─────────────────────
+    # V20 thresholds (value<0.4, WR<0.28) created too much skip bias.
+    # V21: only bootstrap on clearly losing runs (value<0.2) with truly
+    # bad cards (WR<0.20). This is a gentle nudge, not a firehose.
+    BOOTSTRAP_WIN_THRESHOLD = 0.20  # V21: tightened from 0.28
+    BOOTSTRAP_MIN_PICKS = 20
+    BOOTSTRAP_SKIP_VALUE = 0.30    # V21: reduced from 0.35
+
+    _augmented_option_samples = list(option_samples or [])
+    try:
+        from .full_run import _card_quality
+        if _card_quality:
+            _bootstrap_count = 0
+            for _os in list(option_samples or []):
+                if (_os.deck_card_ids is not None          # is a card pick
+                        and _os.value < 0.2                # V21: only clear losses
+                        and _os.chosen_idx != len(_os.option_types) - 1):  # didn't skip
+                    _chosen_vid = _os.option_cards[_os.chosen_idx]
+                    _chosen_name = vocabs.cards.idx_to_token.get(_chosen_vid, "") if vocabs else ""
+                    _wr = _card_quality.get(_chosen_name)
+                    if _wr is not None and _wr < BOOTSTRAP_WIN_THRESHOLD:
+                        _syn = OptionSample(
+                            state_tensors=_os.state_tensors,
+                            option_types=_os.option_types,
+                            option_cards=_os.option_cards,
+                            chosen_idx=len(_os.option_types) - 1,  # skip
+                            value=BOOTSTRAP_SKIP_VALUE,
+                            shadow_chosen_idx=_os.shadow_chosen_idx,
+                            deck_card_ids=_os.deck_card_ids,
+                            pick_scores=_os.pick_scores,
+                            relic_ids=_os.relic_ids,
+                            relic_mask=_os.relic_mask,
+                            synergy_features=_os.synergy_features,
+                        )
+                        _augmented_option_samples.append(_syn)
+                        _bootstrap_count += 1
+    except Exception:
+        pass
+
+    for sample in _augmented_option_samples:
         try:
             state_tensors = {k: v.to(device) for k, v in sample.state_tensors.items()}
             hidden = network.encode_state(**state_tensors)
@@ -699,14 +739,14 @@ def train_batch(
                         rank_loss = rank_loss / n_compared
                         o_loss = o_loss + boosted_beta * rank_loss
 
-                # Skip encouragement: on losing runs with bloated decks,
+                # Skip encouragement: on losing/mediocre runs with growing decks,
                 # add a loss term that pushes the chosen card's score DOWN
                 # (toward 0) to make skip relatively more attractive.
-                # Scales with deck bloat: stronger signal for 25-card decks
-                # than 18-card decks.
+                # Fires at 15+ cards (3 picks above starter deck).
+                # Scales with deck bloat: stronger signal for larger decks.
                 if (num_opts >= 2
                         and sample.chosen_idx != skip_idx
-                        and sample.value < 0.3  # losing run
+                        and sample.value < 0.5  # losing or mediocre run
                         and sample.deck_card_ids is not None
                         and len(sample.deck_card_ids) >= SKIP_BLOAT_DECK_THRESHOLD):
                     bloat = len(sample.deck_card_ids) - SKIP_BLOAT_DECK_THRESHOLD
@@ -1258,8 +1298,26 @@ def train_worker(
                     network, optimizer, batch,
                     option_samples=option_batch,
                     device="cpu",
+                    vocabs=vocabs,
                 )
             scheduler.step()
+
+        # --- V21: Push generation counter + card quality to full_run ---
+        try:
+            from .full_run import set_training_generation
+            set_training_generation(gen)
+        except Exception:
+            pass
+        if gen % 10 == 0 and _card_picked:
+            try:
+                from .full_run import update_card_quality
+                _cq: dict[str, float] = {}
+                for cname, cnt in _card_picked.items():
+                    if cnt >= 20:  # need enough data for stable rate
+                        _cq[cname] = _card_win_picked.get(cname, 0) / cnt
+                update_card_quality(_cq)
+            except Exception:
+                pass
 
         # --- Value head probes (every PROBE_INTERVAL gens) ---
         if gen % PROBE_INTERVAL == 0 and _probe_states:

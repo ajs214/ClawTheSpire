@@ -114,6 +114,83 @@ IMPLEMENTED_RELIC_POOL = _build_silent_relic_pool()
 # Alias for backwards compatibility with any external callers.
 ELITE_RELIC_POOL = IMPLEMENTED_RELIC_POOL
 
+# ── V20: Rarity-correct relic pools ─────────────────────────────────
+# The real game separates relics by rarity tier. Build ID-based pools
+# from relics.json so training matches live play distribution.
+_RELIC_POOLS_BY_RARITY: dict[str, list[str]] | None = None
+
+def _build_rarity_pools() -> dict[str, list[str]]:
+    """Build relic ID pools separated by game rarity tier."""
+    from ..data_loader import DEFAULT_DATA_DIR
+    import json as _json
+    relics_path = DEFAULT_DATA_DIR / "relics.json"
+    if not relics_path.exists():
+        # Fallback: use flat pool for everything
+        return {
+            "standard": list(IMPLEMENTED_RELIC_POOL),
+            "boss": list(IMPLEMENTED_RELIC_POOL),
+            "shop": list(IMPLEMENTED_RELIC_POOL),
+            "event": list(IMPLEMENTED_RELIC_POOL),
+        }
+    with open(relics_path, encoding="utf-8") as f:
+        all_relics = _json.load(f)
+
+    sim_ids = relic_effects.simulated_relic_ids()
+    silent_sim = sim_ids - _NON_SILENT_RELIC_IDS - {"RING_OF_THE_SNAKE"}
+
+    standard_rarities = {"Common Relic", "Uncommon Relic", "Rare Relic"}
+    shop_rarities = standard_rarities | {"Shop Relic"}
+    boss_rarities = {"Ancient Relic"}
+    event_rarities = standard_rarities | {"Event Relic"}
+
+    pools: dict[str, list[str]] = {"standard": [], "boss": [], "shop": [], "event": []}
+    for r in all_relics:
+        rid = r["id"]
+        if rid not in silent_sim:
+            continue
+        rarity = r.get("rarity", "")
+        if rarity in standard_rarities:
+            pools["standard"].append(rid)
+            pools["shop"].append(rid)
+            pools["event"].append(rid)
+        if rarity in boss_rarities:
+            pools["boss"].append(rid)
+        if rarity == "Shop Relic":
+            pools["shop"].append(rid)
+        if rarity == "Event Relic":
+            pools["event"].append(rid)
+
+    # Sort for determinism
+    for k in pools:
+        pools[k] = sorted(pools[k])
+
+    return pools
+
+
+def _get_relic_pool(pool_type: str) -> list[str]:
+    """Get rarity-appropriate relic pool. Types: standard, boss, shop, event."""
+    global _RELIC_POOLS_BY_RARITY
+    if _RELIC_POOLS_BY_RARITY is None:
+        _RELIC_POOLS_BY_RARITY = _build_rarity_pools()
+    return _RELIC_POOLS_BY_RARITY.get(pool_type, IMPLEMENTED_RELIC_POOL)
+
+
+# ── V20: Card quality stats (updated by self_play.py training loop) ──
+# Maps card_id → win_when_picked rate. Used by quality-aware skip
+# exploration to skip more aggressively when offered mediocre cards.
+_card_quality: dict[str, float] = {}
+_training_generation: int = 0  # V21: updated by self_play for anneal
+
+def update_card_quality(card_win_rates: dict[str, float]) -> None:
+    """Called by self_play.py to push latest card win rates."""
+    global _card_quality
+    _card_quality = dict(card_win_rates)
+
+def set_training_generation(gen: int) -> None:
+    """Called by self_play.py so skip exploration can anneal."""
+    global _training_generation
+    _training_generation = gen
+
 # STS relic ID → display name, used to bridge combat_engine's ID-keyed
 # relics set to relic_synergy.score_relic_for_deck's name-keyed scorer.
 _RELIC_ID_TO_NAME: dict[str, str] = {
@@ -1265,7 +1342,7 @@ def play_full_run(
                     deck.append(card)
             if _c.get("grants_relic"):
                 granted, offered = _pick_best_relic(
-                    IMPLEMENTED_RELIC_POOL, deck, relics, rng,
+                    _get_relic_pool("event"), deck, relics, rng,
                 )
                 if granted is not None:
                     hp, max_hp, gold, potion_slots_cap = _grant_relic(
@@ -1431,7 +1508,7 @@ def play_full_run(
             # if network scoring fails.
             if room_type == "elite":
                 granted, offered = _pick_relic_with_network(
-                    IMPLEMENTED_RELIC_POOL, deck, relics, rng,
+                    _get_relic_pool("standard"), deck, relics, rng,
                     mcts=mcts, vocabs=vocabs, config=config,
                     hp=hp, max_hp=max_hp, gold=gold, floor_num=floor_num,
                     option_samples=option_samples, source="elite",
@@ -1498,6 +1575,48 @@ def play_full_run(
                         if deck_sample is not None:
                             deck_sample.chosen_idx = explore_idx
 
+                # ----------------------------------------------------------
+                # V21 Skip exploration — fixes V20 over-skipping:
+                #  (1) Hard floor: never force-skip when deck < 13
+                #  (2) Protect good cards: no skip if card WR >= 0.25
+                #  (3) Halved rates: bloat 5-15%, quality 8-12%
+                #  (6) Anneal: full rates gen 0-200, decay to 50% by gen 600
+                # ----------------------------------------------------------
+                _SKIP_DECK_FLOOR = 13
+                _SKIP_BLOAT_THRESHOLD = 15
+                _SKIP_QUALITY_THRESHOLD = 0.25
+                _SKIP_PROTECT_THRESHOLD = 0.25
+                if pick is not None and len(deck) >= _SKIP_DECK_FLOOR:
+                    skip_explore_rate = 0.0
+
+                    # (A) Deck bloat trigger (halved: 5-15%)
+                    if len(deck) >= _SKIP_BLOAT_THRESHOLD:
+                        bloat = len(deck) - _SKIP_BLOAT_THRESHOLD
+                        skip_explore_rate = min(0.15, 0.05 + bloat * 0.01)
+
+                    # (B) Card quality trigger (halved: 8-12%)
+                    # Only fires on cards BELOW the protect threshold
+                    if _card_quality:
+                        picked_wr = _card_quality.get(pick.id)
+                        if (picked_wr is not None
+                                and picked_wr < _SKIP_QUALITY_THRESHOLD
+                                and picked_wr < _SKIP_PROTECT_THRESHOLD):
+                            quality_rate = 0.08 + 0.04 * (_SKIP_QUALITY_THRESHOLD - picked_wr) / _SKIP_QUALITY_THRESHOLD
+                            skip_explore_rate = max(skip_explore_rate, quality_rate)
+                        elif picked_wr is not None and picked_wr >= _SKIP_PROTECT_THRESHOLD:
+                            skip_explore_rate = 0.0
+
+                    # (6) Anneal: full rate for gen 0-200, linear decay
+                    # to 50% by gen 600, flat after that
+                    if _training_generation > 200 and skip_explore_rate > 0:
+                        anneal = max(0.5, 1.0 - (_training_generation - 200) / 800.0)
+                        skip_explore_rate *= anneal
+
+                    if skip_explore_rate > 0 and rng.random() < skip_explore_rate:
+                        pick = None  # force skip
+                        if deck_sample is not None:
+                            deck_sample.chosen_idx = len(deck_sample.option_types) - 1
+
                 # Track picks for exploration decay
                 if pick is not None:
                     _card_explore_counts[pick.id] = _card_explore_counts.get(pick.id, 0) + 1
@@ -1528,7 +1647,7 @@ def play_full_run(
 
             if room_type == "boss":
                 granted, offered = _pick_relic_with_network(
-                    IMPLEMENTED_RELIC_POOL, deck, relics, rng,
+                    _get_relic_pool("boss"), deck, relics, rng,
                     mcts=mcts, vocabs=vocabs, config=config,
                     hp=hp, max_hp=max_hp, gold=gold, floor_num=floor_num,
                     option_samples=option_samples, source="boss",
@@ -1780,7 +1899,7 @@ def play_full_run(
                 _event_relic_offered = []
                 if changes.get("grants_relic"):
                     granted, offered = _pick_best_relic(
-                        IMPLEMENTED_RELIC_POOL, deck, relics, rng,
+                        _get_relic_pool("event"), deck, relics, rng,
                     )
                     if granted is not None:
                         _event_relic = granted
@@ -1809,7 +1928,7 @@ def play_full_run(
 
         elif room_type == "treasure":
             granted, offered = _pick_best_relic(
-                IMPLEMENTED_RELIC_POOL, deck, relics, rng,
+                _get_relic_pool("standard"), deck, relics, rng,
             )
             if granted is not None:
                 hp, max_hp, gold, potion_slots_cap = _grant_relic(

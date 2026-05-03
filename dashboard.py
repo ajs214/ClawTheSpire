@@ -38,6 +38,8 @@ BOSS_LOG_DIRS = {
     "v17": "alphazero_checkpoints_v17",
     "v18": "alphazero_checkpoints_v18",
     "v19": "alphazero_checkpoints_v19",
+    "v20": "alphazero_checkpoints_v20",
+    "v21": "alphazero_checkpoints_v21",
 }
 
 # Cached boss data (refreshed by poll thread)
@@ -389,12 +391,14 @@ VERSION_FILES = {
     "v17": "training_v17_progress.json",
     "v18": "training_v18_progress.json",
     "v19": "training_v19_progress.json",
+    "v20": "training_v20_progress.json",
+    "v21": "training_v21_progress.json",
 }
 
 # --- Shared state ---
 lock = threading.Lock()
 all_history: dict[str, list[dict]] = {
-    "v1": [], "v2": [], "v3": [], "v4": [], "v5": [], "v6": [], "v7": [], "v8": [], "v9": [], "v10": [], "v11": [], "v12": [], "v13": [], "v14": [], "v15": [], "v16": [], "v17": [], "v18": [], "v19": [],
+    "v1": [], "v2": [], "v3": [], "v4": [], "v5": [], "v6": [], "v7": [], "v8": [], "v9": [], "v10": [], "v11": [], "v12": [], "v13": [], "v14": [], "v15": [], "v16": [], "v17": [], "v18": [], "v19": [], "v20": [], "v21": [],
 }
 snapshots: dict[str, dict] = {}
 active_version: str = ""  # whichever is currently training
@@ -613,7 +617,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 
   /* Version colors */
   .earlyc{color:#6e7681} .v5c{color:#bc8cff} .v6c{color:#ff7b72} .v7c{color:#ffa657}
-  .v8c{color:#2ea9e6} .v9c{color:#39d353} .v10c{color:#f0883e} .v11c{color:#e05dff} .v12c{color:#00d4aa} .v13c{color:#ff6b9d} .v14c{color:#79c0ff} .v15c{color:#ffd700} .v16c{color:#ff6347} .v17c{color:#7b68ee} .midc{color:#8a939a} .v18c{color:#00ff88} .v19c{color:#ff9500}
+  .v8c{color:#2ea9e6} .v9c{color:#39d353} .v10c{color:#f0883e} .v11c{color:#e05dff} .v12c{color:#00d4aa} .v13c{color:#ff6b9d} .v14c{color:#79c0ff} .v15c{color:#ffd700} .v16c{color:#ff6347} .v17c{color:#7b68ee} .midc{color:#8a939a} .v18c{color:#00ff88} .v19c{color:#ff9500} .v20c{color:#00bfff} .v21c{color:#ff4500}
 
   /* Boss table */
   .boss-row td { text-align:left; }
@@ -769,13 +773,13 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <div class="updated" id="updated"></div>
 
 <script>
-const COLORS = { early:'#6e7681', mid:'#8a939a', v1:'#6e7681', v2:'#7c858d', v3:'#8a939a', v4:'#99a1a8', v5:'#bc8cff', v6:'#ff7b72', v7:'#ffa657', v8:'#2ea9e6', v9:'#39d353', v10:'#f0883e', v11:'#e05dff', v12:'#00d4aa', v13:'#ff6b9d', v14:'#79c0ff', v15:'#ffd700', v16:'#ff6347', v17:'#7b68ee', v18:'#00ff88', v19:'#ff9500' };
-const LABELS = { early:'Early (V1–V4)', mid:'Mid (V5–V12)', v1:'V1', v2:'V2', v3:'V3', v4:'V4', v5:'V5', v6:'V6', v7:'V7', v8:'V8', v9:'V9', v10:'V10', v11:'V11', v12:'V12', v13:'V13', v14:'V14', v15:'V15', v16:'V16', v17:'V17', v18:'V18', v19:'V19' };
-const VERSIONS = ['early','mid','v13','v14','v15','v16','v17','v18','v19'];
+const COLORS = { early:'#6e7681', mid:'#8a939a', v1:'#6e7681', v2:'#7c858d', v3:'#8a939a', v4:'#99a1a8', v5:'#bc8cff', v6:'#ff7b72', v7:'#ffa657', v8:'#2ea9e6', v9:'#39d353', v10:'#f0883e', v11:'#e05dff', v12:'#00d4aa', v13:'#ff6b9d', v14:'#79c0ff', v15:'#ffd700', v16:'#ff6347', v17:'#7b68ee', v18:'#00ff88', v19:'#ff9500', v20:'#00bfff', v21:'#ff4500' };
+const LABELS = { early:'Early (V1–V4)', mid:'Mid (V5–V12)', v1:'V1', v2:'V2', v3:'V3', v4:'V4', v5:'V5', v6:'V6', v7:'V7', v8:'V8', v9:'V9', v10:'V10', v11:'V11', v12:'V12', v13:'V13', v14:'V14', v15:'V15', v16:'V16', v17:'V17', v18:'V18', v19:'V19', v20:'V20', v21:'V21' };
+const VERSIONS = ['early','mid','v13','v14','v15','v16','v17','v18','v19','v20','v21'];
 const EARLY_SOURCES = ['v1','v2','v3','v4'];
 const MID_SOURCES = ['v5','v6','v7','v8','v9','v10','v11','v12'];
 // Recent versions for charts
-const RECENT_VERSIONS = ['v13','v14','v15','v16','v17','v18','v19'];
+const RECENT_VERSIONS = ['v13','v14','v15','v16','v17','v18','v19','v20','v21'];
 const BOSS_FLOOR = 17;
 
 // ---- Lineage definitions ----
@@ -787,7 +791,7 @@ const LINEAGES = [
   { id: 'L3', label: 'V13',       versions: ['v13'] },
   { id: 'L4', label: 'V14',       versions: ['v14'] },
   { id: 'L5', label: 'V15',       versions: ['v15'] },
-  { id: 'L6', label: 'V16–V19', versions: ['v16','v17','v18','v19'] },
+  { id: 'L6', label: 'V16–V21', versions: ['v16','v17','v18','v19','v20','v21'] },
 ];
 
 const ARCH_COLORS = { poison:'#3fb950', shiv:'#d29922', sly:'#58a6ff', mixed:'#bc8cff', undecided:'#484f58', unknown:'#30363d' };
@@ -1238,15 +1242,16 @@ function buildLineageDatasets(rawHistories) {
 
 function updateCardPickChart(history) {
   if (!history || !history.length) { cardPickChart.data.datasets=[]; cardPickChart.update('none'); return; }
-  // Thin to ~200 points
-  const thinned = thin(history, 200);
+  // Stitch generations so restarts don't overlap, then thin
+  const stitched = stitchGenerations(history);
+  const thinned = thin(stitched, 200);
   const agreeData = thinned.filter(h=>h.card_pick_agreement!=null).map(h=>({x:h.generation,y:h.card_pick_agreement}));
   const skipData = thinned.filter(h=>h.card_skip_rate!=null).map(h=>({x:h.generation,y:h.card_skip_rate}));
   const spreadData = thinned.filter(h=>h.card_pick_score_spread!=null).map(h=>({x:h.generation,y:h.card_pick_score_spread}));
   cardPickChart.data.datasets = [
-    {label:'Agreement Rate',data:agreeData,borderColor:'#58a6ff',borderWidth:2,pointRadius:0,tension:0.4,yAxisID:'yAgree'},
-    {label:'Skip Rate',data:skipData,borderColor:'#f85149',borderWidth:2,pointRadius:0,tension:0.4,borderDash:[4,2],yAxisID:'yAgree'},
-    {label:'Score Spread',data:spreadData,borderColor:'#d29922',borderWidth:2,pointRadius:0,tension:0.4,yAxisID:'ySpread'},
+    {label:'Agreement Rate',data:agreeData,borderColor:'#58a6ff',borderWidth:2,pointRadius:0,tension:0.3,yAxisID:'yAgree'},
+    {label:'Skip Rate',data:skipData,borderColor:'#f85149',borderWidth:2,pointRadius:1,tension:0.3,yAxisID:'yAgree'},
+    {label:'Score Spread',data:spreadData,borderColor:'#d29922',borderWidth:2,pointRadius:0,tension:0.3,yAxisID:'ySpread'},
   ];
   const maxGen = thinned[thinned.length-1].generation||50;
   cardPickChart.options.scales.x.max = maxGen;
@@ -1384,7 +1389,7 @@ function updateLiveTab(liveRuns, activeVer) {
     const bossInfo = (r.boss_fights||[]).map(bf=>humanizeBoss(bf.encounter_id)||'?').join(', ')||'-';
     const bossColor = r.boss_fights&&r.boss_fights.length ? (r.boss_fights.some(bf=>bf.outcome==='win')?'#3fb950':'#f85149') : '#484f58';
     const relicCount = (r.relics_gained||[]).length + (r.starting_relics||[]).length;
-    const verColor = {'v9':'#39d353','v10':'#f0883e','v11':'#e05dff','v12':'#00d4aa','v13':'#ff6b9d','v14':'#79c0ff','v15':'#ffd700','v16':'#ff6347','v17':'#7b68ee','v18':'#00ff88','v19':'#ff9500'}[r.train_version]||'#8b949e';
+    const verColor = {'v9':'#39d353','v10':'#f0883e','v11':'#e05dff','v12':'#00d4aa','v13':'#ff6b9d','v14':'#79c0ff','v15':'#ffd700','v16':'#ff6347','v17':'#7b68ee','v18':'#00ff88','v19':'#ff9500','v20':'#00bfff','v21':'#ff4500'}[r.train_version]||'#8b949e';
     return `<tr onclick="showRunDetail('${r.run_id}')">
       <td style="color:${verColor};font-weight:bold;font-size:0.8em">${r.train_version||'?'}</td>
       <td>${r.config_profile||'?'}</td>
@@ -1483,7 +1488,7 @@ async function poll() {
     const snapsDisplay = {};
     if (earlySnap) snapsDisplay.early = earlySnap;
     if (midSnap) snapsDisplay.mid = midSnap;
-    for (const v of ['v13','v14','v15','v16','v17','v18','v19']) {
+    for (const v of ['v13','v14','v15','v16','v17','v18','v19','v20','v21']) {
       histDisplay[v] = d.history[v] || [];
       if (d.snapshots[v]) {
         const copy = Object.assign({}, d.snapshots[v]);
@@ -1500,12 +1505,12 @@ async function poll() {
       for (const v of [...VERSIONS].reverse()) {
         if (v !== 'early' && v !== 'mid' && snapsDisplay[v]) { rawActiveVer = v; break; }
       }
-      if (!rawActiveVer) rawActiveVer = 'v19';
+      if (!rawActiveVer) rawActiveVer = 'v21';
     }
     let activeVer = rawActiveVer;
     if (EARLY_SOURCES.includes(activeVer)) activeVer = 'early';
     if (MID_SOURCES.includes(activeVer)) activeVer = 'mid';
-    const snap = snapsDisplay[activeVer]||snapsDisplay.v19||snapsDisplay.v18||snapsDisplay.v17||snapsDisplay.v16||snapsDisplay.v15||{};
+    const snap = snapsDisplay[activeVer]||snapsDisplay.v21||snapsDisplay.v20||snapsDisplay.v19||snapsDisplay.v18||snapsDisplay.v17||snapsDisplay.v16||snapsDisplay.v15||{};
 
     document.getElementById('active-label').innerHTML =
       `Active: <span class="${activeVer}c" style="font-weight:bold">${LABELS[activeVer]||activeVer}</span>`;

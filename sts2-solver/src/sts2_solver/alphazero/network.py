@@ -485,11 +485,15 @@ class STS2Network(nn.Module):
                 relic_ids=relic_t, relic_mask=rmask_t, synergy_features=syn_t)
             scores_list = scores[0].tolist()
 
-            # Pick bonus: gently bias toward taking a card over skipping,
-            # scaled by how many cards have been drafted.  Fades to zero
-            # at 15+ drafted cards so the network can skip freely later.
+            # Pick bonus: mild bias toward taking a card over skipping
+            # for the very first few picks (starter deck genuinely wants
+            # almost any card).  Fades to zero by 6 drafted cards so the
+            # network can skip freely once the deck has a core.
+            # V21: moderate pick_bonus through mid-game (0.08/10).
+            # V20's 0.06/6 vanished too early — agent needs cards through
+            # ~10 drafted.  Still well below V19's 0.15/15 that blocked skip.
             n_drafted = len(deck_card_ids)  # base cards already filtered out
-            pick_bonus = max(0.0, 0.15 * (1.0 - n_drafted / 15.0))
+            pick_bonus = max(0.0, 0.08 * (1.0 - n_drafted / 10.0))
             if pick_bonus > 0 and len(scores_list) >= 2:
                 skip_idx = len(scores_list) - 1
                 best_card_idx = max(range(skip_idx), key=lambda i: scores_list[i])
